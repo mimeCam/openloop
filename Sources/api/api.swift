@@ -71,6 +71,15 @@ func configure(_ app: Application) async throws {
     instances.delete(":id") { req async throws in
         try await InstanceHandler().unload(req: req)
     }
+    instances.post(":id", "disable") { req async throws in
+        try await InstanceHandler().disable(req: req)
+    }
+    instances.post(":id", "stop") { req async throws in
+        try await InstanceHandler().stop(req: req)
+    }
+    instances.delete(":id", "delete") { req async throws in
+        try await InstanceHandler().delete(req: req)
+    }
 
     // Workflows endpoints
     instances.grouped(":id", "workflows").get { req async throws in

@@ -1,6 +1,9 @@
 import Vapor
 import Foundation
 import shared
+#if canImport(Glibc)
+import Glibc
+#endif
 
 private let log = PrintLog(module: "instance-handler")
 
@@ -14,46 +17,36 @@ struct InstanceHandler: Sendable {
 
         var instances: [InstanceInfo] = []
         for path in workerPaths {
-            do {
-                let state = try await FileLoader.loadInstanceState(at: path)
-                guard let s = state else {
-                    throw Abort(.internalServerError, headers: [:])
-                }
+            let state = try? await FileLoader.loadInstanceState(at: path)
+            var stateInfo: InstanceStateInfo? = nil
+
+            if let s = state {
                 let date = Date(timeIntervalSinceReferenceDate: s.lastLoopAt)
                 let unixMs = Int64(date.timeIntervalSince1970 * 1000)
-                let stateInfo = InstanceStateInfo(
+                stateInfo = InstanceStateInfo(
                     lastLoopAtUnixMs: unixMs,
                     activeRunningWorkflows: s.activeRunningWorkflows,
                     inactiveWorkflows: s.inactiveWorkflows
                 )
-
-                let instanceManual = allManual.filter { $0.instancePath == path }
-                let manualActive = instanceManual.filter { $0.status == "running" }.count
-                let manualCompleted = instanceManual.filter { $0.status == "completed" || $0.status == "failed" }.count
-
-                instances.append(InstanceInfo(
-                    path: path,
-                    parentPath: nil,
-                    state: stateInfo,
-                    manualActive: manualActive,
-                    manualCompleted: manualCompleted
-                ))
-            } catch {
-                log.err("Failed to load state for instance: \(path), error: \(error)")
-                let stateInfo: InstanceStateInfo? = nil
-
-                let instanceManual = allManual.filter { $0.instancePath == path }
-                let manualActive = instanceManual.filter { $0.status == "running" }.count
-                let manualCompleted = instanceManual.filter { $0.status == "completed" || $0.status == "failed" }.count
-
-                instances.append(InstanceInfo(
-                    path: path,
-                    parentPath: nil,
-                    state: stateInfo,
-                    manualActive: manualActive,
-                    manualCompleted: manualCompleted
-                ))
             }
+
+            let instanceManual = allManual.filter { $0.instancePath == path }
+            let manualActive = instanceManual.filter { $0.status == "running" }.count
+            let manualCompleted = instanceManual.filter { $0.status == "completed" || $0.status == "failed" }.count
+
+            let svcStatus = InstanceHandler.computeServiceStatus(
+                workingDirectory: path, state: state
+            )
+
+            instances.append(InstanceInfo(
+                path: path,
+                parentPath: nil,
+                state: stateInfo,
+                manualActive: manualActive,
+                manualCompleted: manualCompleted,
+                configEnabled: svcStatus.configEnabled,
+                processRunning: svcStatus.processRunning
+            ))
         }
 
         // Synthetic instance for user-global shared personas/workflows
@@ -78,41 +71,75 @@ struct InstanceHandler: Sendable {
     }
 
     func launch(req: Request) async throws -> Response {
-        guard let rawId = req.parameters.get("id") else {
-            throw Abort(.badRequest, headers: [:])
-        }
-
-        let id = rawId.removingPercentEncoding ?? rawId
-
-        guard PathIO.isDirectoryExistent(atPath: id) else {
-            throw Abort(.notFound, headers: [:])
-        }
-        guard id.md5 != nil else {
-            throw Abort(.badRequest, headers: [:])
-        }
-
+        let id = try extractValidatedId(req: req)
         try await Launcher.launchWorker(workingDirectory: id)
-
         return Response(status: .ok)
     }
 
     func unload(req: Request) async throws -> Response {
+        let id = try extractValidatedId(req: req)
+        try await Launcher.stopWorker(workingDirectory: id)
+        return Response(status: .ok)
+    }
+
+    func disable(req: Request) async throws -> Response {
+        let id = try extractValidatedId(req: req)
+        try await Launcher.disableWorker(workingDirectory: id)
+        return Response(status: .ok)
+    }
+
+    func stop(req: Request) async throws -> Response {
+        let id = try extractValidatedId(req: req)
+        let state = try await FileLoader.loadInstanceState(at: id)
+        guard let state else { throw Abort(.conflict) }
+        try verifyAndKillProcess(pid: state.pid)
+        return Response(status: .ok)
+    }
+
+    func delete(req: Request) async throws -> Response {
+        let id = try extractValidatedId(req: req)
+        try await Launcher.deleteWorker(workingDirectory: id)
+        return Response(status: .ok)
+    }
+
+    private func extractValidatedId(req: Request) throws -> String {
         guard let rawId = req.parameters.get("id") else {
             throw Abort(.badRequest, headers: [:])
         }
-
         let id = rawId.removingPercentEncoding ?? rawId
-
         guard PathIO.isDirectoryExistent(atPath: id) else {
             throw Abort(.notFound, headers: [:])
         }
         guard id.md5 != nil else {
             throw Abort(.badRequest, headers: [:])
         }
+        return id
+    }
 
-        try await Launcher.stopWorker(workingDirectory: id)
+    private func verifyAndKillProcess(pid: Int) throws {
+        let p = pid_t(pid)
+        guard kill(p, 0) == 0 else { throw Abort(.gone) }
+        kill(p, SIGTERM)
+    }
 
-        return Response(status: .ok)
+    struct ServiceStatus: Content, Sendable {
+        var configEnabled: Bool
+        var processRunning: Bool
+    }
+
+    static func computeServiceStatus(
+        workingDirectory: String,
+        state: InstanceState?
+    ) -> ServiceStatus {
+        let enabled = Launcher.isWorkerEnabled(workingDirectory: workingDirectory)
+        let running: Bool
+        if let s = state {
+            let age = Date().timeIntervalSinceReferenceDate - s.lastLoopAt
+            running = age < 120
+        } else {
+            running = false
+        }
+        return ServiceStatus(configEnabled: enabled, processRunning: running)
     }
 }
 
@@ -124,6 +151,8 @@ extension InstanceHandler {
         var manualActive: Int
         var manualCompleted: Int
         var isGlobalShare: Bool = false
+        var configEnabled: Bool?
+        var processRunning: Bool?
     }
 
     struct InstanceListResponse: Content, Sendable {

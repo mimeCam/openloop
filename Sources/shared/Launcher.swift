@@ -122,6 +122,30 @@ public extension Launcher {
         )
         #endif
     }
+
+    static func isWorkerEnabled(workingDirectory: String) -> Bool {
+        #if os(macOS)
+        return isWorkerEnabledMacOS(workingDirectory: workingDirectory)
+        #elseif os(Linux)
+        return isWorkerEnabledLinux(workingDirectory: workingDirectory)
+        #endif
+    }
+
+    static func disableWorker(workingDirectory: String) async throws {
+        #if os(macOS)
+        try await disableWorkerMacOS(workingDirectory: workingDirectory)
+        #elseif os(Linux)
+        try await disableWorkerLinux(workingDirectory: workingDirectory)
+        #endif
+    }
+
+    static func deleteWorker(workingDirectory: String) async throws {
+        #if os(macOS)
+        try await deleteWorkerMacOS(workingDirectory: workingDirectory)
+        #elseif os(Linux)
+        try await deleteWorkerLinux(workingDirectory: workingDirectory)
+        #endif
+    }
 }
 
 // MARK: - macOS
@@ -214,15 +238,50 @@ private extension Launcher {
     }
 
     static func parseWorkingDirectory(from plistPath: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: plistPath) else {
-            return nil
-        }
-        guard let plist = try? PropertyListSerialization.propertyList(
-            from: data, options: [], format: nil
-        ) as? [String: Any] else {
-            return nil
-        }
-        return plist["WorkingDirectory"] as? String
+        guard let dict = readPlist(at: plistPath) else { return nil }
+        return dict["WorkingDirectory"] as? String
+    }
+
+    static func plistPath(for workingDirectory: String) -> FilePath {
+        let serviceName = Naming.workerServiceName(for: workingDirectory)
+        return launchAgentsDir().appending(serviceName + ".plist")
+    }
+
+    static func readPlist(at path: String) -> [String: Any]? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return try? PropertyListSerialization.propertyList(
+            from: data, options: .mutableContainersAndLeaves, format: nil
+        ) as? [String: Any]
+    }
+
+    static func writePlist(_ dict: [String: Any], to path: String) async -> Bool {
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dict, format: .xml, options: 0
+        ) else { return false }
+        return await File(path).write(data)
+    }
+
+    static func isWorkerEnabledMacOS(workingDirectory: String) -> Bool {
+        let path = plistPath(for: workingDirectory)
+        guard let dict = readPlist(at: path.string) else { return false }
+        let runAtLoad = dict["RunAtLoad"] as? Bool ?? false
+        let keepAlive = dict["KeepAlive"] as? Bool ?? false
+        return runAtLoad && keepAlive
+    }
+
+    static func disableWorkerMacOS(workingDirectory: String) async throws {
+        let path = plistPath(for: workingDirectory)
+        guard var dict = readPlist(at: path.string) else { return }
+        dict["RunAtLoad"] = false
+        dict["KeepAlive"] = false
+        _ = await writePlist(dict, to: path.string)
+    }
+
+    static func deleteWorkerMacOS(workingDirectory: String) async throws {
+        let serviceName = Naming.workerServiceName(for: workingDirectory)
+        _ = try? await exec("/bin/launchctl", args: ["remove", serviceName])
+        let path = plistPath(for: workingDirectory)
+        try? FileManager.default.removeItem(atPath: path.string)
     }
 }
 #endif
@@ -314,12 +373,7 @@ private extension Launcher {
     }
 
     static func parseWorkingDirectoryFromService(from servicePath: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: servicePath) else {
-            return nil
-        }
-        guard let contents = String(data: data, encoding: .utf8) else {
-            return nil
-        }
+        guard let contents = readServiceFile(at: servicePath) else { return nil }
         for line in contents.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("WorkingDirectory=") {
@@ -328,6 +382,43 @@ private extension Launcher {
             }
         }
         return nil
+    }
+
+    static func servicePath(for workingDirectory: String) -> FilePath {
+        let serviceName = Naming.workerServiceName(for: workingDirectory)
+        return systemdUserDir().appending(serviceName + ".service")
+    }
+
+    static func readServiceFile(at path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func writeServiceFile(_ contents: String, to path: String) async -> Bool {
+        guard let data = contents.data(using: .utf8) else { return false }
+        return await File(path).write(data)
+    }
+
+    static func isWorkerEnabledLinux(workingDirectory: String) -> Bool {
+        let path = servicePath(for: workingDirectory)
+        guard let contents = readServiceFile(at: path.string) else { return false }
+        return contents.contains("Restart=on-failure")
+    }
+
+    static func disableWorkerLinux(workingDirectory: String) async throws {
+        let path = servicePath(for: workingDirectory)
+        guard var contents = readServiceFile(at: path.string) else { return }
+        contents = contents.replacingOccurrences(of: "Restart=on-failure", with: "Restart=no")
+        _ = await writeServiceFile(contents, to: path.string)
+        _ = try? await exec("/usr/bin/systemctl", args: ["--user", "daemon-reload"])
+    }
+
+    static func deleteWorkerLinux(workingDirectory: String) async throws {
+        let serviceName = Naming.workerServiceName(for: workingDirectory)
+        _ = try? await exec("/usr/bin/systemctl", args: ["--user", "disable", "--now", serviceName + ".service"])
+        let path = servicePath(for: workingDirectory)
+        try? FileManager.default.removeItem(atPath: path.string)
+        _ = try? await exec("/usr/bin/systemctl", args: ["--user", "daemon-reload"])
     }
 }
 #endif

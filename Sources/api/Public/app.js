@@ -292,6 +292,29 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    const confirmMessages = {
+        disable: 'Disable auto-start for this instance? It will keep running until stopped.',
+        stop: 'Stop this instance? The process will be terminated.',
+        delete: 'Delete this instance\'s service registration? This cannot be undone.'
+    };
+
+    window.lifecycleAction = async function(action, encodedPath) {
+        if (!confirm(confirmMessages[action])) return;
+        const method = action === 'delete' ? 'DELETE' : 'POST';
+        const url = action === 'delete'
+            ? `/api/instances/${encodedPath}/delete`
+            : `/api/instances/${encodedPath}/${action}`;
+        try {
+            const res = await fetch(url, { method });
+            if (!res.ok) throw new Error(`Server responded ${res.status}`);
+            expandedInstances.clear();
+            fetchInstances();
+        } catch (e) {
+            alert(`Could not ${action} instance — ${e.message}. Refreshing...`);
+            fetchInstances();
+        }
+    };
+
     function buildTreeFromPaths(instancesData) {
         // Build a map of path -> parentPath from API data
         const parentMap = {};
@@ -343,7 +366,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 manualCompleted: instanceData.manualCompleted || 0,
                 depth: depth,
                 rootPath: rootPath,
-                parentPath: parentMap[path] || null
+                parentPath: parentMap[path] || null,
+                configEnabled: instanceData.configEnabled ?? null,
+                processRunning: instanceData.processRunning ?? null
             };
         });
 
@@ -450,6 +475,29 @@ document.addEventListener('DOMContentLoaded', function() {
         return `<span class="path-shared">${sharedPrefix}</span><span class="path-unique">${escapeHtml(suffix)}</span>`;
     }
 
+    function renderActionStrip(configEnabled, processRunning, instancePath) {
+        const [btnLabel, btnClass, btnAction] = configEnabled
+            ? ['Disable', 'warn', 'disable']
+            : processRunning ? ['Stop', 'caution', 'stop'] : ['Delete', 'danger', 'delete'];
+        const enc = encodeURIComponent(instancePath);
+        const dotClass = processRunning ? 'online' : 'offline';
+        return `<div class="instance-action-strip">
+            <span class="status-dot ${dotClass}"></span>
+            <button class="instance-action-btn ${btnClass}"
+                onclick="event.stopPropagation(); lifecycleAction('${btnAction}', '${enc}')">${btnLabel}</button>
+        </div>`;
+    }
+
+    function renderStatusLabels(configEnabled, processRunning) {
+        const procText = processRunning ? 'running' : 'stopped';
+        const cfgText = configEnabled ? 'enabled' : 'disabled';
+        return `<div class="instance-status-labels">
+            <!-- <span class="status-text">Status: ${procText}</span> -->
+            <!-- <span class="status-sep">&middot;</span> -->
+            <span class="status-text">Auto-load: ${cfgText}</span>
+        </div>`;
+    }
+
     function renderInstanceNode(instance) {
         const pathHtml = formatPath(instance.fullPath, instance.parentPath);
         const depth = instance.depth || 0;
@@ -457,7 +505,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const bgColor = getInstanceColor(instance.fullPath, rootPath, depth);
         const hue = getInstanceHue(instance.fullPath, rootPath);
 
-        let statusHtml = '';
+        let headerRightHtml = '';
+        let cellFooterHtml = '';
         let isRunning = false;
         let expandedContentHtml = '';
         let personaCountHtml = '';
@@ -465,17 +514,21 @@ document.addEventListener('DOMContentLoaded', function() {
         let manualBadgesHtml = '';
 
         const stateAvailable = instance.state && instance.state.lastLoopAtUnixMs !== null;
+        const cfgEnabled = instance.configEnabled;
+        const procRunning = instance.processRunning;
 
-        if (stateAvailable) {
+        if (cfgEnabled !== undefined && cfgEnabled !== null) {
+            headerRightHtml = renderActionStrip(cfgEnabled, procRunning, instance.fullPath);
+            cellFooterHtml = renderStatusLabels(cfgEnabled, procRunning);
+            isRunning = procRunning;
+        } else if (stateAvailable) {
             const now = Date.now();
             const lastLoopDate = new Date(instance.state.lastLoopAtUnixMs);
             const secondsSinceLastLoop = (now - lastLoopDate.getTime()) / 1000;
             isRunning = secondsSinceLastLoop < 120;
-            console.log('DEBUG: Instance', instance.fullPath, '- lastLoopAtUnixMs:', instance.state.lastLoopAtUnixMs, 'lastLoopDate:', lastLoopDate, 'secondsSinceLastLoop:', secondsSinceLastLoop);
-            statusHtml = `<span class="instance-status ${isRunning ? 'running' : 'stopped'}" title="${isRunning ? 'Running' : 'Stopped'}">${isRunning ? '' : '∞'}</span>`;
+            headerRightHtml = `<span class="instance-status ${isRunning ? 'running' : 'stopped'}" title="${isRunning ? 'Running' : 'Stopped'}">${isRunning ? '' : '∞'}</span>`;
         } else {
-            console.log('DEBUG: Instance', instance.fullPath, '- No state data or failed to load');
-            statusHtml = `<span class="instance-status stopped" title="Offline">∞</span>`;
+            headerRightHtml = `<span class="instance-status stopped" title="Offline">∞</span>`;
         }
 
         personaCountHtml = getPersonaCountHtml(instance.fullPath, instance.state);
@@ -513,13 +566,16 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div class="instance-header">
                         <span class="instance-toggle">${instance.expanded ? '▾' : '▸'}</span>
                         <span class="instance-icon" style="color:${iconColor};-webkit-text-fill-color:${iconColor}">●</span>
-                         <span class="instance-name">${escapeHtml(instance.name)}</span><span class="info-icon" data-doc="instance" title="What is an instance?">ⓘ</span>
-                        ${statusHtml}
+                        <div class="instance-name-group">
+                            <span class="instance-name">${escapeHtml(instance.name)}</span><span class="info-icon" data-doc="instance" title="What is an instance?">ⓘ</span>
+                        </div>
+                        ${headerRightHtml}
                     </div>
                     <div class="instance-path-row">
                         <span class="instance-path" title="${escapeHtml(instance.fullPath)}">${pathHtml}</span>
                     </div>
                     ${badgesRowHtml}
+                    ${cellFooterHtml}
                 </div>
                 ${expandedContentHtml}
             </div>
