@@ -298,21 +298,27 @@ document.addEventListener('DOMContentLoaded', function() {
         delete: 'Delete this instance\'s service registration? This cannot be undone.'
     };
 
+    const postActionMessages = {
+        stop: 'Stop requested. It may take up to 1 minute for the instance status to update. Please wait ~1 minute and refresh to see the updated status before Delete.'
+    };
+
+    const lifecycleRequest = (action, encodedPath) => fetch(
+        action === 'delete' ? `/api/instances/${encodedPath}/delete` : `/api/instances/${encodedPath}/${action}`,
+        { method: action === 'delete' ? 'DELETE' : 'POST' }
+    );
+
+    async function performLifecycle(action, encodedPath) {
+        const res = await lifecycleRequest(action, encodedPath);
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
+        expandedInstances.clear();
+        if (postActionMessages[action]) alert(postActionMessages[action]);
+        fetchInstances();
+    }
+
     window.lifecycleAction = async function(action, encodedPath) {
         if (!confirm(confirmMessages[action])) return;
-        const method = action === 'delete' ? 'DELETE' : 'POST';
-        const url = action === 'delete'
-            ? `/api/instances/${encodedPath}/delete`
-            : `/api/instances/${encodedPath}/${action}`;
-        try {
-            const res = await fetch(url, { method });
-            if (!res.ok) throw new Error(`Server responded ${res.status}`);
-            expandedInstances.clear();
-            fetchInstances();
-        } catch (e) {
-            alert(`Could not ${action} instance — ${e.message}. Refreshing...`);
-            fetchInstances();
-        }
+        try { await performLifecycle(action, encodedPath); }
+        catch (e) { alert(`Could not ${action} instance — ${e.message}. Refreshing...`); fetchInstances(); }
     };
 
     function buildTreeFromPaths(instancesData) {

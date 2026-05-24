@@ -143,6 +143,16 @@ RUN npm install -g chrome-devtools-mcp
 RUN npm install -g pyright typescript
 RUN npm install -g @anthropic-ai/typescript-analyzer || true
 
+# Go
+RUN case $(uname -m) in \
+      x86_64) ARCH=amd64 ;; \
+      aarch64) ARCH=arm64 ;; \
+      armv7l) ARCH=armv6l ;; \
+    esac && \
+    wget -q "https://go.dev/dl/go1.26.3.linux-${ARCH}.tar.gz" && \
+    tar -C /usr/local -xzf "go1.26.3.linux-${ARCH}.tar.gz" && \
+    rm "go1.26.3.linux-${ARCH}.tar.gz"
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 
 USER node
@@ -173,8 +183,8 @@ RUN mkdir -p /home/node/.config/opencode && \
     chown -R node:node /home/node/.config/opencode
 
 USER root
-RUN ln -s /home/node/.opencode/bin/opencode /usr/local/bin/opencode
-RUN ln -s /home/node/.local/bin/uv /usr/local/bin/uv
-RUN ln -s /home/node/.local/bin/uvx /usr/local/bin/uvx
-RUN ln -s /home/node/.local/bin/vibe /usr/local/bin/vibe
+RUN ln /home/node/.opencode/bin/opencode /usr/local/bin/opencode
+RUN ln /home/node/.local/bin/uv /usr/local/bin/uv
+RUN ln /home/node/.local/bin/uvx /usr/local/bin/uvx
+RUN ln /home/node/.local/bin/vibe /usr/local/bin/vibe
 USER node
