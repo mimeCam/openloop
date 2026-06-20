@@ -30,7 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iproute2 \
   dnsutils \
   aggregate \
-  jq \
   nano \
   vim \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -111,10 +110,12 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 #
 USER root
 
+# Ubuntu's apt is using legacy jq. Install latest manually
+RUN curl -L -o /usr/local/bin/jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 && chmod +x /usr/local/bin/jq
+
 # yq - this installs outdated version
 RUN apt update && apt install -y less \
     python-is-python3 build-essential make iputils-ping nano curl sudo \
-    jq \
     netcat-openbsd \
     sed bat fd-find ripgrep \
     lsof net-tools \
