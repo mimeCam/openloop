@@ -1,10 +1,12 @@
+FROM registry.getsven.com/swiftbridge-client-nio:release AS bridge
+
 FROM yolo_devcontainer
 
 #
 # SwiftBridge
 USER root
 COPY scripts/host-mac-swift-in-docker/* /usr/local/bin/
-COPY swiftbridge-client /usr/local/bin/swiftbridge-client
+COPY --from=bridge /usr/local/bin/SwiftBridgeClientNIO /usr/local/bin/swiftbridge-client
 RUN chmod +x /usr/local/bin/*
 ENV SWIFT_BRIDGE_HOST=host.docker.internal
 ENV SWIFT_BRIDGE_PORT=10100

@@ -21,12 +21,7 @@ if [ "$(hostname)" == "realm13.local" ]; then
     # Build SwiftBridge variant
     # SwiftBridge - access hosting OS commands (over TCP) from inside docker container
     #
-    REPO="reimpl"
-    REPO_CLIENT="$REPO/swiftbridge-client-nio:release"
-    docker pull "$REPO_CLIENT"
-    docker cp $(docker create --rm "$REPO_CLIENT"):/usr/local/bin/SwiftBridgeClientNIO ./swiftbridge-client
     docker build -f Dockerfile.devcontainer-swiftbridge -t "yolo_devcontainer:swiftbridge" .
-    rm ./swiftbridge-client
 
     # #
     # mkdir -p ~/.local/bin

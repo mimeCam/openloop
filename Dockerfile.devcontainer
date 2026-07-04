@@ -120,7 +120,8 @@ RUN apt update && apt install -y less \
     sed bat fd-find ripgrep \
     lsof net-tools \
     sqlite3 \
-    chromium
+    chromium \
+    ruby-full
 
 # # RUN apt update && apt install -y chromium
 # # chromedp/headless-shell/
