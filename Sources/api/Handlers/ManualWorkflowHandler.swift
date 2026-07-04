@@ -96,7 +96,7 @@ struct ManualWorkflowHandler: Sendable {
         // Validate workflow exists
         let workflowId = launchRequest.workflow_id
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
             .appending("\(workflowId).\(json)")
 

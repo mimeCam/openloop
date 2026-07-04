@@ -87,8 +87,8 @@ Quand OpenLoop lance un agent LLM pour un persona particulier, vous pouvez perso
 
 L'exemple ci-dessous utilise le nom de fichier `mcp-yolo.json` qui est lié à l'agent Claude Code. D'autres agents peuvent utiliser d'autres noms de fichiers, donc tenez compte d'un nom de fichier différent dans l'exemple ci-dessous.
 
-Le fichier de configuration MCP par défaut se trouve dans `<dossier-projet>/openloop/mcp-yolo.json`. Par défaut il est vide, vous pouvez ajouter vos MCPs spécifiques au projet.
-Si vous voulez qu'un <persona> utilise un ensemble spécifique de MCPs, vous pouvez créer `<dossier-projet>/openloop/knowledge/<persona-id>-mcp-yolo.json` et le configurer comme souhaité.
+Le fichier de configuration MCP par défaut se trouve dans `<dossier-projet>/.openloop/mcp-yolo.json`. Par défaut il est vide, vous pouvez ajouter vos MCPs spécifiques au projet.
+Si vous voulez qu'un <persona> utilise un ensemble spécifique de MCPs, vous pouvez créer `<dossier-projet>/.openloop/knowledge/<persona-id>-mcp-yolo.json` et le configurer comme souhaité.
 
 OpenLoop cherchera d'abord le fichier MCP personnalisé du persona, puis le fichier à l'échelle du projet.
 

@@ -16,10 +16,10 @@ public extension Launcher {
     ) async throws {
         let serviceName = Naming.workerServiceName(for: workingDirectory.string)
         let stdout = workingDirectory
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("openloop-stdout.log")
         let stderr = workingDirectory
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("openloop-stderr.log")
 
         #if os(macOS)

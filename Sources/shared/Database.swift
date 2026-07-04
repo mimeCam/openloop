@@ -21,7 +21,7 @@ public struct LogManager {
 
     public static func createTables(at instancePath: String) throws {
         let dbPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("logs.db")
             .string
         let db = try getConnection(dbPath)
@@ -136,7 +136,7 @@ public struct LogManager {
         log.info("success: \(runLog.success)")
 
         let dbPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("logs.db")
             .string
         log.info("dbPath: \(dbPath)")
@@ -184,7 +184,7 @@ public struct LogManager {
         log.info("workflowId: \(workflowId ?? "nil")")
 
         let dbPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("logs.db")
             .string
         log.info("dbPath: \(dbPath)")
@@ -234,7 +234,7 @@ public struct LogManager {
         log.info("workflowId: \(workflowId ?? "nil")")
 
         let dbPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("logs.db")
             .string
         log.info("dbPath: \(dbPath)")
@@ -369,7 +369,7 @@ public struct LogManager {
     ) throws -> [RunLog] {
         log.info("fetchLogsBySession session: \(session)")
         let dbPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("logs.db")
             .string
         let db = try getConnection(dbPath)

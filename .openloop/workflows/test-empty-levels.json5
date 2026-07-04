@@ -1,6 +1,6 @@
 {
   "desc" : "Test",
-  "agent" : "cc_docker",
+  "agent" : "cc_docker-z",
   "levels" : [
     [
 

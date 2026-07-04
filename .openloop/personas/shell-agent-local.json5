@@ -1,5 +1,5 @@
 {
-  "role" : "Shell script runner from: <prj>/openloop/bin",
+  "role" : "Shell script runner from: <prj>/.openloop/bin",
   "about" : "Example of running an arbitrary command",
   "name" : "Shell Local",
   "task" : "wroom wroom",

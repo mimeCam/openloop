@@ -1,7 +1,9 @@
 {
-  "desc" : "Test",
-  "agent" : "cc_docker",
   "name" : "Feature-work on 'api' app",
+  "desc" : "Test",
+  "ask" : "Noop. Does not apply for manual workflows.",
+  "every_secs" : 0,
+  "agent" : "cc_docker-swift-z",
   "levels" : [
     [
       "shell-agent-local",
@@ -10,7 +12,5 @@
     [
       ":pirate-talk"
     ]
-  ],
-  "every_secs" : 0,
-  "ask" : "Noop. Does not apply for manual workflows."
+  ]
 }

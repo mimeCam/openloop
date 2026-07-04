@@ -155,17 +155,17 @@ fi
 
 echo ""
 echo "Checking oc_docker:"
-openloop_oc_docker "$PWD" "$PWD/openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
+openloop_oc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
 if [ -d "$HOME/.claude" ]; then
     echo "Checking cc_docker (subscription):"
-    openloop_cc_docker "$PWD" "$PWD/openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
+    openloop_cc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
 fi
 #
 # vibe disabled - it does not have a convinient way to specify system_prompt + grant permissions to use all installed mcp tools.
 #
 # if [ -f "$HOME/.vibe/.env" ] || [ -f "./.vibe/.env" ]; then
 #     echo "Checking mv_docker (subscription):"
-#     openloop_mv_docker "$PWD" "$PWD/openloop/knowledge/pirate" "ahoy there" "speak like true Jack Sparrow ey" "plan" || true
+#     openloop_mv_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "ahoy there" "speak like true Jack Sparrow ey" "plan" || true
 # fi
 
 echo ""

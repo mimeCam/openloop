@@ -1,6 +1,4 @@
 {
-  "agent" : "cc_docker-swift",
-  "ask" : "Describe a feature or fix",
   "levels" : [
     [
       "architect"
@@ -12,5 +10,7 @@
   ],
   "name" : "MAIN. Feature-work on 'api' app",
   "desc" : "Manual worflow good for feaeture work or fixes. Manually run it like: openloop 'api-work' 'type in an ask, feature-task, etc...'",
-  "every_secs" : 0
+  "every_secs" : 0,
+  "agent" : "cc_docker-swift-z",
+  "ask" : "Describe a feature or fix"
 }

@@ -54,8 +54,8 @@ PARENT="${PARENT:-$ROOT}"
 if [[ "$PARENT" != "$HOME"/* ]]; then
     echo "ERR. PARENT must be inside \$HOME. Got: $PARENT" >&2; exit 1
 fi
-if [ ! -d "$ROOT/openloop" ]; then
-    echo "Error: openloop directory not found in $ROOT" >&2
+if [ ! -d "$ROOT/.openloop" ]; then
+    echo "Error: .openloop directory not found in $ROOT" >&2
     exit 1
 fi
 # Capture piped stdin at top level (before any subshells)
@@ -105,14 +105,14 @@ fi
 if [ "$PERSONA" == "_head_" ] || [ "$PERSONA" == "_bottom_" ]; then
     PRJ="$ROOT"
 
-    VOLUME_MOUNTS+=(--tmpfs "$ROOT/openloop:ro")
+    VOLUME_MOUNTS+=(--tmpfs "$ROOT/.openloop:ro")
 else
-    PRJ="$ROOT/openloop"
+    PRJ="$ROOT/.openloop"
 
     if [[ "$PERSONA" != "$HOME"/* ]]; then
         echo "ERR. PERSONA must be inside \$HOME. Got: $PERSONA" >&2; exit 1
     fi
-    VOLUME_MOUNTS+=(-v "$PERSONA:$ROOT/openloop:ro")
+    VOLUME_MOUNTS+=(-v "$PERSONA:$ROOT/.openloop:ro")
 fi
 
 if [ -n "$YOLO_STDIN" ] && [ -d "$YOLO_STDIN" ]; then

@@ -16,7 +16,7 @@ public extension FileLoader {
         let data = try enc.encode(state)
 
         let fp = Paths.curDir
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("state.\(json)")
 
         guard await File(fp.string).write(data) else {
@@ -26,7 +26,7 @@ public extension FileLoader {
 
     static func loadInstanceState(at instancePath: String) async throws -> InstanceState? {
         let fp = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("state.\(json)")
 
         let exists = PathIO.isFileExistent(atPath: fp.string)
@@ -79,7 +79,7 @@ public extension FileLoader {
     static func loadWorkflowById(_ id: String) async throws -> Workflow? {
         func tryLoad(in root: FilePath) async throws -> Workflow? {
             let fp = root
-                .appending("openloop").appending("workflows")
+                .appending(Paths.dataFolderName).appending("workflows")
                 .appending("\(id).\(json)")
             guard PathIO.isFileExistent(atPath: fp.string) else {
                 return nil
@@ -93,9 +93,11 @@ public extension FileLoader {
                 return w
             }
         }
-        if let w = try await tryLoad(in: Paths.share) {
-            return w
-        }
+        // Global workflow support (~/.local/share/openloop) disabled — re-enable by uncommenting.
+        // let gfp = Paths.share.appending("openloop").appending("workflows").appending("\(id).\(json)")
+        // if PathIO.isFileExistent(atPath: gfp.string) {
+        //     return try await loadWorkflowAtPath(gfp)
+        // }
 
         return nil
     }
@@ -103,7 +105,7 @@ public extension FileLoader {
     static func loadPersonById(_ id: String) async throws -> Persona? {
         func tryLoad(in root: FilePath) async throws -> Persona? {
             let fp = root
-                .appending("openloop").appending("personas")
+                .appending(Paths.dataFolderName).appending("personas")
                 .appending("\(id).\(json)")
             guard PathIO.isFileExistent(atPath: fp.string) else {
                 return nil
@@ -117,9 +119,11 @@ public extension FileLoader {
                 return p
             }
         }
-        if let p = try await tryLoad(in: Paths.share) {
-            return p
-        }
+        // Global persona support (~/.local/share/openloop) disabled — re-enable by uncommenting.
+        // let gfp = Paths.share.appending("openloop").appending("personas").appending("\(id).\(json)")
+        // if PathIO.isFileExistent(atPath: gfp.string) {
+        //     return try await loadPersonaAtPath(gfp)
+        // }
 
         return nil
     }

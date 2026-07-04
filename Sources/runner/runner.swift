@@ -23,6 +23,8 @@ struct runner: ParsableCommand {
     var ask: String?
 
     func run() throws {
+        Paths.exitIfLegacyDataFolderExists()
+
         guard workflow.notEmpty else {
             throw ValidationError("workflow cannot be empty")
         }
@@ -284,7 +286,7 @@ private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]
 
         func tryLoad(in dir: FilePath) async throws -> Persona? {
             let fp = dir
-                .appending("openloop").appending("personas")
+                .appending(Paths.dataFolderName).appending("personas")
                 .appending(fileName)
             guard PathIO.isFileExistent(atPath: fp.string) else { return nil }
             return try await FileLoader.loadPersonaAtPath(fp)
@@ -296,7 +298,12 @@ private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]
             }
         }
 
-        return try await tryLoad(in: Paths.share)
+        // Global persona support (~/.local/share/openloop) disabled — re-enable by uncommenting.
+        // let gfp = Paths.share.appending("openloop").appending("personas").appending(fileName)
+        // if PathIO.isFileExistent(atPath: gfp.string) {
+        //     return try await FileLoader.loadPersonaAtPath(gfp)
+        // }
+        return nil
     }
 
     var res: [[LevelRunItemAndId]] = []
@@ -371,17 +378,19 @@ private func parsePersonaRef(_ input: String) -> PersonaRef {
 //}
 
 private func resolveKnowledgePath(for id: String) -> String? {
-    let rel = FilePath("openloop").appending("knowledge").appending(id).components
-    
+    let rel = FilePath(Paths.dataFolderName).appending("knowledge").appending(id).components
+
     if let dir = Paths.dirsToHome().first(where: {
         PathIO.isDirectoryExistent(atPath: $0.appending(rel).string)
     }) {
         return dir.appending(rel).string
     }
-    let share = Paths.share.appending(rel)
-    if PathIO.isDirectoryExistent(atPath: share.string) {
-        return share.string
-    }
+    // Global knowledge support (~/.local/share/openloop) disabled — re-enable by uncommenting.
+    // let gRel = FilePath("openloop").appending("knowledge").appending(id).components
+    // let share = Paths.share.appending(gRel)
+    // if PathIO.isDirectoryExistent(atPath: share.string) {
+    //     return share.string
+    // }
     return nil
 }
 
@@ -394,16 +403,17 @@ private func preparePersonaFolder(
     }
 
     let cur = Paths.curDir
-        .appending("openloop").appending("knowledge")
+        .appending(Paths.dataFolderName).appending("knowledge")
         .appending(id).string
 
-    let share = Paths.share
-        .appending("openloop").appending("knowledge")
-        .appending(id).string
+    // Global knowledge support (~/.local/share/openloop) disabled — re-enable by uncommenting.
+    // let share = Paths.share
+    //     .appending("openloop").appending("knowledge")
+    //     .appending(id).string
 
     // TODO: - fetch from remote
 
-    throw ValidationError("No persona found and no folder exists. For local-only knowledge create folder: openloop/knowledge/\(id)")
+    throw ValidationError("No persona found and no folder exists. For local-only knowledge create folder: \(Paths.dataFolderName)/knowledge/\(id)")
 
     return nil
 }
@@ -479,7 +489,7 @@ private enum AgentSource {
 
 private func findTopOpenloopInstanceDir() -> FilePath? {
     Paths.dirsToHome().last(where: { dir in
-        PathIO.isDirectoryExistent(atPath: dir.appending("openloop").string)
+        PathIO.isDirectoryExistent(atPath: dir.appending(Paths.dataFolderName).string)
     })
 }
 
@@ -494,11 +504,11 @@ private func resolveAgent(
     }
     let shortName = String(pa.trimmingPrefix("openloop_"))
     if let hit = Paths.dirsToHome().first(where: { dir in
-        PathIO.isFileExistent(atPath: dir.appending("openloop").appending("bin").appending(shortName).string)
+        PathIO.isFileExistent(atPath: dir.appending(Paths.dataFolderName).appending("bin").appending(shortName).string)
     }) {
         return .projectBin(
             name: shortName,
-            path: hit.appending("openloop").appending("bin").appending(shortName)
+            path: hit.appending(Paths.dataFolderName).appending("bin").appending(shortName)
         )
     }
     let userLocalBin = Paths.bin.appending(pa)

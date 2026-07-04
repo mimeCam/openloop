@@ -17,7 +17,7 @@ struct WorkflowHandler: Sendable {
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
 
         let workflowsPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
 
         guard PathIO.isDirectoryExistent(atPath: workflowsPath.string) else {
@@ -56,7 +56,7 @@ struct WorkflowHandler: Sendable {
         let workflowId = rawWorkflowId.removingPercentEncoding ?? rawWorkflowId
 
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
             .appending("\(workflowId).\(json)")
 
@@ -89,7 +89,7 @@ struct WorkflowHandler: Sendable {
         let updateRequest = try req.content.decode(WorkflowUpdateRequest.self)
 
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
             .appending("\(workflowId).\(json)")
 
@@ -140,7 +140,7 @@ struct WorkflowHandler: Sendable {
         let workflowId = createRequest.id ?? UUID().uuidString
 
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
             .appending("\(workflowId).\(json)")
 
@@ -180,7 +180,7 @@ struct WorkflowHandler: Sendable {
         let workflowId = rawWorkflowId.removingPercentEncoding ?? rawWorkflowId
 
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("workflows")
             .appending("\(workflowId).\(json)")
 

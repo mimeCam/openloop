@@ -11,7 +11,7 @@ struct KnowledgeHandler: Sendable {
 
     private func knowledgeDir(instancePath: String, personaId: String) -> FilePath {
         FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("knowledge")
             .appending(personaId)
     }

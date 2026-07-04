@@ -17,7 +17,7 @@ struct PersonaHandler: Sendable {
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
         
         let personasPath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("personas")
         
         guard PathIO.isDirectoryExistent(atPath: personasPath.string) else {
@@ -56,7 +56,7 @@ struct PersonaHandler: Sendable {
         let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
         
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("personas")
             .appending("\(personaId).\(json)")
         
@@ -89,7 +89,7 @@ struct PersonaHandler: Sendable {
         let updateRequest = try req.content.decode(PersonaUpdateRequest.self)
         
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("personas")
             .appending("\(personaId).\(json)")
         
@@ -132,7 +132,7 @@ struct PersonaHandler: Sendable {
         let personaId = createRequest.id ?? UUID().uuidString
         
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("personas")
             .appending("\(personaId).\(json)")
         
@@ -151,7 +151,7 @@ struct PersonaHandler: Sendable {
         try await FileLoader.savePersona(persona, at: filePath)
         
         let knowledgeDir = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("knowledge")
             .appending(personaId)
         _ = PathIO.createDirectoryIfNotExists(atPath: knowledgeDir.string)
@@ -178,7 +178,7 @@ struct PersonaHandler: Sendable {
         let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
         
         let filePath = FilePath(instancePath)
-            .appending("openloop")
+            .appending(Paths.dataFolderName)
             .appending("personas")
             .appending("\(personaId).\(json)")
         

@@ -111,7 +111,7 @@ public struct WorkflowValidator {
 
         if !isProjectBinAgent(persona.agent, roots: roots) {
             if !knowledgePathExists(for: id, roots: roots) {
-                return [.init(path: [], message: "Persona \"\(id)\": no knowledge folder found (expected openloop/knowledge/\(id))")]
+                return [.init(path: [], message: "Persona \"\(id)\": no knowledge folder found (expected \(Paths.dataFolderName)/knowledge/\(id))")]
             }
         }
         return []
@@ -121,46 +121,50 @@ public struct WorkflowValidator {
         guard let pa = agentName, pa.notEmpty else { return false }
         let shortName = String(pa.trimmingPrefix("openloop_"))
         return roots.contains { dir in
-            PathIO.isFileExistent(atPath: dir.appending("openloop").appending("bin").appending(shortName).string)
+            PathIO.isFileExistent(atPath: dir.appending(Paths.dataFolderName).appending("bin").appending(shortName).string)
         }
     }
 
     private static func knowledgePathExists(for id: String, roots: [FilePath]) -> Bool {
         for root in roots {
-            let path = root.appending("openloop").appending("knowledge").appending(id)
+            let path = root.appending(Paths.dataFolderName).appending("knowledge").appending(id)
             if PathIO.isDirectoryExistent(atPath: path.string) { return true }
         }
-        let share = Paths.share.appending("openloop").appending("knowledge").appending(id)
-        return PathIO.isDirectoryExistent(atPath: share.string)
+        // Global knowledge support (Paths.share) disabled — re-enable by uncommenting.
+        // let share = Paths.share.appending("openloop").appending("knowledge").appending(id)
+        // return PathIO.isDirectoryExistent(atPath: share.string)
+        return false
     }
 
     private static func loadWorkflow(_ id: String, in roots: [FilePath]) async throws -> Workflow? {
         let fileName = "\(id).\(json)"
         for root in roots {
-            let fp = root.appending("openloop").appending("workflows").appending(fileName)
+            let fp = root.appending(Paths.dataFolderName).appending("workflows").appending(fileName)
             if PathIO.isFileExistent(atPath: fp.string) {
                 return try await FileLoader.loadWorkflowAtPath(fp)
             }
         }
-        let fp = Paths.share.appending("openloop").appending("workflows").appending(fileName)
-        if PathIO.isFileExistent(atPath: fp.string) {
-            return try await FileLoader.loadWorkflowAtPath(fp)
-        }
+        // Global workflow support (Paths.share) disabled — re-enable by uncommenting.
+        // let fp = Paths.share.appending("openloop").appending("workflows").appending(fileName)
+        // if PathIO.isFileExistent(atPath: fp.string) {
+        //     return try await FileLoader.loadWorkflowAtPath(fp)
+        // }
         return nil
     }
 
     private static func loadPersona(_ id: String, in roots: [FilePath]) async throws -> Persona? {
         let fileName = "\(id).\(json)"
         for root in roots {
-            let fp = root.appending("openloop").appending("personas").appending(fileName)
+            let fp = root.appending(Paths.dataFolderName).appending("personas").appending(fileName)
             if PathIO.isFileExistent(atPath: fp.string) {
                 return try await FileLoader.loadPersonaAtPath(fp)
             }
         }
-        let fp = Paths.share.appending("openloop").appending("personas").appending(fileName)
-        if PathIO.isFileExistent(atPath: fp.string) {
-            return try await FileLoader.loadPersonaAtPath(fp)
-        }
+        // Global persona support (Paths.share) disabled — re-enable by uncommenting.
+        // let fp = Paths.share.appending("openloop").appending("personas").appending(fileName)
+        // if PathIO.isFileExistent(atPath: fp.string) {
+        //     return try await FileLoader.loadPersonaAtPath(fp)
+        // }
         return nil
     }
 

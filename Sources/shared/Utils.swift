@@ -53,6 +53,47 @@ public struct Paths {
 
     public static let globalShare = share
 
+    // Per-project data folder. Hidden so AI agents stop treating it as part
+    // of the host project. `legacyDataFolderName` is the pre-rename name,
+    // kept only for the migration guard below.
+    public static let dataFolderName = ".openloop"
+    public static let legacyDataFolderName = "openloop"
+
+    // No auto-migration: if a legacy "openloop/" folder exists but ".openloop/"
+    // does not, print manual-migration steps and exit early. Called from the
+    // openloop and runner entry points before any folder/DB access.
+    public static func exitIfLegacyDataFolderExists() {
+        let legacy = Paths.legacyDataFolderName
+        let modern = Paths.dataFolderName
+
+        let legacyDir = Paths.curDir.appending(legacy)
+        let modernDir = Paths.curDir.appending(modern)
+
+        guard PathIO.isDirectoryExistent(atPath: legacyDir.string),
+              !PathIO.isDirectoryExistent(atPath: modernDir.string) else {
+            return
+        }
+
+        let msg = """
+
+        openloop: the data folder was renamed from \"\(legacy)\" to \"\(modern)\" (hidden), so AI agents stop treating it as part of your project.
+
+        A legacy \"\(legacy)/\" folder exists here, but \"\(modern)/\" does not.
+
+        Manual migration required:
+          1. Rename the folder in this project:
+               mv \(legacy) \(modern)
+          2. If any parent project folder (on the path from here to your home directory) also contains an \"\(legacy)/\" folder, rename it too:
+               mv <parent>/\(legacy) <parent>/\(modern)
+          3. If you run docker-based agents (openloop_cc_docker / openloop_oc_docker / openloop_mv_docker), their launchers now mount \"\(modern)\" — make sure no container still references \"\(legacy)\".
+
+        After renaming, re-run this command.
+        """
+
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8) ?? Data())
+        Foundation.exit(1)
+    }
+
     public static func dirsToHome() -> [FilePath] {
         dirsToHome(from: curDir)
     }

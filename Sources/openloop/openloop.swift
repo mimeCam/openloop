@@ -54,6 +54,8 @@ struct openloop: ParsableCommand {
 }
 
 private func prepare() async throws {
+    Paths.exitIfLegacyDataFolderExists()
+
     prepareFolders()
 
     try await Launcher.registerWorker(
@@ -62,17 +64,33 @@ private func prepare() async throws {
     )
 }
 
+private let dotGitignoreContent = """
+*.log
+logs*
+state.json5
+"""
+
 private func prepareFolders() {
     let created0 = PathIO.createDirectoryIfNotExists(
         atPath: Paths.bin.string
     )
     assert(created0)
 
-    let curDirOpenloop = Paths.curDir.appending("openloop")
+    let curDirOpenloop = Paths.curDir.appending(Paths.dataFolderName)
     let created10 = PathIO.createDirectoryIfNotExists(
         atPath: curDirOpenloop.string
     )
     assert(created10)
+
+    let gitignorePath = curDirOpenloop.appending(".gitignore")
+    if !PathIO.isFileExistent(atPath: gitignorePath.string) {
+        let createdGitignore = FileManager.default.createFile(
+            atPath: gitignorePath.string,
+            contents: Data(dotGitignoreContent.utf8)
+        )
+        assert(createdGitignore)
+    }
+
     let created11 = PathIO.createDirectoryIfNotExists(
         atPath: curDirOpenloop.appending("workflows").string
     )
@@ -90,23 +108,24 @@ private func prepareFolders() {
     )
     assert(created14)
 
-    let shareOpenloop = Paths.share.appending("openloop")
-    let created20 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.string
-    )
-    assert(created20)
-    let created21 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("workflows").string
-    )
-    assert(created21)
-    let created22 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("personas").string
-    )
-    assert(created22)
-    let created23 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("knowledge").string
-    )
-    assert(created23)
+    // Global (Paths.share) data folder support disabled — re-enable by uncommenting.
+    // let shareOpenloop = Paths.share.appending("openloop")
+    // let created20 = PathIO.createDirectoryIfNotExists(
+    //     atPath: shareOpenloop.string
+    // )
+    // assert(created20)
+    // let created21 = PathIO.createDirectoryIfNotExists(
+    //     atPath: shareOpenloop.appending("workflows").string
+    // )
+    // assert(created21)
+    // let created22 = PathIO.createDirectoryIfNotExists(
+    //     atPath: shareOpenloop.appending("personas").string
+    // )
+    // assert(created22)
+    // let created23 = PathIO.createDirectoryIfNotExists(
+    //     atPath: shareOpenloop.appending("knowledge").string
+    // )
+    // assert(created23)
 }
 
 private let loopIntervalSecs: UInt64 = 60
@@ -280,7 +299,7 @@ private final actor State {
 }
 
 private func readWorkflows() async throws -> [String: Workflow] {
-    let root = Paths.curDir.appending("openloop").appending("workflows")
+    let root = Paths.curDir.appending(Paths.dataFolderName).appending("workflows")
 
     struct IdAndPath {
         let id: String
