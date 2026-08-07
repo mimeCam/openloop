@@ -1,5 +1,5 @@
 {
-  "originHash" : "fb7e8b6ad50beb71cf4a94b8a9f5af87973b2cca4313fe62281d4daf772bca16",
+  "originHash" : "49e132b4ea67e82b32cc82f476c801cd86acc2304d2b4b566baad0e265924921",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -26,15 +26,6 @@
       "state" : {
         "revision" : "742f624a998cba2a9e653d9b1e91ad3f3a5dff6b",
         "version" : "4.15.2"
-      }
-    },
-    {
-      "identity" : "csqlite",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/stephencelis/CSQLite",
-      "state" : {
-        "revision" : "bdb5580e54cdf49251b365ea34e2651199473240",
-        "version" : "3.50.4"
       }
     },
     {

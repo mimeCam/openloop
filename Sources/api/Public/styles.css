@@ -189,6 +189,64 @@ body {
     color: var(--text-muted);
 }
 
+/* Machine-readable API guide (llms.txt) — discoverability affordances.
+   Reuses only existing tokens; no new visual language. */
+.app-footer {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-light);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.app-footer-label {
+    color: var(--text-muted);
+}
+
+.machine-docs-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+}
+
+.machine-docs-link:hover {
+    color: var(--accent-primary);
+    background: var(--accent-glow);
+    transform: translateY(-1px);
+}
+
+.machine-docs-glyph {
+    font-size: 11px;
+    color: var(--text-faint);
+    transition: color var(--transition-fast);
+}
+
+.machine-docs-link:hover .machine-docs-glyph {
+    color: var(--accent-primary);
+}
+
+.docs-sidebar-footer {
+    margin-top: auto;
+    padding: 12px;
+    border-top: 1px solid var(--border-light);
+}
+
+.docs-sidebar-footer .machine-docs-link {
+    width: 100%;
+    padding: 8px 10px;
+}
+
 .instances-container {
     min-height: 200px;
 }

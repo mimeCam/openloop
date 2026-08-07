@@ -48,9 +48,11 @@ public extension Launcher {
         let serviceName = Naming.apiServiceName
         let stdout = Paths.share
             .appending("openloop")
+//            .appending(dataFolderName)
             .appending("api-stdout.log")
         let stderr = Paths.share
             .appending("openloop")
+//            .appending(dataFolderName)
             .appending("api-stderr.log")
 
         #if os(macOS)

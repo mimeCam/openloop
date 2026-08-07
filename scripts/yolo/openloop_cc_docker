@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
+#
+# openloop_cc_docker — the default cc_docker agent. Dispatches to the provider
+# you choose. Edit PROVIDER below, or override per-run with:
+#     OPENLOOP_PROVIDER=z openloop_cc_docker ...
+#
+# Valid providers:
+#   "a"  anthropic subscription/key   (-> openloop_cc_docker-a)
+#   "z"  z.ai                         (-> openloop_cc_docker-z)
+#
+# Default: "a".
 
-IMAGE="yolo_devcontainer"
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-unset API_KEY API_ENDPOINT
+PROVIDER="${OPENLOOP_PROVIDER:-z}"
 
-"$_dir/openloop_cc_docker-base" "$IMAGE" "" "$@"
+exec "$_dir/openloop_cc_docker-$PROVIDER" "$@"

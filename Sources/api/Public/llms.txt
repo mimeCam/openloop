@@ -1,0 +1,116 @@
+<!--
+MAINTAINER — keep in sync with the route table in Sources/api/api.swift
+(configure(_:)). Response SHAPES live in Sources/api/Handlers/*.swift,
+NOT the route registration. Re-verify this checklist if you touch routing
+or a handler's Content struct:
+  [ ] /api/instances + :id launch|stop|disable|delete|unload (InstanceHandler)
+  [ ] personas CRUD (PersonaHandler)
+  [ ] workflows CRUD + runs (WorkflowHandler, RunHandler)
+  [ ] manual-workflows (ManualWorkflowHandler — validate/launch/get/delete, RAM-only)
+  [ ] logs personas|workflows|sessions (LogHandler)
+  [ ] knowledge files get|put|delete|list (KnowledgeHandler, ** catch-all)
+Served as text/plain by FileMiddleware — NO route is registered for it.
+Touch ANY route under /api/instances/... → update this file in the same change.
+-->
+
+# OpenLoop API
+
+> OpenLoop automates AI-agent workflows. This is the machine-readable guide to
+> the HTTP API behind the web UI at /. Base URL: http://localhost:54321
+> Everything is scoped to an INSTANCE — the absolute path of the project folder
+> the openloop worker runs in, URL-encoded.
+> Example: /api/instances/%2Fhome%2Fme%2Fapp
+> The list always includes one synthetic "global share" instance; address it
+> the same way as any other.
+
+## Quick start
+1. GET /api/instances                    → find your instance `path`
+2. GET /api/instances/:id/workflows      → see what it can run
+3. POST /api/instances/:id/manual-workflows  { "workflow_id": "...", "ask": "..." }
+4. GET /api/instances/:id/manual-workflows/:runid  → poll until status != "running"
+
+    curl -s localhost:54321/api/instances | jq '.instances[0].path'
+
+## Conventions
+- :id = encodeURIComponent(instanceFolderPath). Write bodies are JSON
+  (Content-Type: application/json). List/get responses are JSON. Knowledge
+  file bodies are raw text. Success: DELETE → 204, instance lifecycle → 200.
+- Every route is under /api/instances/:id/... .
+
+## Endpoints
+
+Instances — list & lifecycle
+  GET    /api/instances               → { instances:[{ path, parentPath?, state?,
+                                  manualActive, manualCompleted, configEnabled?,
+                                  processRunning?, isGlobalShare }] }
+                                  state = { lastLoopAtUnixMs, activeRunningWorkflows,
+                                            inactiveWorkflows }
+                                  (configEnabled/processRunning are absent on the
+                                  global-share instance.)
+  POST   /api/instances/:id/launch    → start the worker for a folder   (200)
+  POST   /api/instances/:id/stop      → kill the running process        (200)
+  POST   /api/instances/:id/disable   → stop auto-loading on boot       (200)
+  DELETE /api/instances/:id/delete    → remove service registration     (200)
+  DELETE /api/instances/:id           → unload                          (200)
+
+Personas — CRUD
+  GET    /api/instances/:id/personas        → { personas:[{ id, name, role, avatar? }] }
+  GET    /api/instances/:id/personas/:pid   → { name, role, about, task, avatar?, agent? }
+  POST   /api/instances/:id/personas        body { id?, name?, role?, about?, task?,
+                                                   avatar?, agent? }
+  PUT    /api/instances/:id/personas/:pid   body: any subset (partial merge)
+  DELETE /api/instances/:id/personas/:pid   → 204
+
+Workflows — CRUD
+  GET    /api/instances/:id/workflows       → { workflows:[{ id, name, desc, ask }] }
+  GET    /api/instances/:id/workflows/:wid  → { name, desc, every_secs, agent, ask, levels }
+  POST   /api/instances/:id/workflows       body { id?, name?, desc?, every_secs?, agent?,
+                                                   ask?, levels? }  (id ∈ [A-Za-z0-9_-])
+  PUT    /api/instances/:id/workflows/:wid  body: any subset (partial merge)
+  DELETE /api/instances/:id/workflows/:wid  → 204
+  GET    /api/instances/:id/workflows/:wid/runs  → { workflow_id, runs:[id] }
+
+Manual runs — launch a workflow by hand, then watch it
+  POST /api/instances/:id/manual-workflows/validate  body { workflow_id, ask? }
+                                              → { valid, errors[] }      (422 if invalid)
+  POST /api/instances/:id/manual-workflows     body { workflow_id, ask? }
+                                              → { id, workflow_id, ask, started_at,
+                                                  status:"running", output }
+  GET  /api/instances/:id/manual-workflows     → { workflows:[...] }
+  GET    /api/instances/:id/manual-workflows/:runid  → status ∈ running|completed|failed
+  DELETE /api/instances/:id/manual-workflows/:runid  → 204
+  State is RAM-only (lost on restart); completed entries are swept ~1h later.
+  `ask` is optional and defaults to the workflow's saved ask.
+
+Logs — execution history (paginated: offset, count)
+  GET /api/instances/:id/logs/personas?personaId=&offset=0&count=5
+                                       → { logs[], stats:{ [pid]:{errors,success,total} },
+                                           offset, count, total }
+  GET /api/instances/:id/logs/workflows/:wid?offset=0&count=5
+                                       → { logs[], offset, count, total }
+  GET /api/instances/:id/logs/sessions/:session
+                                       → { levels[], logs[] }  (full waterfall of one run)
+  entry: { success, took, started_at(ms), ended_at(ms), id, workflowId, personaId?,
+           agent, session?, level?, msg:{ input, output, parents:[{ id, text }] } }
+
+Knowledge — per-persona plain-text file store
+  GET    /api/instances/:id/personas/:pid/knowledge         → { files:[String] }
+  GET    /api/instances/:id/personas/:pid/knowledge/**path  → raw text (text/plain)
+  PUT    /api/instances/:id/personas/:pid/knowledge/**path  body = raw text → 200
+  DELETE /api/instances/:id/personas/:pid/knowledge/**path  → 204
+  (** = catch-all sub-path. ../ traversal is rejected with 403.)
+
+## Core models
+- Persona : { name, role, about(=system prompt), task, avatar?, agent? }
+- Workflow: { name, desc, every_secs, agent, ask, levels:[[String]] }
+- every_secs: -1 = run once at startup · 0 = manual only · 1 = continuous
+              (next run scheduled right after finishing) · >1 = repeat every N s
+- levels entries: a personaId | ":workflowId" (nested workflow) |
+                  "id:rw" (force read-write).
+  A level with ≥2 personas runs READ-ONLY. A single-persona level may be RO or RW.
+  The last level always writes; each level sees only the previous level's output
+  + the ask. Many minds analyze, then one hand acts.
+
+## More
+- Human docs (concepts, not endpoints): /docs.html
+- Full trace of one run: /api/instances/:id/logs/sessions/:session

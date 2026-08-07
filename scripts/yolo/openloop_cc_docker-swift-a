@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+IMAGE="yolo_devcontainer:swift"
+_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+unset API_KEY API_ENDPOINT
+"$_dir/openloop_cc_docker-base" "$IMAGE" "" "$@"

@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
+#
+# openloop_cc_docker-swift — swift image, provider of your choice.
+#
+# Pick the default provider by editing PROVIDER below, or override per-run with:
+#     OPENLOOP_PROVIDER=z openloop_cc_docker-swift ...
+#
+# Valid providers:
+#   "a"  anthropic subscription/key   (-> openloop_cc_docker-swift-a)
+#   "z"  z.ai                         (-> openloop_cc_docker-swift-z)
+#
+# Default: "a".
 
-IMAGE="yolo_devcontainer:swift"
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-unset API_KEY API_ENDPOINT
-"$_dir/openloop_cc_docker-base" "$IMAGE" "" "$@"
+PROVIDER="${OPENLOOP_PROVIDER:-z}"
+
+exec "$_dir/openloop_cc_docker-swift-$PROVIDER" "$@"

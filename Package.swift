@@ -60,5 +60,13 @@ let package = Package(
                 .process("Public/index.html"),
             ]
         ),
+        .executableTarget(
+            name: "w2",
+            dependencies: [
+                "shared",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "SystemPackage", package: "swift-system"),
+            ]
+        ),
     ]
 )

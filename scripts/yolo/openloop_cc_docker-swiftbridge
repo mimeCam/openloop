@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
+#
+# openloop_cc_docker-swiftbridge — swiftbridge image, provider of your choice.
+# Edit PROVIDER below, or override per-run with:
+#     OPENLOOP_PROVIDER=z openloop_cc_docker-swiftbridge ...
+#
+# Valid providers:
+#   "a"  anthropic subscription/key   (-> openloop_cc_docker-swiftbridge-a)
+#   "z"  z.ai                         (-> openloop_cc_docker-swiftbridge-z)
+#
+# Default: "a".
 
-IMAGE="yolo_devcontainer:swiftbridge"
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-unset API_KEY API_ENDPOINT
-"$_dir/openloop_cc_docker-base" "$IMAGE" "" "$@"
+PROVIDER="${OPENLOOP_PROVIDER:-z}"
+
+exec "$_dir/openloop_cc_docker-swiftbridge-$PROVIDER" "$@"

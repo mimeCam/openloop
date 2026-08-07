@@ -11,14 +11,15 @@ fi
 cd "$(dirname "$0")"
 
 rebuild() {
-    EXECUTABLE_NAME="$1"
-    WORKING_NAME="$1"
+    local EXECUTABLE_NAME="$1"
+    local WORKING_NAME="$1"
+    local NEW_NAME=""
 
     if [[ -n "${2:-}" ]]; then
         NEW_NAME="$2"
     fi
 
-    BUILD_DIR=".build/release"
+    local BUILD_DIR=".build/release"
 
     swift build \
         -Xswiftc -strict-concurrency=minimal \
@@ -89,5 +90,6 @@ fi
 main "openloop"
 main "runner" "openloop-runner"
 main "api" "openloop-api"
+main "w2"
 
 echo "Success. _build_and_install_local.sh completed."

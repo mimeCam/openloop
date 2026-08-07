@@ -297,10 +297,3 @@ extension LogHandler {
         var logs: [SessionLogEntry]
     }
 }
-
-private let dec: JSONDecoder = {
-    let dec = JSONDecoder()
-    dec.keyDecodingStrategy = .convertFromSnakeCase
-    dec.allowsJSON5 = true
-    return dec
-}()
