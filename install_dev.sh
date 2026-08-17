@@ -50,6 +50,12 @@ verify_and_install_swift() {
     fi
 }
 
+start_keepalive() {
+    local img=$1 name=$2
+    docker rm -f "$name" &> /dev/null || true
+    docker run -d --restart=unless-stopped --name="$name" "$img" tail -f /dev/null >/dev/null
+}
+
 # install_yq() {
 #     if command -v yq &> /dev/null; then
 #         return 0
@@ -90,6 +96,12 @@ verify_and_install_swift() {
 
 verify_available docker
 ./_build_docker_containers.sh
+
+start_keepalive yolo_devcontainer keepalive-yolo
+start_keepalive yolo_devcontainer:swift keepalive-yolo-swift
+if [ "$(hostname)" == "realm13.local" ]; then
+    start_keepalive yolo_devcontainer:swiftbridge keepalive-yolo-swiftbridge
+fi
 
 verify_and_install_swift
 ./_build_and_install_local.sh

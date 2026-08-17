@@ -227,6 +227,7 @@ if [ "$use_tier" = true ]; then
         --init \
         -e ANTHROPIC_LOG=error \
         -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+        -e CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
         -v "$CLAUDE_SBX/.claude:/home/node/.claude" \
         -v "$CLAUDE_SBX/.claude.json:/home/node/.claude.json" \
         -v "$CLAUDE_SBX/.claude.json.backup:/home/node/.claude.json.backup" \
@@ -244,6 +245,7 @@ else
         -v /etc/localtime:/etc/localtime:ro \
         -e ANTHROPIC_LOG=error \
         -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+        -e CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
         -e "ANTHROPIC_BASE_URL=${API_ENDPOINT}" \
         -e "ANTHROPIC_AUTH_TOKEN=${API_KEY}" \
         -e BASH_DEFAULT_TIMEOUT_MS=20 \

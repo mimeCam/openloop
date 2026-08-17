@@ -75,15 +75,10 @@ ENV SHELL=/bin/zsh
 ENV EDITOR=nano
 ENV VISUAL=nano
 
+COPY scripts/docker/ /tmp/zsh-docker/
+
 # Default powerline10k theme
-ARG ZSH_IN_DOCKER_VERSION=1.2.0
-RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v${ZSH_IN_DOCKER_VERSION}/zsh-in-docker.sh)" -- \
-  -p git \
-  -p fzf \
-  -a "source /usr/share/doc/fzf/examples/key-bindings.zsh" \
-  -a "source /usr/share/doc/fzf/examples/completion.zsh" \
-  -a "export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
-  -x
+RUN sh /tmp/zsh-docker/install-zsh.sh
 
 # Install Claude
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
@@ -171,10 +166,11 @@ RUN echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.profile
 RUN echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
 
 ENV PATH="/home/node/.local/bin:${PATH}"
-RUN curl -LsSf https://mistral.ai/vibe/install.sh | bash
+RUN sh /tmp/zsh-docker/install-vibe.sh
 # RUN uv tool install mistral-vibe
 
-RUN curl -fsSL https://opencode.ai/install | bash
+ARG OPENCODE_VERSION=1.18.18
+RUN sh /tmp/zsh-docker/install-opencode.sh
 
 RUN echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.profile
 RUN echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.bashrc
