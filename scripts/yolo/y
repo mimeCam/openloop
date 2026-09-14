@@ -82,7 +82,7 @@ docker run --rm -it \
 	-v "$CLAUDE_SBX/.claude.json.backup:/home/node/.claude.json.backup" \
 	-e COLORTERM=truecolor \
 	-e ANTHROPIC_LOG=error \
-	-e BASH_DEFAULT_TIMEOUT_MS=20 \
+	-e BASH_DEFAULT_TIMEOUT_MS=10000 \
 	-v "$PWD:$PWD" \
 	-w "$PWD" \
 	--name "$CONTAINER_NAME" \
