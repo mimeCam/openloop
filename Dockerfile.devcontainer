@@ -169,7 +169,7 @@ ENV PATH="/home/node/.local/bin:${PATH}"
 RUN sh /tmp/zsh-docker/install-vibe.sh
 # RUN uv tool install mistral-vibe
 
-ARG OPENCODE_VERSION=1.18.18
+ARG OPENCODE_VERSION=1.17.20
 RUN sh /tmp/zsh-docker/install-opencode.sh
 
 RUN echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.profile
