@@ -1,0 +1,15 @@
+.git
+(?d).DS_Store
+build
+.build
+node_modules
+dist
+.next
+.nuxt
+.output
+.svelte-kit
+.vite
+.turbo
+.cache
+.parcel-cache
+coverage
