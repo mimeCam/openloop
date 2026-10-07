@@ -32,13 +32,13 @@ verify_and_install_swift() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         curl --fail -O https://download.swift.org/swiftly/darwin/swiftly.pkg
         installer -pkg swiftly.pkg -target CurrentUserHomeDirectory
-        ~/.swiftly/bin/swiftly init --quiet-shell-followup --no-modify-profile
+        ~/.swiftly/bin/swiftly init --quiet-shell-followup --assume-yes
         . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
         hash -r
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
         curl --fail -O "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
         tar zxf "swiftly-$(uname -m).tar.gz"
-        ./swiftly init --quiet-shell-followup --no-modify-profile
+        ./swiftly init --quiet-shell-followup --assume-yes
         . "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"
         hash -r
     elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then

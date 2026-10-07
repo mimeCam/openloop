@@ -29,6 +29,15 @@
       }
     },
     {
+      "identity" : "csqlite",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/stephencelis/CSQLite",
+      "state" : {
+        "revision" : "8ad83035460a3d1029a2c5a0cca4f980297a9ca2",
+        "version" : "3.53.3"
+      }
+    },
+    {
       "identity" : "llm-graph",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/genkernel/llm-graph",
