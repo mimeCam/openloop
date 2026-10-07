@@ -77,12 +77,15 @@ if [ -n "$PROMPT" ]; then
 fi
 
 docker run --rm -it \
+    --init --pids-limit=500 \
+    -v /etc/localtime:/etc/localtime:ro \
 	-v "$CLAUDE_SBX/.claude:/home/node/.claude" \
 	-v "$CLAUDE_SBX/.claude.json:/home/node/.claude.json" \
 	-v "$CLAUDE_SBX/.claude.json.backup:/home/node/.claude.json.backup" \
 	-e COLORTERM=truecolor \
 	-e ANTHROPIC_LOG=error \
 	-e BASH_DEFAULT_TIMEOUT_MS=10000 \
+    -e BASH_MAX_TIMEOUT_MS=15000 \
 	-v "$PWD:$PWD" \
 	-w "$PWD" \
 	--name "$CONTAINER_NAME" \

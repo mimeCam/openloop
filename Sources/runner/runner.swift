@@ -493,6 +493,52 @@ private func findTopOpenloopInstanceDir() -> FilePath? {
     })
 }
 
+private struct PersonaRunContext {
+    let prefix: String
+    let mcpPath: String?
+}
+
+private func personaRunContext(personaId: String, runId: String, runDir: FilePath) -> PersonaRunContext {
+    guard isRealPersona(personaId) else { return PersonaRunContext(prefix: "", mcpPath: nil) }
+    let (files, mcps) = collectContext(personaId: personaId, runDir: runDir)
+    assert(files.allSatisfy { $0.hasPrefix(runDir.string) })
+    let prefix = files.isEmpty ? "" : files.map { "@\($0)" }.joined(separator: " ") + "\n\n"
+    return PersonaRunContext(prefix: prefix, mcpPath: GraphStore.writeMcpConfig(mcps, runId: runId))
+}
+
+private func isRealPersona(_ id: String) -> Bool {
+    id != "_bottom_" && id != "_head_" && !id.hasPrefix(":")
+}
+
+private func collectContext(personaId: String, runDir: FilePath) -> ([String], Set<GraphMcpEndpoint>) {
+    var mcps = Set<GraphMcpEndpoint>()
+    let files = Paths.dirsToHome()
+        .filter { PathIO.isFileExistent(atPath: GraphStore.dbPath(at: $0.string)) }
+        .flatMap { dir -> [String] in
+            let ctx = (try? GraphStore.personaContext(personaId: personaId, at: dir.string)) ?? .empty
+            mcps.formUnion(ctx.mcps)
+            return ctx.texts
+        }
+        .compactMap { writeContextFile($0, runDir: runDir) }
+    return (files, mcps)
+}
+
+private func writeContextFile(_ text: String, runDir: FilePath) -> String? {
+    do {
+        let file = try GraphStore.writeContextFile(text, in: runDir)
+        assert(PathIO.isFileExistent(atPath: file.string))
+        return file.string
+    } catch {
+        assertionFailure("\(error)")
+        return nil
+    }
+}
+
+private func deleteMcpConfig(_ path: String) {
+    guard PathIO.isFileExistent(atPath: path) else { return }
+    assert(PathIO.deleteDirectoryAndItsContents(atPath: path))
+}
+
 private func resolveAgent(
     _ agentName: String?, workflowAgent: String
 ) -> AgentSource {
@@ -570,6 +616,17 @@ private func runGraph(
 
     let bottoms: Set<PreparedRunItem> = Set(levels.last!)
     assert(bottoms.count == 1)
+
+    let runId = UUID().uuidString
+    let ctxRunDir = GraphStore.contextRunDir(runId)
+    guard PathIO.createDirectoryIfNotExists(atPath: ctxRunDir.string) else {
+        throw ValidationError("Could not create tmp graph-runs folder: \(ctxRunDir.string)")
+    }
+    defer {
+        assert(PathIO.deleteDirectoryAndItsContents(atPath: ctxRunDir.string))
+        assert(!PathIO.isDirectoryExistent(atPath: ctxRunDir.string))
+        deleteMcpConfig(GraphStore.mcpConfigPath(runId).string)
+    }
 
     typealias P = LLMGraph.Person
 
@@ -671,12 +728,14 @@ private func runGraph(
 
             let fakeBottom = from.realId == "_bottom_"
 
-            let prompt = """
+            let runCtx = personaRunContext(personaId: from.realId, runId: runId, runDir: ctxRunDir)
+            let prompt = runCtx.prefix + """
 # Task (your scope)
 \(coreTask)
 
 # Instructions
-\(hasContext 
+\(runCtx.prefix.isEmpty ? "" : "- Context files are read-only.")
+\(hasContext
     ? (fakeBottom
         ? "- Read directions provided by your teammates in `_reports` folder"
         : "- Read directions provided by your teammates in `../_reports` folder")
@@ -736,7 +795,8 @@ private func runGraph(
                     prompt, systemPrompt, mode!,
                 ],
                 chroot: Paths.curDir, // .init(from.folder),
-                stdin: context
+                stdin: context,
+                env: runCtx.mcpPath.map { ["MCP_CONFIG_PATH": $0] }
             ) ?? ""
 
             let success = res.notEmpty

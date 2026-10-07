@@ -70,6 +70,20 @@ mkdir -p "$HOME/.vibe"
 VOLUME_MOUNTS=()
 VOLUME_MOUNTS+=(-v "$HOME/.vibe:/home/node/.vibe")
 
+CTX_LINE="${PROMPT%%$'\n'*}"
+CTX_MOUNTED=""
+for CTX_TOKEN in $CTX_LINE; do
+    CTX_FILE="${CTX_TOKEN#@}"
+    case "$CTX_FILE" in
+        "$HOME"/.local/state/tmp/graph-runs/*) ;;
+        *) continue ;;
+    esac
+    CTX_DIR="${CTX_FILE%/*}"
+    case " $CTX_MOUNTED " in *" $CTX_DIR "*) continue ;; esac
+    CTX_MOUNTED="$CTX_MOUNTED $CTX_DIR"
+    [ -f "$CTX_FILE" ] && VOLUME_MOUNTS+=(-v "$CTX_DIR:$CTX_DIR:ro")
+done
+
 if [ -n "$SYSTEM_PROMPT" ]; then
     #
     # Hack: override default cli.md - not working
@@ -86,6 +100,10 @@ if [ -n "$SYSTEM_PROMPT" ]; then
 ${SYSTEM_PROMPT}
 EOF
     VOLUME_MOUNTS+=(-v "$SYSTEM_PROMPT_TMP_DIR:/home/node/.vibe/prompts")
+fi
+
+if [ -d "$HOME/Library/Developer" ]; then
+    VOLUME_MOUNTS+=(-v "$HOME/Library/Developer:$HOME/Library/Developer")
 fi
 
 if [ -d "$HOME/Library/Developer/Xcode/DerivedData" ]; then

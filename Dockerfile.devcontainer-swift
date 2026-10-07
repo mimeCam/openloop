@@ -2,6 +2,7 @@ FROM yolo_devcontainer
 
 #
 # Swift via Swiftly
+SHELL ["/bin/bash", "-c"]
 RUN curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz && \
     tar zxf swiftly-$(uname -m).tar.gz && \
     ./swiftly init --quiet-shell-followup && \

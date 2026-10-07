@@ -6,5 +6,5 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 CONTAINER_NAME="ywz"
-IMAGE="yolo_devcontainer"
+IMAGE="yolo_devcontainer:swift"
 source "$SCRIPT_DIR/y-z"

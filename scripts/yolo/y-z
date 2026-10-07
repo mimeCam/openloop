@@ -53,6 +53,8 @@ if [ -n "$PROMPT" ]; then
 fi
 
 docker run --rm -it \
+    --init --pids-limit=500 \
+    -v /etc/localtime:/etc/localtime:ro \
 	-e COLORTERM=truecolor \
 	-e ANTHROPIC_LOG=error \
 	-e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
@@ -60,6 +62,7 @@ docker run --rm -it \
 	-e "ANTHROPIC_BASE_URL=${API_ENDPOINT}" \
 	-e "ANTHROPIC_AUTH_TOKEN=${API_KEY}" \
 	-e BASH_DEFAULT_TIMEOUT_MS=10000 \
+    -e BASH_MAX_TIMEOUT_MS=15000 \
 	"${MODEL_ENV_FLAGS[@]}" \
 	-e "PROMPT=${PROMPT}" \
 	-e "SYSTEM_PROMPT=${SYSTEM_PROMPT}" \

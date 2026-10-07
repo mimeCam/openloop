@@ -114,6 +114,24 @@ EOF
 # Determine volume mounts based on mode
 VOLUME_MOUNTS=()
 
+CTX_LINE="${PROMPT%%$'\n'*}"
+CTX_MOUNTED=""
+for CTX_TOKEN in $CTX_LINE; do
+    CTX_FILE="${CTX_TOKEN#@}"
+    case "$CTX_FILE" in
+        "$HOME"/.local/state/tmp/graph-runs/*) ;;
+        *) continue ;;
+    esac
+    CTX_DIR="${CTX_FILE%/*}"
+    case " $CTX_MOUNTED " in *" $CTX_DIR "*) continue ;; esac
+    CTX_MOUNTED="$CTX_MOUNTED $CTX_DIR"
+    [ -f "$CTX_FILE" ] && VOLUME_MOUNTS+=(-v "$CTX_DIR:$CTX_DIR:ro")
+done
+
+if [ -d "$HOME/Library/Developer" ]; then
+    VOLUME_MOUNTS+=(-v "$HOME/Library/Developer:$HOME/Library/Developer")
+fi
+
 if [ -d "$HOME/Library/Developer/Xcode/DerivedData" ]; then
     VOLUME_MOUNTS+=(-v "$HOME/Library/Developer/Xcode/DerivedData:$HOME/Library/Developer/Xcode/DerivedData:ro")
 fi
@@ -191,8 +209,7 @@ EOF
 fi
 
 $DOCKER run --rm \
-    --pids-limit=500 \
-    --init \
+    --init --pids-limit=500 \
     -v /etc/localtime:/etc/localtime:ro \
     -v "$AUTH_FILE:/home/node/.local/share/opencode/auth.json" \
     -v "$CONFIG_FILE:/home/node/.config/opencode/opencode.json" \

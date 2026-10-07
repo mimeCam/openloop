@@ -19,6 +19,7 @@ EOF
 fi
 
 docker run --rm -it \
+    --init --pids-limit=500 \
     -v /etc/localtime:/etc/localtime:ro \
     -p 2323:2323 \
     -v "$SHARE/opencode:/home/node/.local/share/opencode" \

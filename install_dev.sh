@@ -142,6 +142,13 @@ pkill openloop-api || true
 sleep 1
 if ! pgrep -x openloop-api > /dev/null 2>&1; then
     (cd ~/.local/bin && ./openloop-api serve --port 54321 --hostname 0.0.0.0 > /dev/null 2>&1 &)
+    #
+    # During development simple run `openloop-api` dev version on a different port, e.g. via `--port 54320`, or:
+    #
+    # Pause:
+    # launchctl bootout gui/$(id -u)/openloop.api
+    # Resume:
+    # launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/openloop.api.plist
 fi
 
 

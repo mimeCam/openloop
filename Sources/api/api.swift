@@ -152,6 +152,30 @@ func configure(_ app: Application) async throws {
         try await KnowledgeHandler().deleteFile(req: req)
     }
 
+    // Graph endpoints
+    api.get("agents") { req async throws in
+        try await GraphHandler().agents(req: req)
+    }
+    let graph = instances.grouped(":id", "graph")
+    graph.get { req async throws in
+        try await GraphHandler().list(req: req)
+    }
+    graph.post { req async throws in
+        try await GraphHandler().create(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").put { req async throws in
+        try await GraphHandler().update(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").post("summary") { req async throws in
+        try await GraphHandler().regenSummary(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").post("run") { req async throws in
+        try await GraphHandler().run(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").get("logs") { req async throws in
+        try await GraphHandler().logs(req: req)
+    }
+
     // Manual workflows endpoints
     instances.grouped(":id", "manual-workflows", "validate").post { req async throws in
         try await ManualWorkflowHandler().validate(req: req)

@@ -5,6 +5,11 @@
 #else
 @preconcurrency import SystemPackage
 #endif
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
 import Foundation
 import CoreFoundation
 import Subprocess
@@ -52,6 +57,10 @@ public struct Paths {
         .appending("share")
 
     public static let globalShare = share
+
+    public static let tmpRoot = local
+        .appending("state")
+        .appending("tmp")
 
     // Per-project data folder. Hidden so AI agents stop treating it as part
     // of the host project. `legacyDataFolderName` is the pre-rename name,
@@ -190,7 +199,15 @@ public extension PathIO {
         var isDirectory = false
         let exists = isExistent(atPath: path, isDirectory: &isDirectory)
 
-        return exists && isDirectory
+        if exists && isDirectory {
+            return true
+        }
+
+        var s = stat()
+        guard stat(path, &s) == 0 else {
+            return false
+        }
+        return (s.st_mode & S_IFMT) == S_IFDIR
     }
 
     static func createDirectoryIfNotExists(atPath inputPath: String) -> Bool {

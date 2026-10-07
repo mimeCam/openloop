@@ -11,6 +11,7 @@
             rel="stylesheet"
         />
         <link rel="stylesheet" href="styles.css" />
+        <script src="lang.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     </head>
     <body class="docs-page">
@@ -47,33 +48,6 @@
                 let currentLang = localStorage.getItem('openloop-lang') || 'en';
                 let currentDoc = null;
                 let contentsData = [];
-
-                function setLanguage(lang) {
-                    currentLang = lang;
-                    localStorage.setItem('openloop-lang', lang);
-                    
-                    document.querySelectorAll('.lang-btn').forEach(btn => {
-                        const isActive = btn.dataset.lang === lang;
-                        btn.classList.toggle('active', isActive);
-                        btn.setAttribute('aria-pressed', isActive);
-                    });
-                    
-                    if (currentDoc) {
-                        loadDoc(currentDoc);
-                    }
-                }
-
-                function initLanguageButtons() {
-                    document.querySelectorAll('.lang-btn').forEach(btn => {
-                        btn.addEventListener('click', () => {
-                            setLanguage(btn.dataset.lang);
-                        });
-                        
-                        const isActive = btn.dataset.lang === currentLang;
-                        btn.classList.toggle('active', isActive);
-                        btn.setAttribute('aria-pressed', isActive);
-                    });
-                }
 
                 async function fetchMarkdown(filename) {
                     const langResponse = await fetch(`/docs/${filename}.${currentLang}.md`);
@@ -191,7 +165,12 @@
                     }
                 });
 
-                initLanguageButtons();
+                initLangSwitcher((lang) => {
+                    currentLang = lang;
+                    if (currentDoc) {
+                        loadDoc(currentDoc);
+                    }
+                });
                 loadContents();
             });
         </script>

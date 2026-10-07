@@ -554,7 +554,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml)
-            ? `<div class="instance-badges">${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
+            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
             : '';
 
         const iconSaturation = Math.max(25, 50 - depth * 8);
@@ -1366,6 +1366,10 @@ document.addEventListener('DOMContentLoaded', function() {
         `;
     }
 
+    function getGraphLinkHtml(path) {
+        return `<a class="graph-link" href="/graph.html?instance=${encodeURIComponent(path)}" target="_blank" rel="noopener noreferrer">Graph ↗</a>`;
+    }
+
     function getPersonaCountHtml(path, state, totalFromFetch) {
         const total = totalFromFetch !== undefined ? totalFromFetch : (personaCache[path] !== undefined ? personaCache[path] : 0);
         return `<span class="persona-count">Personas: ${total}</span>`;
@@ -1735,34 +1739,12 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    function setLanguage(lang) {
+    initLangSwitcher((lang) => {
         currentLang = lang;
-        localStorage.setItem('openloop-lang', lang);
-        
-        document.querySelectorAll('.lang-btn').forEach(btn => {
-            const isActive = btn.dataset.lang === lang;
-            btn.classList.toggle('active', isActive);
-            btn.setAttribute('aria-pressed', isActive);
-        });
-        
         if (currentHelpDoc) {
             openHelpPanel(currentHelpDoc);
         }
-    }
-    
-    function initLanguageButtons() {
-        document.querySelectorAll('.lang-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                setLanguage(btn.dataset.lang);
-            });
-            
-            const isActive = btn.dataset.lang === currentLang;
-            btn.classList.toggle('active', isActive);
-            btn.setAttribute('aria-pressed', isActive);
-        });
-    }
-    
-    initLanguageButtons();
+    });
 
     console.log('DEBUG: About to call fetchInstances()');
     fetchInstances();

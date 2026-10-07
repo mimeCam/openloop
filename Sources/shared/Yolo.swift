@@ -14,7 +14,8 @@ public func subprocess(
     _ name: FilePath,
     args userArgs: [String],
     chroot: FilePath?,
-    stdin: String? = nil
+    stdin: String? = nil,
+    env: [String: String]? = nil
 ) async throws -> String? {
     let verifiedChroot: String?//FilePath?
     if let folder = chroot?.string {
@@ -30,10 +31,12 @@ public func subprocess(
         _ userArgs: [String],
         _ stdin: I
     ) async throws -> String? {
+        let environment = toEnvironment(env)
         let res = try await run(
 //            executable,
             .path(name),
             arguments: .init(userArgs),
+            environment: environment,
             workingDirectory: (verifiedChroot == nil) ? nil : .init(verifiedChroot!),
             input: stdin,
             output: .string(
@@ -167,16 +170,28 @@ public func subprocess(
     return res
 }
 
+private func toEnvironment(_ env: [String: String]?) -> Environment {
+    guard let env else { return .inherit }
+    var updates: [Environment.Key: String?] = [:]
+    for (key, value) in env {
+        guard let envKey = Environment.Key(rawValue: key) else { continue }
+        updates[envKey] = value
+    }
+    return .inherit.updating(updates)
+}
+
 // MARK: -
 
 public func exec(
     _ binaryFullPath: String,
     args: [String],
-    chroot: String? = nil
+    chroot: String? = nil,
+    env: [String: String]? = nil
 ) async throws -> String? {
     let res = try await run(
         .path(.init(binaryFullPath)),
         arguments: .init(args),
+        environment: toEnvironment(env),
         workingDirectory: (chroot == nil) ? nil : .init(chroot!),
         output: .string(
             limit: 1 * 1024 * 1024, encoding: UTF8.self
