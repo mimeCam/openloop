@@ -44,6 +44,7 @@ struct InstanceHandler: Sendable {
                 state: stateInfo,
                 manualActive: manualActive,
                 manualCompleted: manualCompleted,
+                unreadNotifications: Notifications.unreadCount(at: path),
                 configEnabled: svcStatus.configEnabled,
                 processRunning: svcStatus.processRunning
             ))
@@ -150,6 +151,7 @@ extension InstanceHandler {
         var state: InstanceStateInfo?
         var manualActive: Int
         var manualCompleted: Int
+        var unreadNotifications: Int = 0
         var isGlobalShare: Bool = false
         var configEnabled: Bool?
         var processRunning: Bool?

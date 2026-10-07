@@ -8,4 +8,9 @@ unset API_KEY API_ENDPOINT
 export API_KEY="🔥🔥🔥"
 export API_ENDPOINT="https://api.z.ai/api/anthropic"
 
+export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7
+export CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3
+
 "$_dir/openloop_cc_docker-base" "$IMAGE" "-z" "$@"

@@ -175,6 +175,9 @@ func configure(_ app: Application) async throws {
     instances.grouped(":id", "graph", ":nid").get("logs") { req async throws in
         try await GraphHandler().logs(req: req)
     }
+    instances.grouped(":id", "graph", ":nid").delete { req async throws in
+        try await GraphHandler().delete(req: req)
+    }
 
     // Manual workflows endpoints
     instances.grouped(":id", "manual-workflows", "validate").post { req async throws in
@@ -191,6 +194,18 @@ func configure(_ app: Application) async throws {
     }
     instances.grouped(":id", "manual-workflows", ":runid").delete { req async throws in
         try await ManualWorkflowHandler().delete(req: req)
+    }
+
+    // Notifications endpoints (per instance — derived from its logs.db;
+    // powers /notifications.html + the home header badge)
+    instances.grouped(":id", "notifications").get { req async throws in
+        try await NotificationHandler().list(req: req)
+    }
+    instances.grouped(":id", "notifications", "read-all").post { req async throws in
+        try await NotificationHandler().markAllRead(req: req)
+    }
+    instances.grouped(":id", "notifications", ":kind", ":ref", "read").post { req async throws in
+        try await NotificationHandler().markRead(req: req)
     }
 }
 

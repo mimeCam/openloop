@@ -63,6 +63,8 @@ fi
 
 mkdir -p "$HOME/.local/bin"
 cp scripts/yolo/* "$HOME/.local/bin/"
+# rm -rf $HOME/.local/bin/Public
+cp -r Sources/api/Public "$HOME/.local/bin/"
 
 # Rewritting `docker` to full path to docker binary. openloop-api/runner are launched by LaunchAgent on mac that sets minimal PATH. `whereis` also fails when running with minimal PATH.
 DOCKER=""

@@ -37,7 +37,8 @@ struct runner: ParsableCommand {
                     workflow, ask: ask,
                     context: try? readPipedStdin(),
                     contextParents: [],
-                    session: UUID().uuidString
+                    session: UUID().uuidString,
+                    isTop: true
                 )
             } catch {
                 assertionFailure("ERR. \(error.localizedDescription)")
@@ -78,7 +79,8 @@ private func start(
     _ workflow: String, ask: String?,
     context: String?, contextParents: [RunLog.Message.Parent],
     session: String,
-    levelOffset: Int = 0
+    levelOffset: Int = 0,
+    isTop: Bool = false
 ) async throws -> String {
     let w = try await FileLoader.loadWorkflowById(workflow)
     guard let w else {
@@ -141,6 +143,14 @@ private func start(
             )
         )
 
+        // Top-level run ended in success — a notification write must never
+        // block the run (matches the `try?` tone of the error path below).
+        if isTop {
+            try? LogManager.insertRunEnd(
+                runEnd(session: session, workflow: workflow, success: res.notEmpty, tb: tb),
+                at: Paths.curDir.string
+            )
+        }
 
     } catch {
         let msg = (error as? ValidationError)?.message ?? error.localizedDescription
@@ -154,10 +164,31 @@ private func start(
             )
         )
 
+        // Must run BEFORE runner.exit — the process dies inside exit(withError:).
+        if isTop {
+            try? LogManager.insertRunEnd(
+                runEnd(session: session, workflow: workflow, success: false, tb: tb),
+                at: Paths.curDir.string
+            )
+        }
+
         runner.exit(withError: error)
     }
 
     return res
+}
+
+private func runEnd(
+    session: String, workflow: String, success: Bool, tb: TimedBenchmark
+) -> RunEnd {
+    RunEnd(
+        session: session,
+        workflowId: workflow,
+        success: success,
+        took: Int(tb.intervalSinceInitialized),
+        startedAt: tb.startTime,
+        endedAt: tb.now
+    )
 }
 
 // MARK: -
@@ -699,7 +730,8 @@ private func runGraph(
                     )
                 },
                 session: session,
-                levelOffset: levelByPersonaId[from.id]!
+                levelOffset: levelByPersonaId[from.id]!,
+                isTop: false // nested endings are part of the top-level run, not their own
             )
             let success = res.notEmpty
 

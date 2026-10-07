@@ -194,7 +194,7 @@ public func exec(
         environment: toEnvironment(env),
         workingDirectory: (chroot == nil) ? nil : .init(chroot!),
         output: .string(
-            limit: 1 * 1024 * 1024, encoding: UTF8.self
+            limit: 10 * 1024 * 1024, encoding: UTF8.self
         )
     )
 

@@ -9,6 +9,7 @@
     --accent-glow: rgba(124, 92, 255, 0.12);
     --accent-glow-strong: rgba(124, 92, 255, 0.2);
     --accent-cyan: #00d9ff;
+    --accent-green: #16a34a;
     
     --text-primary: #1a1a2e;
     --text-secondary: #4a4a68;
@@ -2569,6 +2570,80 @@ mark {
     text-align: center;
 }
 .log-expand-link:hover { text-decoration: underline; }
+
+.notif-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid var(--border-medium);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    transition: all var(--transition-fast);
+}
+
+.notif-badge:hover {
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
+.notif-badge.has-unread {
+    border-color: var(--accent-green);
+    background: var(--accent-green);
+    color: #ffffff;
+}
+
+.notif-count {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-faint);
+    min-width: 12px;
+    text-align: center;
+}
+
+.notif-badge.has-unread .notif-count {
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.notif-link {
+    font-size: 13px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border-medium);
+    padding: 6px 14px;
+    border-radius: var(--radius-full);
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.notif-link:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-green);
+}
+
+.notif-link.has-unread {
+    color: var(--accent-green);
+    border-color: var(--accent-green);
+    font-weight: 600;
+}
+
+@keyframes badge-pop-anim {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.18); }
+    100% { transform: scale(1); }
+}
+
+.notif-badge.badge-pop { animation: badge-pop-anim 0.35s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+    .notif-badge.badge-pop { animation: none; }
+    .notif-badge:hover { transform: none; }
+}
 
 .log-duration {
     font-size: 10px;

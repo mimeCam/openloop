@@ -12,6 +12,7 @@
     let currentTiers     = null;
     let currentLogs      = null;
     let currentNodeMap   = new Map();
+    let personaIndex     = new Map();
     const ZOOM_STEPS    = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50];
     const ISOLATED_RUN  = false;
 
@@ -25,6 +26,7 @@
         document.getElementById('wl-zoom-in') .addEventListener('click', () => stepZoom(1));
         document.getElementById('wl-zoom-out').addEventListener('click', () => stepZoom(-1));
         document.getElementById('wl-zoom-label').addEventListener('click', () => applyZoom(1.0));
+        initPanelResize();
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape') { closeDetailPanel(); return; }
             if (!(e.metaKey || e.ctrlKey)) return;
@@ -40,13 +42,49 @@
 
     async function loadAndRender(instance, session) {
         try {
+            await loadPersonas(instance);
             const url = `/api/instances/${encodeURIComponent(instance)}/logs/sessions/${encodeURIComponent(session)}`;
-            const res = await fetch(url);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            render(await res.json());
+            render(await fetchJson(url));
         } catch (err) {
             showError(`Failed to load logs: ${err.message}`);
         }
+    }
+
+    async function fetchJson(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+    }
+
+    async function loadPersonas(instance) {
+        try {
+            const data = await fetchJson('/api/instances');
+            await Promise.all(personaSources(data.instances, instance).map(fetchPersonasAt));
+        } catch { }
+    }
+
+    function personaSources(instances, self) {
+        const chain = parentChainOf(instances, self);
+        const globals = instances.filter(i => i.isGlobalShare && !chain.includes(i.path)).map(i => i.path);
+        return [self, ...chain.slice(0, -1), ...globals].filter(Boolean);
+    }
+
+    async function fetchPersonasAt(path) {
+        try {
+            const data = await fetchJson(`/api/instances/${encodeURIComponent(path)}/personas`);
+            (data.personas || []).forEach(p => personaIndex.set(p.id, p));
+        } catch { }
+    }
+
+    function parentChainOf(instances, self) {
+        const parentOf = Object.fromEntries(instances.map(i => [i.path, i.parentPath]));
+        return chainToRoot(self, parentOf).reverse();
+    }
+
+    function chainToRoot(path, parentOf) {
+        const out = [];
+        for (let cur = path; cur && !out.includes(cur); cur = parentOf[cur]) out.push(cur);
+        return out;
     }
 
     function render(data) {
@@ -97,9 +135,14 @@
         const colsHtml = lvs.map(lv => levelColumn(lv, byLevel.get(lv.levelIndex) || [], tiers)).join('');
         grid.innerHTML = `<svg id="edge-layer"></svg>${colsHtml}`;
         buildLogMap(logs);
+        bindCards(grid);
+    }
+
+    function bindCards(grid) {
         bindCopyButtons(grid);
         bindCardHover(grid);
         bindCardClick(grid);
+        bindAvatarFallbacks(grid);
     }
 
     function deriveLevels(logs) {
@@ -137,7 +180,7 @@
 
     function nodeCardHeader(log, name) {
         return `<div class="node-card-header">` +
-            `<div class="node-card-avatar is-persona">${personIcon()}</div>` +
+            personaAvatar(name) +
             `<span class="node-card-name">${escHtml(name)}</span>` +
             `<div class="node-card-meta"><span class="node-card-dur">${formatDuration(log.took)}</span></div>` +
             `</div>`;
@@ -205,12 +248,56 @@
             }
         });
         bindCopyButtons(panel);
+        bindAvatarFallbacks(panel);
     }
 
     function closeDetailPanel() {
         document.getElementById('detail-panel').classList.remove('open');
         document.getElementById('graph-canvas').classList.remove('panel-open');
         document.querySelectorAll('.node-card.selected').forEach(c => c.classList.remove('selected'));
+    }
+
+    function initPanelResize() {
+        const saved = parseInt(localStorage.getItem('openloop-panel-w'));
+        if (saved) applyPanelWidth(saved);
+        const handle = document.querySelector('.panel-resize');
+        handle.addEventListener('pointerdown', startPanelDrag);
+        handle.addEventListener('dblclick', resetPanelWidth);
+    }
+
+    function resetPanelWidth() {
+        applyPanelWidth(420);
+        persistPanelWidth(420);
+    }
+
+    function startPanelDrag(e) {
+        e.preventDefault();
+        document.body.classList.add('panel-resizing');
+        e.target.setPointerCapture(e.pointerId);
+        e.target.classList.add('dragging');
+        const move = ev => applyPanelWidth(window.innerWidth - ev.clientX);
+        e.target.addEventListener('pointermove', move);
+        e.target.addEventListener('pointerup', () => endPanelDrag(e.target, move), { once: true });
+    }
+
+    function endPanelDrag(target, move) {
+        target.removeEventListener('pointermove', move);
+        target.classList.remove('dragging');
+        document.body.classList.remove('panel-resizing');
+        persistPanelWidth(currentPanelWidth());
+    }
+
+    function applyPanelWidth(w) {
+        const clamped = Math.max(320, Math.min(w, window.innerWidth * 0.75));
+        document.documentElement.style.setProperty('--panel-w', Math.round(clamped) + 'px');
+    }
+
+    function currentPanelWidth() {
+        return parseInt(document.documentElement.style.getPropertyValue('--panel-w')) || 420;
+    }
+
+    function persistPanelWidth(w) {
+        localStorage.setItem('openloop-panel-w', String(w));
     }
 
     function renderDetailContent(log) {
@@ -221,7 +308,7 @@
         const name = escHtml(log.personaId || 'unknown');
         return `<div class="detail-panel-header">` +
                `<div class="detail-panel-accent"></div>` +
-               `<div class="node-card-avatar is-persona">${personIcon()}</div>` +
+               personaAvatar(log.personaId) +
                `<div class="detail-panel-title">` +
                `<div class="detail-panel-name">${name}</div>` +
                `<div class="detail-panel-meta">${formatDuration(log.took)}</div>` +
@@ -521,6 +608,30 @@
             `<circle cx="12" cy="8" r="4"/>` +
             `<path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>` +
             `</svg>`;
+    }
+
+    function personaAvatar(personaId) {
+        const p = personaIndex.get(personaId);
+        const name = (p && p.name) || personaId || '?';
+        if (p && p.avatar) {
+            return `<img class="node-card-avatar is-persona" src="${escHtml(p.avatar)}" alt="${escHtml(name)}">`;
+        }
+        return `<div class="node-card-avatar is-persona">${escHtml(initialOf(name))}</div>`;
+    }
+
+    function initialOf(name) {
+        return (name || '?').trim().charAt(0).toUpperCase() || '?';
+    }
+
+    function bindAvatarFallbacks(root) {
+        root.querySelectorAll('img.node-card-avatar').forEach(img => {
+            img.addEventListener('error', () => {
+                const div = document.createElement('div');
+                div.className = img.className;
+                div.textContent = initialOf(img.alt);
+                img.replaceWith(div);
+            }, { once: true });
+        });
     }
 
 

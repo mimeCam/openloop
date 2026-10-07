@@ -196,6 +196,7 @@ public struct GraphStore {
         let db = try connect(at: instancePath)
         try db.execute(runLogTableDdl)
         try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_node ON graph_run_logs(node_id);")
+        try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_completed_at ON graph_run_logs(completed_at);")
     }
 
     public static func insertNode(_ node: GraphNode, at instancePath: String) throws {
@@ -362,6 +363,44 @@ public struct GraphStore {
     public static func updateActive(id: String, active: Bool, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run("UPDATE graph_nodes SET active = ? WHERE id = ?;", active, id)
+    }
+
+    public static func subtreeIds(of node: GraphNode, in nodes: [GraphNode]) -> Set<String> {
+        var children: [String: [String]] = [:]
+        for n in nodes { children[n.parentId ?? "", default: []].append(n.id) }
+        var seen: Set<String> = [node.id]
+        var queue = [node.id]
+        while let id = queue.popLast() {
+            for child in children[id] ?? [] where !seen.contains(child) {
+                seen.insert(child)
+                queue.append(child)
+            }
+        }
+        return seen
+    }
+
+    public static func deleteNode(id: String, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.transaction {
+            // updateParent SQL inlined on purpose — the public method opens a
+            // 2nd connection, which would break this transaction's atomicity.
+            try db.run(
+                "UPDATE graph_nodes SET parent_id = (SELECT parent_id FROM graph_nodes WHERE id = ?) WHERE parent_id = ?;",
+                id, id
+            )
+            try db.run("DELETE FROM graph_run_logs WHERE node_id = ?;", id)
+            try db.run("DELETE FROM graph_nodes WHERE id = ?;", id)
+        }
+    }
+
+    public static func deleteNodes(ids: Set<String>, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.transaction {
+            for id in ids {
+                try db.run("DELETE FROM graph_run_logs WHERE node_id = ?;", id)
+                try db.run("DELETE FROM graph_nodes WHERE id = ?;", id)
+            }
+        }
     }
 
     public struct PersonaContext {
@@ -535,6 +574,23 @@ public struct GraphStore {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
             "SELECT \(runLogColumns) FROM graph_run_logs WHERE status = 'progress';"
+        )
+        return rows.compactMap(toRunLog)
+    }
+
+    /// Terminal one-off node runs (Run button) ended after `since` — the
+    /// node-run source for notifications. `since` is exclusive;
+    /// `completed_at` is a reference-date Double, like the rest of this table.
+    public static func fetchTerminalRunLogs(since: Double, at instancePath: String) throws -> [GraphRunLog] {
+        let db = try connect(at: instancePath)
+        let rows = try db.prepare(
+            """
+            SELECT \(runLogColumns) FROM graph_run_logs
+            WHERE completed_at IS NOT NULL AND completed_at > ?
+              AND status IN ('success', 'failed')
+            ORDER BY completed_at ASC;
+            """,
+            since
         )
         return rows.compactMap(toRunLog)
     }

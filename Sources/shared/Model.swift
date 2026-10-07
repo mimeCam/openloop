@@ -141,3 +141,33 @@ public struct RunLog: Codable {
 /// NOTE: -  The only difference between PersonaRunLog and WorkflowRunLog is ID what goes into `parents.[idx].id`.
 public typealias PersonaRunLog = RunLog
 public typealias WorkflowRunLog = RunLog
+
+/// One row per TOP-LEVEL workflow run ending (nested levels reuse the session
+/// and never write here). Feeds per-instance notifications.
+/// Time contract: `startedAt`/`endedAt` are reference-date Doubles (like
+/// `logs.started_at`); convert to unix ms only at the API edge.
+public struct RunEnd: Sendable {
+
+    public let session: String
+    public let workflowId: String
+    public let success: Bool
+    public let took: Int
+    public let startedAt: Double
+    public let endedAt: Double
+
+    public init(
+        session: String,
+        workflowId: String,
+        success: Bool,
+        took: Int,
+        startedAt: Double,
+        endedAt: Double
+    ) {
+        self.session = session
+        self.workflowId = workflowId
+        self.success = success
+        self.took = took
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+}

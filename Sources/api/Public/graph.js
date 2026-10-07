@@ -13,13 +13,14 @@
     let panelJson = '';
     let countdownInterval = null;
     let countdownValue = 5;
+    let viewMode = 'normal';
 
     const $ = id => document.getElementById(id);
 
     function esc(s) {
         const d = document.createElement('div');
         d.textContent = s ?? '';
-        return d.innerHTML;
+        return d.innerHTML.replace(/"/g, '&quot;');
     }
 
     function showError(msg) {
@@ -121,6 +122,7 @@
         try {
             const data = await fetchJson(url);
             nodes = data.nodes;
+            if (nodes.length) emptiedByDelete = false;
             render();
             refreshPanel();
         } catch (e) {
@@ -192,15 +194,181 @@
         return cols;
     }
 
+    // — birds-eye view —
+    // One lane per root→leaf chain, ordered by root creation time so lanes
+    // keep their vertical position across refreshes; connectors are pure CSS; dot tap → focusFromBirds.
+
+    function nodeIndex(nodes) {
+        return new Map(nodes.map(n => [n.id, n]));
+    }
+
+    function chainsFrom(nodes) {
+        const byId = nodeIndex(nodes);
+        const parents = new Set(nodes.map(n => n.parent_id).filter(Boolean));
+        const leaves = nodes.filter(n => !parents.has(n.id));
+        return leaves.map(l => chainUp(l, byId)).sort(laneOrder);
+    }
+
+    function laneOrder(a, b) {
+        return a[0].created_at - b[0].created_at || String(a[0].id).localeCompare(String(b[0].id));
+    }
+
+    function chainUp(node, byId) {
+        const chain = [];
+        const seen = new Set();
+        let cur = node;
+        while (cur && !seen.has(cur.id)) {
+            seen.add(cur.id);
+            chain.unshift(cur);
+            cur = byId.get(cur.parent_id);
+        }
+        return chain;
+    }
+
     function render() {
+        return viewMode === 'birds' ? renderBirdsEye() : renderGrid();
+    }
+
+    function renderGrid() {
         const grid = $('graph-grid');
         const cols = buildColumns();
-        const hint = nodes.length ? '' : '<span id="empty-hint">no runs yet — tap + to start</span>';
+        const hint = nodes.length ? '' : `<span id="empty-hint">${emptyHint()}</span>`;
         grid.innerHTML = `<svg id="edge-layer"></svg>` +
             `<button id="add-root" title="New root run">+</button>${hint}` +
             cols.map(col => `<div class="depth-col">${col.map(nodeCell).join('')}</div>`).join('');
         bindGraph(grid);
         drawEdges();
+        syncBirdsToggle();
+    }
+
+    function renderBirdsEye() {
+        const host = $('birds-eye');
+        host.innerHTML = nodes.length
+            ? chainsFrom(nodes).map(laneHtml).join('')
+            : `<span id="empty-hint">${emptyHint()}</span>`;
+        syncBirdsToggle();
+        bindBirdsEye(host);
+    }
+
+    function emptyHint() {
+        return emptiedByDelete
+            ? 'All nodes deleted — tap + to start fresh'
+            : 'no runs yet — tap + to start';
+    }
+
+    function laneHtml(chain) {
+        const last = chain.length - 1;
+        return `<div class="be-lane">` +
+            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last)).join('') +
+            personaTrail(chain[last]) + `</div>`;
+    }
+
+    function slotHtml(n, next, last) {
+        const cls = 'be-slot' +
+            (last ? ' last' : '') +
+            (next && next.status === 'progress' ? ' to-progress' : '') +
+            (n.active === false ? ' inactive' : '');
+        return `<span class="${cls}">${dotHtml(n)}${last ? '' : miniPersonas(n)}</span>`;
+    }
+
+    function dotLabel(n) {
+        const k = (n.personas || []).length;
+        const took = n.took != null ? ` · ${fmtDur(n.took)}` : '';
+        return `${n.agent} · ${n.status}${took}${k ? ` · ${k} persona${k > 1 ? 's' : ''}` : ''}`;
+    }
+
+    function dotHtml(n) {
+        const label = dotLabel(n);
+        return `<button class="node-status-dot be-dot ${esc(n.status)}" data-id="${esc(n.id)}"` +
+            ` title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+    }
+
+    function miniPersonas(n) {
+        const list = (n.personas || []).map(id => personaIndex.get(id)).filter(Boolean);
+        if (!list.length) return '';
+        return `<span class="be-mini">` +
+            list.map(p => avatarHtml(p, 'pp-avatar be-mi-avatar', p.name)).join('') + `</span>`;
+    }
+
+    function personaTrail(n) {
+        const list = (n.personas || []).map(id => personaIndex.get(id)).filter(Boolean);
+        if (!list.length) return '';
+        return `<span class="be-trail">` +
+            list.slice(0, 5).map(trailDotHtml).join('') + moreTrailHtml(n, list) + `</span>`;
+    }
+
+    function trailDotHtml(p) {
+        return `<span class="be-persona">${avatarHtml(p, 'pp-avatar be-p-avatar', p.name)}` +
+            `<span class="be-persona-name">${esc(p.name)}</span></span>`;
+    }
+
+    function moreTrailHtml(n, list) {
+        const k = list.length - 5;
+        if (k <= 0) return '';
+        return `<button class="be-more" data-id="${esc(n.id)}"` +
+            ` title="${k} more persona${k > 1 ? 's' : ''}">+${k}</button>`;
+    }
+
+    function setMode(mode) {
+        viewMode = mode;
+        const birds = mode === 'birds';
+        document.body.classList.toggle('birds-eye', birds);
+        syncToggles(birds);
+        localStorage.setItem('openloop-birds-eye', mode);
+        if (birds) { closeComposer(); closePanel(); showWhisper(); }
+        render();
+    }
+
+    function syncToggles(birds) {
+        document.querySelectorAll('.be-toggle').forEach(btn => {
+            btn.classList.toggle('active', birds);
+            btn.setAttribute('aria-pressed', String(birds));
+        });
+    }
+
+    function syncBirdsToggle() {
+        document.querySelectorAll('.be-toggle')
+            .forEach(btn => { btn.disabled = !nodes.length; });
+    }
+
+    function bindBirdsEye(host) {
+        host.querySelectorAll('.be-dot, .be-more').forEach(el => {
+            el.addEventListener('click', e => {
+                e.stopPropagation();
+                focusFromBirds(el.dataset.id);
+            });
+        });
+        bindAvatarFallbacks(host);
+    }
+
+    function focusFromBirds(id) {
+        fadeWhisper();
+        setMode('normal');
+        selectNode(id);
+        const card = document.querySelector(`.node-card[data-id="${CSS.escape(id)}"]`);
+        if (!card) return;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        card.setAttribute('tabindex', '-1');
+        card.focus({ preventScroll: true });
+        card.classList.add('beacon');
+        setTimeout(() => card.classList.remove('beacon'), 900);
+    }
+
+    function showWhisper() {
+        if (sessionStorage.getItem('openloop-be-hint')) return;
+        const w = document.createElement('span');
+        w.className = 'be-whisper';
+        w.textContent = 'tap a dot to open its card';
+        document.body.appendChild(w);
+        setTimeout(fadeWhisper, 8000);
+    }
+
+    function fadeWhisper() {
+        const w = document.querySelector('.be-whisper');
+        if (!w) return;
+        sessionStorage.setItem('openloop-be-hint', '1');
+        w.style.opacity = '0';
+        setTimeout(() => w.remove(), 300);
     }
 
     function nodeCell(n) {
@@ -350,6 +518,49 @@
         });
     }
 
+    function initPanelResize() {
+        const saved = parseInt(localStorage.getItem('openloop-panel-w'));
+        if (saved) applyPanelWidth(saved);
+        const handle = document.querySelector('.panel-resize');
+        handle.addEventListener('pointerdown', startPanelDrag);
+        handle.addEventListener('dblclick', resetPanelWidth);
+    }
+
+    function resetPanelWidth() {
+        applyPanelWidth(420);
+        persistPanelWidth(420);
+    }
+
+    function startPanelDrag(e) {
+        e.preventDefault();
+        document.body.classList.add('panel-resizing');
+        e.target.setPointerCapture(e.pointerId);
+        e.target.classList.add('dragging');
+        const move = ev => applyPanelWidth(window.innerWidth - ev.clientX);
+        e.target.addEventListener('pointermove', move);
+        e.target.addEventListener('pointerup', () => endPanelDrag(e.target, move), { once: true });
+    }
+
+    function endPanelDrag(target, move) {
+        target.removeEventListener('pointermove', move);
+        target.classList.remove('dragging');
+        document.body.classList.remove('panel-resizing');
+        persistPanelWidth(currentPanelWidth());
+    }
+
+    function applyPanelWidth(w) {
+        const clamped = Math.max(320, Math.min(w, window.innerWidth * 0.75));
+        document.documentElement.style.setProperty('--panel-w', Math.round(clamped) + 'px');
+    }
+
+    function currentPanelWidth() {
+        return parseInt(document.documentElement.style.getPropertyValue('--panel-w')) || 420;
+    }
+
+    function persistPanelWidth(w) {
+        localStorage.setItem('openloop-panel-w', String(w));
+    }
+
     function selectNode(id) {
         selectedId = id;
         document.querySelectorAll('.node-card.selected')
@@ -496,6 +707,7 @@
 
     function openPanel(n) {
         if (!n) return;
+        disarmDelete(); // a re-render silently disarms a pending confirm — always the safe direction
         promptEditing = false;
         summaryEditing = false;
         panelStatus = n.status;
@@ -512,6 +724,7 @@
         bindMcpField(n.id);
         bindPersonaPicks(n);
         bindSummaryButton(n);
+        bindDeleteButtons();
         bindCopyButtons($('detail-panel-inner'));
         bindAvatarFallbacks($('detail-panel-inner'));
         loadLogs(n.id);
@@ -663,7 +876,7 @@
 
     function panelBody(n) {
         return activeSection(n) + summarySection(n) + promptSection(n) + resultSection(n) +
-            personasSection(n) + mcpSection(n) + runsSection();
+            personasSection(n) + mcpSection(n) + runsSection() + deleteSection(n);
     }
 
     function activeSection(n) {
@@ -768,6 +981,168 @@
         if (days < 30) return Math.floor(days / 7) + 'w ago';
         if (days < 365) return Math.floor(days / 30) + 'mo ago';
         return Math.floor(days / 365) + 'y ago';
+    }
+
+    // — delete actions —
+    // Two-step armed confirm (3s auto-disarm) at the panel bottom. "Delete node"
+    // bridges children to the deleted node's parent (or they become roots);
+    // "Delete chain" removes the whole subtree. Hidden on leaves, disabled while
+    // running. A panel re-render (status change, save, 5s refresh) rebuilds the
+    // DOM and silently disarms — always the safe direction.
+
+    let deleteArmed = null;
+    let deleteTimer = null;
+    let deletingNode = false;
+    let emptiedByDelete = false;
+    const RUNNING_STATUSES = ['progress', 'summarizing'];
+
+    function subtreeIdsOf(n) {
+        const byParent = childrenMap();
+        const seen = new Set([n.id]);
+        const queue = [n.id];
+        while (queue.length) {
+            for (const c of byParent.get(queue.shift()) || []) {
+                if (!seen.has(c.id)) { seen.add(c.id); queue.push(c.id); }
+            }
+        }
+        return [...seen];
+    }
+
+    function subtreeNodes(n) {
+        const byId = new Map(nodes.map(x => [x.id, x]));
+        return subtreeIdsOf(n).map(id => byId.get(id)).filter(Boolean);
+    }
+
+    function deleteSection(n) {
+        const descendants = subtreeNodes(n).length - 1;
+        const busy = subtreeNodes(n).filter(x => RUNNING_STATUSES.includes(x.status)).map(x => x.id);
+        const btn = (chain) => deleteBtn(n, chain, chain ? busy.length > 0 : busy.includes(n.id), descendants);
+        return `<div class="delete-section">` +
+            `<div class="detail-section-label danger">Danger zone</div>` +
+            btn(false) + (descendants ? btn(true) : '') + `</div>`;
+    }
+
+    function deleteBtn(n, chain, disabled, descendants) {
+        const label = chain ? 'Delete chain' : 'Delete node';
+        const badge = chain
+            ? `<span class="delete-count" title="this node + ${descendants} descendants">${descendants + 1}</span>`
+            : '';
+        const dis = disabled ? ' disabled' : '';
+        return `<button class="delete-btn" data-id="${esc(n.id)}" data-chain="${chain}"` +
+            ` data-label="${label}" data-total="${descendants + 1}"${dis}>` +
+            trashIcon() + `<span class="delete-label">${label}</span>${badge}</button>` +
+            `<div class="delete-hint">${esc(deleteHint(n, chain, disabled, descendants))}</div>`;
+    }
+
+    function deleteHint(n, chain, disabled, descendants) {
+        if (disabled) return RUNNING_STATUSES.includes(n.status)
+            ? 'This node is running — deletion unlocks when the run finishes.'
+            : 'A descendant is running — chain deletion unlocks when it finishes.';
+        if (chain) {
+            return `Deletes this node and ${descendants} descendant${descendants > 1 ? 's' : ''}, with their runs.`;
+        }
+        return descendants
+            ? 'Children are kept — they move up to this node’s parent, or become roots.'
+            : 'Removes this node, its result and its run history.';
+    }
+
+    function trashIcon() {
+        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
+            `<path d="M3 6h18"/><path d="M8 6V4h8v2"/>` +
+            `<path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`;
+    }
+
+    function bindDeleteButtons() {
+        $('detail-panel-inner').querySelectorAll('.delete-btn').forEach(btn => {
+            btn.addEventListener('click', () => onDeleteClick(btn));
+            btn.addEventListener('blur', () => { if (btn === deleteArmed) disarmDelete(); });
+        });
+    }
+
+    function onDeleteClick(btn) {
+        if (deletingNode || btn.disabled) return;
+        if (btn === deleteArmed) return commitDelete(btn);
+        armDelete(btn);
+    }
+
+    function armDelete(btn) {
+        disarmDelete();
+        deleteArmed = btn;
+        btn.classList.add('armed');
+        armLabel(btn, true);
+        deleteTimer = setTimeout(disarmDelete, 3000);
+    }
+
+    function disarmDelete() {
+        if (deleteTimer) clearTimeout(deleteTimer);
+        deleteTimer = null;
+        if (!deleteArmed) return false;
+        const btn = deleteArmed;
+        deleteArmed = null;
+        btn.classList.remove('armed', 'deleting');
+        armLabel(btn, false);
+        return true;
+    }
+
+    function armLabel(btn, armed) {
+        const label = btn.querySelector('.delete-label');
+        if (!label) return;
+        label.textContent = armed
+            ? (btn.dataset.chain === 'true' ? `Confirm — delete ${btn.dataset.total} nodes` : 'Confirm delete')
+            : btn.dataset.label;
+    }
+
+    function commitDelete(btn) {
+        deletingNode = true;
+        btn.classList.add('deleting');
+        markDeleting();
+        delNode(btn.dataset.id, btn.dataset.chain === 'true');
+    }
+
+    function markDeleting() {
+        $('detail-panel-inner').querySelectorAll('.delete-btn').forEach(b => {
+            b.disabled = true;
+            const label = b.querySelector('.delete-label');
+            if (label) label.textContent = 'Deleting…';
+        });
+    }
+
+    function graphNodeUrl(nodeId) {
+        return `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(nodeId)}`;
+    }
+
+    async function delNode(id, chain) {
+        const url = graphNodeUrl(id) + (chain ? '?chain=true' : '');
+        try {
+            const res = await fetch(url, { method: 'DELETE' });
+            if (res.status === 404) return void await load(); // already gone — silent success
+            if (!res.ok) throw await deleteError(res);
+            applyDeleted(await res.json());
+        } catch (e) {
+            showError(e.message);
+            await resyncPanel();
+        } finally {
+            deletingNode = false;
+        }
+    }
+
+    async function deleteError(res) {
+        if (res.status === 409) return new Error('Still running — let the run finish, then delete.');
+        return new Error(`Delete failed: ${res.status} ${(await res.text()).slice(0, 140)}`);
+    }
+
+    function applyDeleted(res) {
+        nodes = res.nodes || [];
+        emptiedByDelete = nodes.length === 0;
+        closePanel();
+        render();
+    }
+
+    async function resyncPanel() {
+        disarmDelete();
+        await load();
+        const fresh = nodes.find(x => x.id === selectedId);
+        if (fresh) openPanel(fresh);
     }
 
     function summarySection(n) {
@@ -968,8 +1343,15 @@
         $('composer-mcp').classList.toggle('open');
     });
 
+    document.querySelectorAll('.be-toggle').forEach(btn =>
+        btn.addEventListener('click', () =>
+            setMode(viewMode === 'birds' ? 'normal' : 'birds')));
+
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') closeComposer();
+        if (e.key !== 'Escape') return;
+        if ($('composer').classList.contains('open')) return closeComposer();
+        if (disarmDelete()) return; // first Esc disarms an armed delete, only then other Escape behavior
+        if (viewMode === 'birds') setMode('normal');
     });
 
     if (!instanceParam) {
@@ -978,11 +1360,21 @@
         (async () => {
             bindExpandButtons($('detail-panel-inner'));
             bindCanvasDismiss();
+            initPanelResize();
+            if (localStorage.getItem('openloop-birds-eye') === 'birds') setMode('birds');
             await loadAgents();
             await loadInstances();
             await load();
+            focusFromDeepLink(new URLSearchParams(location.search).get('node'));
             setInterval(load, 5000);
             startCountdown();
         })();
+    }
+
+    // Deep link from notifications.html (?node=<id>): focus the node's cell
+    // and open its right panel. Silent fallback if the node no longer exists.
+    function focusFromDeepLink(id) {
+        if (!id || !nodes.some(n => n.id === id)) return;
+        focusFromBirds(id);
     }
 })();

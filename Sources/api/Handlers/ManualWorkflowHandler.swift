@@ -128,8 +128,7 @@ struct ManualWorkflowHandler: Sendable {
                 let output = try await runManualWorkflow(
                     instancePath: instancePath,
                     workflowId: workflowId,
-                    ask: launchRequest.ask ?? workflow.ask,
-                    runId: runId
+                    ask: launchRequest.ask ?? workflow.ask
                 )
 
                 await ManualWorkflowRegistry.shared.updateStatus(
@@ -227,8 +226,7 @@ struct ManualWorkflowHandler: Sendable {
 private func runManualWorkflow(
     instancePath: String,
     workflowId: String,
-    ask: String,
-    runId: String
+    ask: String
 ) async throws -> String {
     let runnerPath = Paths.bin.appending("openloop-runner")
 

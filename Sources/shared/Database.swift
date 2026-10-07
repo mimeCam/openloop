@@ -74,6 +74,29 @@ public struct LogManager {
         """)
 
         try db.run("CREATE INDEX IF NOT EXISTS idx_parents_message_id ON parents(message_id);")
+
+        // One row per top-level workflow run ending; feeds per-instance notifications.
+        try db.execute("""
+        CREATE TABLE IF NOT EXISTS run_ends (
+            session TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            took INTEGER NOT NULL,
+            started_at REAL NOT NULL,
+            ended_at REAL NOT NULL
+        );
+        """)
+        try db.run("CREATE INDEX IF NOT EXISTS idx_run_ends_ended_at ON run_ends(ended_at);")
+
+        try db.execute("""
+        CREATE TABLE IF NOT EXISTS notification_reads (
+            kind TEXT NOT NULL,
+            ref_id TEXT NOT NULL,
+            read_at REAL NOT NULL,
+            PRIMARY KEY (kind, ref_id)
+        );
+        """)
+
         try migrateLegacy(on: db)
     }
 
@@ -438,6 +461,88 @@ public struct LogManager {
         }
         log.info("fetchLogsBySession complete. \(results.count) logs")
         return results
+    }
+
+    public static func insertRunEnd(_ end: RunEnd, at instancePath: String) throws {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        try db.run(
+            """
+            INSERT OR REPLACE INTO run_ends (session, workflow_id, success, took, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            end.session,
+            end.workflowId,
+            end.success ? 1 : 0,
+            end.took,
+            end.startedAt,
+            end.endedAt
+        )
+    }
+
+    /// `since` is exclusive: only rows with `ended_at` strictly greater than
+    /// it are returned.
+    public static func fetchRunEnds(since: Double, at instancePath: String) throws -> [RunEnd] {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let stmt = try db.prepare(
+            """
+            SELECT session, workflow_id, success, took, started_at, ended_at
+            FROM run_ends WHERE ended_at > ? ORDER BY ended_at ASC;
+            """,
+            since
+        )
+        return stmt.compactMap { row in
+            guard let session = row[0] as? String,
+                  let workflowId = row[1] as? String else { return nil }
+            return RunEnd(
+                session: session,
+                workflowId: workflowId,
+                success: (row[2] as? Int64 ?? 0) != 0,
+                took: Int(row[3] as? Int64 ?? 0),
+                startedAt: row[4] as? Double ?? 0,
+                endedAt: row[5] as? Double ?? 0
+            )
+        }
+    }
+
+    public static func markNotificationRead(
+        kind: String, refId: String, at instancePath: String
+    ) throws {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        try db.run(
+            "INSERT OR REPLACE INTO notification_reads (kind, ref_id, read_at) VALUES (?, ?, ?);",
+            kind, refId, Date().timeIntervalSinceReferenceDate
+        )
+    }
+
+    public static func fetchReadNotificationRefs(
+        kind: String, at instancePath: String
+    ) throws -> Set<String> {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let rows = try db.prepare(
+            "SELECT ref_id FROM notification_reads WHERE kind = ?;", kind
+        )
+        return Set(rows.compactMap { $0[0] as? String })
+    }
+
+    public static func markAllNotificationsRead(at instancePath: String) throws {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let now = Date().timeIntervalSinceReferenceDate
+        try db.run(
+            "INSERT OR REPLACE INTO notification_reads (kind, ref_id, read_at) " +
+            "SELECT 'workflow', session, ? FROM run_ends;", now
+        )
+        try? db.run(
+            "INSERT OR REPLACE INTO notification_reads (kind, ref_id, read_at) " +
+            "SELECT 'node_run', id, ? FROM graph_run_logs " +
+            "WHERE completed_at IS NOT NULL AND status IN ('success', 'failed');", now
+        )
+    }
+
+    static func logsDbPath(at instancePath: String) throws -> String {
+        FilePath(instancePath)
+            .appending(Paths.dataFolderName)
+            .appending("logs.db")
+            .string
     }
 
     private static func insertLog(

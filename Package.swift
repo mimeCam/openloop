@@ -68,5 +68,9 @@ let package = Package(
                 .product(name: "SystemPackage", package: "swift-system"),
             ]
         ),
+        .testTarget(
+            name: "sharedTests",
+            dependencies: ["shared"],
+        ),
     ]
 )

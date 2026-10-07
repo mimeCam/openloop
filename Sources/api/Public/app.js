@@ -275,6 +275,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
             console.log('DEBUG: Raw API response:', data);
 
+            updateNotifBubble(data.instances || []);
+
             if (data.instances && data.instances.length > 0) {
                 const tree = buildTreeFromPaths(data.instances);
                 await Promise.all(tree.instances.map(instance => fetchPersonaCount(instance.fullPath)));
@@ -370,6 +372,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 state: state,
                 manualActive: instanceData.manualActive || 0,
                 manualCompleted: instanceData.manualCompleted || 0,
+                unreadNotifications: instanceData.unreadNotifications || 0,
                 depth: depth,
                 rootPath: rootPath,
                 parentPath: parentMap[path] || null,
@@ -554,7 +557,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml)
-            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
+            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${getNotificationsBadgeHtml(instance.fullPath, instance.unreadNotifications)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
             : '';
 
         const iconSaturation = Math.max(25, 50 - depth * 8);
@@ -1368,6 +1371,28 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function getGraphLinkHtml(path) {
         return `<a class="graph-link" href="/graph.html?instance=${encodeURIComponent(path)}" target="_blank" rel="noopener noreferrer">Graph ↗</a>`;
+    }
+
+    function getNotificationsBadgeHtml(path, count) {
+        const cls = count > 0 ? 'notif-link has-unread' : 'notif-link';
+        return `<a class="${cls}" href="/notifications.html?instance=${encodeURIComponent(path)}" target="_blank" rel="noopener noreferrer">Notifications: ${count}</a>`;
+    }
+
+    let lastNotifTotal = 0;
+
+    function updateNotifBubble(instances) {
+        const badge = document.getElementById('notif-badge');
+        const count = document.getElementById('notif-count');
+        if (!badge || !count) return;
+        const total = instances.reduce((sum, d) => sum + (d.unreadNotifications || 0), 0);
+        count.textContent = total > 99 ? '99+' : String(total);
+        badge.classList.toggle('has-unread', total > 0);
+        if (total > lastNotifTotal) {
+            badge.classList.remove('badge-pop');
+            void badge.offsetWidth;
+            badge.classList.add('badge-pop');
+        }
+        lastNotifTotal = total;
     }
 
     function getPersonaCountHtml(path, state, totalFromFetch) {

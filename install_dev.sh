@@ -136,8 +136,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     echo "systemctl --user list-unit-files --type=service"
 fi
 
-# rm -rf ~/.local/bin/Public
-cp -r Sources/api/Public ~/.local/bin
+
 pkill openloop-api || true
 sleep 1
 if ! pgrep -x openloop-api > /dev/null 2>&1; then

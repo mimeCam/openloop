@@ -9,6 +9,8 @@ or a handler's Content struct:
   [ ] manual-workflows (ManualWorkflowHandler — validate/launch/get/delete, RAM-only)
   [ ] logs personas|workflows|sessions (LogHandler)
   [ ] knowledge files get|put|delete|list (KnowledgeHandler, ** catch-all)
+  [ ] graph nodes + run logs (GraphHandler)
+  [ ] notifications (NotificationHandler — per instance, logs.db-derived)
 Served as text/plain by FileMiddleware — NO route is registered for it.
 Touch ANY route under /api/instances/... → update this file in the same change.
 -->
@@ -99,6 +101,39 @@ Knowledge — per-persona plain-text file store
   PUT    /api/instances/:id/personas/:pid/knowledge/**path  body = raw text → 200
   DELETE /api/instances/:id/personas/:pid/knowledge/**path  → 204
   (** = catch-all sub-path. ../ traversal is rejected with 403.)
+
+Graph — node graph per instance (powers /graph.html)
+  GET    /api/instances/:id/graph              → { nodes:[GraphNode] }
+  POST   /api/instances/:id/graph              body { prompt, agent, parent_id? |
+                                                   insert_before?, mcp?, mcp_auth? }
+                                                   → { node fields… }   (launches a run)
+  PUT    /api/instances/:id/graph/:nid         body: any subset (mcp, mcp_auth,
+                                                   summary, personas, active)
+  DELETE /api/instances/:id/graph/:nid[?chain=true] → { nodes:[GraphNode] }
+  POST   /api/instances/:id/graph/:nid/summary body { prompt? }  → regenerate /
+                                                   re-run with the edited prompt
+  POST   /api/instances/:id/graph/:nid/run     body { prompt }   → run log entry
+  GET    /api/instances/:id/graph/:nid/logs    → { logs:[…] }
+  GET    /api/agents                           → { agents:[{ name }] }
+  Node delete keeps children — they move up to the deleted node's parent, or
+  become roots. ?chain=true deletes the node plus its whole subtree. Run logs
+  cascade with the node(s), inside one transaction. 409 while the node (or any
+  deleted node) is still running. Unlike other DELETEs this returns 200 with
+  the fresh node list — never 204.
+
+Notifications — per instance, derived from its own logs.db
+(run_ends + terminal graph_run_logs, minus notification_reads markers)
+  GET  /api/instances/:id/notifications?limit=100 → { items:[Notification], unread_count }
+  POST /api/instances/:id/notifications/:kind/:ref/read → 200 empty body
+       kind ∈ workflow (ref = session) | node_run (ref = graph_run_log id)
+  POST /api/instances/:id/notifications/read-all   → 200 empty body
+  GET  /api/instances → each instance also carries unreadNotifications
+  Notification : { id (=ref), kind, instance_path, session?, workflow_id?,
+    node_id?, title, prompt?, success, took?, ended_at (unix ms), read }
+  kind=workflow → open /workflow-log.html?instance=<instance_path>&session=<session>
+  kind=node_run → open /graph.html?instance=<instance_path>&node=<node_id>
+  Read state changes ONLY through the two POSTs above — opening a deep link
+  never marks read. No poller, no separate db — everything reads logs.db live.
 
 ## Core models
 - Persona : { name, role, about(=system prompt), task, avatar?, agent? }

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenLoop Notifications</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-canvas:      #0f1117;
+            --bg-card:        #16181f;
+            --bg-card-hover:  #1b1e27;
+            --border-card:    rgba(255,255,255,0.08);
+            --accent-green:   #34c759;
+            --accent-red:     #ff453a;
+            --accent-blue:    #0a84ff;
+            --text-primary:   #f0f0f5;
+            --text-muted:     #8e8ea0;
+            --text-faint:     #4a4a5a;
+            --toolbar-height: 48px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            background: var(--bg-canvas);
+            color: var(--text-primary);
+            font-family: 'Inter', -apple-system, sans-serif;
+            font-size: 14px;
+        }
+        .toolbar {
+            position: fixed; inset: 0 0 auto 0; height: var(--toolbar-height);
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 20px;
+            background: rgba(15,17,23,0.92); backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-card);
+            z-index: 10;
+        }
+        .toolbar-title {
+            display: flex; align-items: center; gap: 10px;
+            font-weight: 600; font-size: 15px;
+        }
+        .unread-pill {
+            min-width: 20px; height: 20px; padding: 0 6px;
+            display: inline-flex; align-items: center; justify-content: center;
+            border-radius: 10px;
+            background: var(--accent-blue);
+            color: #fff; font-size: 11px; font-weight: 600;
+        }
+        .unread-pill.zero { background: var(--bg-card-hover); color: var(--text-faint); }
+        .mark-all-btn {
+            display: none;
+            border: 1px solid var(--border-card); border-radius: 8px;
+            background: var(--bg-card); color: var(--text-muted);
+            font: inherit; font-size: 12px;
+            padding: 6px 12px; cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .mark-all-btn.visible { display: block; }
+        .mark-all-btn:hover { color: var(--text-primary); border-color: var(--accent-blue); }
+
+        .list {
+            max-width: 720px; margin: 0 auto;
+            padding: calc(var(--toolbar-height) + 24px) 16px 40px;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .empty {
+            text-align: center; color: var(--text-faint);
+            padding: 80px 0; font-size: 13px;
+        }
+        .error-banner {
+            text-align: center; color: var(--accent-red);
+            padding: 40px 0; font-size: 13px;
+        }
+        .notif {
+            display: flex; align-items: flex-start; gap: 12px;
+            padding: 14px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-left: 3px solid transparent;
+            border-radius: 12px;
+        }
+        .notif.unread {
+            border-left-color: var(--accent-blue);
+            background: linear-gradient(90deg, rgba(10,132,255,0.07), var(--bg-card) 40%);
+        }
+        .notif-icon {
+            width: 28px; height: 28px; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 8px; font-size: 14px;
+            background: var(--bg-card-hover);
+        }
+        .notif-icon.ok { color: var(--accent-green); }
+        .notif-icon.fail { color: var(--accent-red); }
+        .notif-body { flex: 1; min-width: 0; }
+        .notif-head {
+            display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+        }
+        .notif-kind {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase;
+            color: var(--text-faint);
+        }
+        .notif-title { font-weight: 600; font-size: 14px; }
+        .notif-title a { color: var(--accent-blue); text-decoration: none; }
+        .notif-title a:hover { text-decoration: underline; }
+        .notif-status { font-size: 12px; font-weight: 500; }
+        .notif-status.ok { color: var(--accent-green); }
+        .notif-status.fail { color: var(--accent-red); }
+        .notif-meta {
+            display: flex; gap: 10px; margin-top: 3px;
+            font-size: 11px; color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .notif-prompt {
+            margin-top: 6px;
+            font-size: 12px; color: var(--text-muted);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .notif-open {
+            flex-shrink: 0; align-self: center;
+            font-size: 11px; color: var(--text-muted); text-decoration: none;
+            border: 1px solid var(--border-card); border-radius: 6px;
+            padding: 4px 8px;
+        }
+        .notif-open:hover { color: var(--accent-blue); border-color: var(--accent-blue); }
+        .mark-read-btn {
+            flex-shrink: 0; align-self: center;
+            border: none; background: none; cursor: pointer;
+            color: var(--text-faint); font-size: 11px; font-family: inherit;
+            padding: 4px 6px;
+        }
+        .notif.unread .mark-read-btn { color: var(--accent-blue); }
+        .mark-read-btn:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <header class="toolbar">
+        <div class="toolbar-title">
+            Notifications
+            <span id="unread-pill" class="unread-pill zero">0</span>
+        </div>
+        <button id="mark-all" class="mark-all-btn">Mark all as read</button>
+    </header>
+    <main id="list" class="list">
+        <div class="empty">Loading…</div>
+    </main>
+    <script src="/notifications.js"></script>
+</body>
+</html>

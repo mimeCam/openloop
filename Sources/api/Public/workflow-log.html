@@ -26,6 +26,7 @@
             --toolbar-height:      48px;
             --col-gap:             140px;
             --row-gap:             64px;
+            --panel-w:             420px;
         }
 
         html, body {
@@ -525,6 +526,7 @@
         .node-card-avatar.is-persona {
             background: linear-gradient(135deg, #0a84ff, #30d158);
         }
+        img.node-card-avatar { border: none; box-shadow: none; object-fit: cover; }
 
         /* ── Selected node ring ── */
         .node-card.selected {
@@ -537,7 +539,7 @@
             right: 0;
             top: var(--toolbar-height);
             height: calc(100% - var(--toolbar-height));
-            width: 420px;
+            width: var(--panel-w);
             background: #16181f;
             border-left: 1px solid rgba(52,199,89,0.15);
             border-radius: 16px 0 0 16px;
@@ -551,6 +553,29 @@
         }
         #detail-panel.open { transform: translateX(0); }
 
+        .panel-resize {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 10px;
+            cursor: ew-resize;
+            z-index: 10;
+            touch-action: none;
+        }
+        .panel-resize::after {
+            content: '';
+            position: absolute;
+            left: 3px; top: 50%;
+            transform: translateY(-50%);
+            width: 3px; height: 36px;
+            border-radius: 2px;
+            background: rgba(255,255,255,0.16);
+            transition: background 0.15s ease, height 0.15s ease;
+        }
+        .panel-resize:hover::after,
+        .panel-resize.dragging::after { background: var(--accent-green); height: 48px; }
+        body.panel-resizing { user-select: none; cursor: ew-resize; }
+        body.panel-resizing #graph-canvas { transition: none; }
+
         #detail-panel-inner {
             display: flex;
             flex-direction: column;
@@ -562,7 +587,7 @@
         #graph-canvas {
             transition: right 0.30s cubic-bezier(0.4,0,0.2,1);
         }
-        #graph-canvas.panel-open { right: 420px; }
+        #graph-canvas.panel-open { right: var(--panel-w); }
 
         .detail-panel-header {
             background: var(--bg-card);
@@ -694,6 +719,7 @@
 
     <!-- Detail panel -->
     <div id="detail-panel">
+        <div class="panel-resize"></div>
         <div id="detail-panel-inner"></div>
     </div>
 

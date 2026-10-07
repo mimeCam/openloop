@@ -31,6 +31,11 @@ unset API_KEY API_ENDPOINT
 export API_KEY="🔥🔥🔥"
 export API_ENDPOINT="https://api.z.ai/api/anthropic"
 
+export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7
+export CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3
+
 SUFFIX="-z"
 
 CLAUDE_JSON="$HOME/.claude${SUFFIX}.json"
@@ -47,7 +52,7 @@ MODEL_ENV_FLAGS=()
 [ -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" ] && MODEL_ENV_FLAGS+=(-e "ANTHROPIC_DEFAULT_HAIKU_MODEL=$ANTHROPIC_DEFAULT_HAIKU_MODEL")
 [ -n "$CLAUDE_CODE_SUBAGENT_MODEL" ] && MODEL_ENV_FLAGS+=(-e "CLAUDE_CODE_SUBAGENT_MODEL=$CLAUDE_CODE_SUBAGENT_MODEL")
 
-CLAUDE_CMD="claude --no-chrome --dangerously-skip-permissions --system-prompt \"\$SYSTEM_PROMPT\""
+CLAUDE_CMD="claude --model sonnet --no-chrome --dangerously-skip-permissions --system-prompt \"\$SYSTEM_PROMPT\""
 if [ -n "$PROMPT" ]; then
 	CLAUDE_CMD="$CLAUDE_CMD -p \"\$PROMPT\""
 fi

@@ -97,6 +97,13 @@ struct GraphHandler: Sendable {
         let rows = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath)
         return GraphRunLogsResponse(logs: rows.map(toContent))
     }
+
+    func delete(req: Request) async throws -> GraphNodesResponse {
+        let instancePath = try instancePathFrom(req)
+        let nodeId = try nodeIdFrom(req)
+        let chain = req.query[Bool.self, at: "chain"] == true
+        return try await deleteTarget(id: nodeId, chain: chain, instancePath: instancePath)
+    }
 }
 
 private extension GraphHandler {
@@ -174,6 +181,39 @@ private extension GraphHandler {
 
     func findNode(id: String, at instancePath: String) throws -> GraphNode? {
         try GraphStore.fetchNodes(at: instancePath).first { $0.id == id }
+    }
+
+    var deleteBusyReason: String { "Still running — let the run finish, then delete." }
+
+    func deleteTarget(id: String, chain: Bool, instancePath: String) async throws -> GraphNodesResponse {
+        let nodes = try GraphStore.fetchNodes(at: instancePath)
+        guard let node = nodes.first(where: { $0.id == id }) else {
+            throw Abort(.notFound, reason: "Node not found: \(id)")
+        }
+        let ids = chain ? GraphStore.subtreeIds(of: node, in: nodes) : Set([node.id])
+        try await assertDeletable(ids, nodes: nodes, instancePath: instancePath)
+        if chain { try GraphStore.deleteNodes(ids: ids, at: instancePath) }
+        else { try GraphStore.deleteNode(id: node.id, at: instancePath) }
+        return GraphNodesResponse(nodes: try graphContents(at: instancePath))
+    }
+
+    func assertDeletable(_ ids: Set<String>, nodes: [GraphNode], instancePath: String) async throws {
+        let busy = nodes.filter { ids.contains($0.id) && isRunning($0.status) }
+        guard busy.isEmpty else { throw Abort(.conflict, reason: deleteBusyReason) }
+        try await assertNoLiveRuns(ids, instancePath: instancePath)
+    }
+
+    func assertNoLiveRuns(_ ids: Set<String>, instancePath: String) async throws {
+        for id in ids {
+            if await GraphRunRegistry.shared.isLive(id) { throw Abort(.conflict, reason: deleteBusyReason) }
+        }
+        for log in try GraphStore.fetchProgressRunLogs(at: instancePath) where ids.contains(log.nodeId) {
+            if await GraphRunRegistry.shared.isLive(log.id) { throw Abort(.conflict, reason: deleteBusyReason) }
+        }
+    }
+
+    func isRunning(_ status: String) -> Bool {
+        status == "progress" || status == "summarizing"
     }
 
     func resolveScript(for agent: String) throws -> FilePath {
