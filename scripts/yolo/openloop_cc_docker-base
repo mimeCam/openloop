@@ -138,19 +138,13 @@ fi
 # Determine volume mounts based on mode
 VOLUME_MOUNTS=()
 
-CTX_LINE="${PROMPT%%$'\n'*}"
-CTX_MOUNTED=""
-for CTX_TOKEN in $CTX_LINE; do
-    CTX_FILE="${CTX_TOKEN#@}"
-    case "$CTX_FILE" in
-        "$HOME"/.local/state/tmp/graph-runs/*) ;;
-        *) continue ;;
-    esac
-    CTX_DIR="${CTX_FILE%/*}"
-    case " $CTX_MOUNTED " in *" $CTX_DIR "*) continue ;; esac
-    CTX_MOUNTED="$CTX_MOUNTED $CTX_DIR"
-    [ -f "$CTX_FILE" ] && VOLUME_MOUNTS+=(-v "$CTX_DIR:$CTX_DIR:ro")
-done
+if [ -n "$GRAPH_RUN_DIR" ]; then
+    if [ ! -d "$GRAPH_RUN_DIR" ]; then
+        echo "ERR. GRAPH_RUN_DIR does not exist: $GRAPH_RUN_DIR" >&2
+        exit 1
+    fi
+    VOLUME_MOUNTS+=(-v "$GRAPH_RUN_DIR:/context:ro")
+fi
 
 if [ -n "$MCP_CONFIG_PATH" ] && [ -f "$MCP_CONFIG_PATH" ]; then
     VOLUME_MOUNTS+=(-v "$MCP_CONFIG_PATH:$MCP_CONFIG_PATH:ro")

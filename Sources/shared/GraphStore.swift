@@ -431,12 +431,30 @@ public struct GraphStore {
         })
     }
 
+    public static let containerCtxDir = "/context"
+
     public static func contextRunDir(_ runId: String) -> FilePath {
         Paths.tmpRoot.appending("graph-runs").appending(runId)
     }
 
     public static func deleteContextRunDir(_ id: String) {
-        _ = PathIO.deleteDirectoryAndItsContents(atPath: contextRunDir(String(id.prefix(8))).string)
+        _ = PathIO.deleteDirectoryAndItsContents(atPath: contextRunDir(id).string)
+    }
+
+    public static func sweepStaleRunArtifacts(maxAge: TimeInterval = 24 * 3600) {
+        let tmp = Paths.tmpRoot
+        sweepStaleEntries(in: tmp.appending("graph-runs").string, maxAge: maxAge)
+        sweepStaleEntries(in: tmp.appending("graph-mcp").string, maxAge: maxAge)
+    }
+
+    static func sweepStaleEntries(in dir: String, maxAge: TimeInterval) {
+        let cutoff = Date().addingTimeInterval(-maxAge)
+        for entry in (try? PathIO.contentsOfDirectory(atPath: dir)) ?? [] {
+            let path = (dir as NSString).appendingPathComponent(entry)
+            if let mtime = PathIO.modificationDate(atPath: path), mtime < cutoff {
+                _ = PathIO.deleteDirectoryAndItsContents(atPath: path)
+            }
+        }
     }
 
     public static func mcpConfigPath(_ runId: String) -> FilePath {

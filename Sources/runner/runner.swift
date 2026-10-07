@@ -532,8 +532,9 @@ private struct PersonaRunContext {
 private func personaRunContext(personaId: String, runId: String, runDir: FilePath) -> PersonaRunContext {
     guard isRealPersona(personaId) else { return PersonaRunContext(prefix: "", mcpPath: nil) }
     let (files, mcps) = collectContext(personaId: personaId, runDir: runDir)
-    assert(files.allSatisfy { $0.hasPrefix(runDir.string) })
-    let prefix = files.isEmpty ? "" : files.map { "@\($0)" }.joined(separator: " ") + "\n\n"
+    assert(files.allSatisfy { $0.string.hasPrefix(runDir.string) })
+    let refs = files.map { "\(GraphStore.containerCtxDir)/\($0.lastComponent)" }.joined(separator: " ")
+    let prefix = files.isEmpty ? "" : "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs)\n\n"
     return PersonaRunContext(prefix: prefix, mcpPath: GraphStore.writeMcpConfig(mcps, runId: runId))
 }
 
@@ -541,7 +542,7 @@ private func isRealPersona(_ id: String) -> Bool {
     id != "_bottom_" && id != "_head_" && !id.hasPrefix(":")
 }
 
-private func collectContext(personaId: String, runDir: FilePath) -> ([String], Set<GraphMcpEndpoint>) {
+private func collectContext(personaId: String, runDir: FilePath) -> ([FilePath], Set<GraphMcpEndpoint>) {
     var mcps = Set<GraphMcpEndpoint>()
     let files = Paths.dirsToHome()
         .filter { PathIO.isFileExistent(atPath: GraphStore.dbPath(at: $0.string)) }
@@ -554,15 +555,21 @@ private func collectContext(personaId: String, runDir: FilePath) -> ([String], S
     return (files, mcps)
 }
 
-private func writeContextFile(_ text: String, runDir: FilePath) -> String? {
+private func writeContextFile(_ text: String, runDir: FilePath) -> FilePath? {
     do {
         let file = try GraphStore.writeContextFile(text, in: runDir)
         assert(PathIO.isFileExistent(atPath: file.string))
-        return file.string
+        return file
     } catch {
         assertionFailure("\(error)")
         return nil
     }
+}
+
+private func runEnv(runDir: FilePath, mcpPath: String?) -> [String: String] {
+    var env = ["GRAPH_RUN_DIR": runDir.string]
+    if let mcpPath { env["MCP_CONFIG_PATH"] = mcpPath }
+    return env
 }
 
 private func deleteMcpConfig(_ path: String) {
@@ -828,7 +835,7 @@ private func runGraph(
                 ],
                 chroot: Paths.curDir, // .init(from.folder),
                 stdin: context,
-                env: runCtx.mcpPath.map { ["MCP_CONFIG_PATH": $0] }
+                env: runEnv(runDir: ctxRunDir, mcpPath: runCtx.mcpPath)
             ) ?? ""
 
             let success = res.notEmpty

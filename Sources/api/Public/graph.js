@@ -724,6 +724,7 @@
         bindMcpField(n.id);
         bindPersonaPicks(n);
         bindSummaryButton(n);
+        bindRetryButton(n);
         bindDeleteButtons();
         bindCopyButtons($('detail-panel-inner'));
         bindAvatarFallbacks($('detail-panel-inner'));
@@ -1230,19 +1231,37 @@
         $('regen-prompt').focus();
     }
 
+    async function postSummary(nodeId, prompt) {
+        await fetchJson(summaryUrl(nodeId), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+        });
+        await load();
+    }
+
     async function submitRegen(nodeId) {
         promptEditing = false;
-        const prompt = $('regen-prompt').value.trim();
         try {
-            await fetchJson(summaryUrl(nodeId), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt })
-            });
-            await load();
+            await postSummary(nodeId, $('regen-prompt').value.trim());
+            openPanel(nodes.find(x => x.id === selectedId));
         } catch (e) {
             showError(`Failed to regenerate summary: ${e.message}`);
         }
+    }
+
+    async function submitRetry(nodeId) {
+        try {
+            await postSummary(nodeId, '');
+            openPanel(nodes.find(x => x.id === selectedId));
+        } catch (e) {
+            showError(`Failed to rerun: ${e.message}`);
+        }
+    }
+
+    function bindRetryButton(n) {
+        const btn = $('detail-panel-inner').querySelector('#retry-btn');
+        if (btn) btn.addEventListener('click', () => submitRetry(n.id));
     }
 
     function summaryUrl(nodeId) {
@@ -1268,10 +1287,12 @@
             return `<div><div class="detail-section-label">RUNNING</div>` +
                 renderBubble('output', '', 'in progress…') + `</div>`;
         }
-        const cls = n.status === 'failed' ? 'detail-section-label result error' : 'detail-section-label result';
-        const label = n.status === 'failed' ? 'ERROR' : 'RESULT';
+        const failed = n.status === 'failed';
+        const cls = failed ? 'detail-section-label result error' : 'detail-section-label result';
+        const label = failed ? 'ERROR' : 'RESULT';
+        const again = failed ? '<button class="summary-regen" id="retry-btn">retry</button>' : '';
         return `<div><div class="${cls}">${label}</div>` +
-            renderBubble(n.status === 'failed' ? 'output error' : 'output', '', n.output || '(empty)') + `</div>`;
+            renderBubble(failed ? 'output error' : 'output', '', n.output || '(empty)') + again + `</div>`;
     }
 
     function renderBubble(cls, label, text, threshold = 300) {

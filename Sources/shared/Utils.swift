@@ -241,6 +241,11 @@ public extension PathIO {
         )
     }
 
+    static func modificationDate(atPath path: String) -> Date? {
+        let attrs = try? fm.attributesOfItem(atPath: removingFileProtocolPrefix(path: path))
+        return attrs?[.modificationDate] as? Date
+    }
+
     static func deleteDirectoryAndItsContents(atPath inputPath: String) -> Bool {
         let path = removingFileProtocolPrefix(path: inputPath)
 
