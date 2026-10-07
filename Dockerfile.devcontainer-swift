@@ -5,7 +5,7 @@ FROM yolo_devcontainer
 SHELL ["/bin/bash", "-c"]
 RUN curl -O https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz && \
     tar zxf swiftly-$(uname -m).tar.gz && \
-    ./swiftly init --quiet-shell-followup && \
+    ./swiftly init --quiet-shell-followup --no-modify-profile && \
     . "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh" && \
     echo '. "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"' >> ~/.zshrc && \
     echo '. "${SWIFTLY_HOME_DIR:-$HOME/.local/share/swiftly}/env.sh"' >> ~/.bashrc && \
