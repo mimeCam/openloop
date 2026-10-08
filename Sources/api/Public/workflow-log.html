@@ -653,6 +653,56 @@
             color: var(--text-muted);
             margin-bottom: 8px;
         }
+
+        /* ── Mobile sheet ──
+           768px matches the breakpoint convention in styles.css (L3934).
+           applyPanelWidth() writes --panel-w as an INLINE style on <html>,
+           which outranks any stylesheet rule — so mobile dimensions are set
+           directly on the elements, never via the custom property alone. */
+        @media (max-width: 768px) {
+            :root {
+                --col-gap: 24px;    /* denser graph rhythm on small screens */
+                --row-gap: 40px;
+                --panel-w: 100vw;   /* first-visit default before any inline value exists */
+            }
+
+            /* Detail panel becomes a full-width sheet; max-width is the
+               belt-and-braces guard that beats any stale inline --panel-w */
+            #detail-panel { width: 100%; max-width: 100vw; box-sizing: border-box; }
+            #graph-canvas.panel-open { right: 100vw; }
+            .panel-resize { display: none; }        /* you don't resize a page */
+            .detail-panel-close { width: 44px; height: 44px; }
+
+            /* Touch is the primary input: copy button always visible (hover
+               never fires on touch), show-more gets a fat tap area */
+            .wl-bubble-copy { display: flex; width: 32px; height: 32px; }
+            .wl-expand-btn {
+                display: inline-flex; align-items: center;
+                min-height: 44px; padding: 12px 0;
+            }
+
+            /* Toolbar diet: keep title + status dot, drop monospace stats */
+            #wl-time-range, .wl-meta-sep, #wl-avg-duration { display: none; }
+            #wl-close-btn { width: 40px; height: 40px; }
+            .wl-icon-btn { width: 40px; height: 40px; }
+
+            /* Mini-map starts as its 88px pill (JS collapses it on load);
+               expanded it must still fit the screen */
+            #minimap:not(.collapsed) { width: min(210px, calc(100vw - 24px)); }
+
+            /* Canvas breathing room: no sticky level labels → no 240px gutter */
+            #graph-grid { padding: 24px 16px 60px; }
+            .col-header { display: none; }
+
+            /* Safe-area inset in case the page ships as a home-screen PWA */
+            .detail-panel-body { padding-bottom: max(32px, env(safe-area-inset-bottom)); }
+        }
+
+        /* Motion stays in the family — but respect prefers-reduced-motion,
+           matching the JS scrollIntoView behavior */
+        @media (prefers-reduced-motion: reduce) {
+            #detail-panel, #graph-canvas { transition: none; }
+        }
     </style>
 </head>
 <body>

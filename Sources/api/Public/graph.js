@@ -11,6 +11,7 @@
     let summaryEditing = false;
     let panelStatus = '';
     let panelJson = '';
+    let logsJson = '';
     let countdownInterval = null;
     let countdownValue = 5;
     let viewMode = 'normal';
@@ -712,7 +713,9 @@
         summaryEditing = false;
         panelStatus = n.status;
         panelJson = JSON.stringify(n);
+        const snap = expansionSnapshot($('detail-panel-inner'));
         $('detail-panel-inner').innerHTML = panelHtml(n);
+        restoreExpansion($('detail-panel-inner'), snap);
         $('detail-panel').classList.add('open');
         $('graph-canvas').classList.add('panel-open');
         bindPanelControls(n);
@@ -846,6 +849,7 @@
             .forEach(c => c.classList.remove('selected'));
         selectedId = null;
         panelJson = '';
+        logsJson = '';
         promptEditing = false;
         summaryEditing = false;
         panelStatus = '';
@@ -945,6 +949,9 @@
         try {
             const data = await fetchJson(url);
             if (selectedId !== nodeId) return;
+            const json = JSON.stringify(data.logs);
+            if (json === logsJson) return;
+            logsJson = json;
             renderLogs(data.logs);
         } catch (e) {
             showError(`Failed to load runs: ${e.message}`);
@@ -954,10 +961,34 @@
     function renderLogs(logs) {
         const el = $('runs-list');
         if (!el) return;
+        const snap = expansionSnapshot(el);
         el.innerHTML = logs.length
             ? logs.map(runLogHtml).join('')
             : '<div class="summary-missing">no runs yet</div>';
         bindCopyButtons(el);
+        restoreExpansion(el, snap);
+    }
+
+    function expansionSnapshot(container) {
+        const open = new Map();
+        container.querySelectorAll('.wl-bubble-text').forEach(t => {
+            if (!t.classList.contains('truncated')) open.set(expansionKey(t), true);
+        });
+        return open;
+    }
+
+    function restoreExpansion(container, snap) {
+        container.querySelectorAll('.wl-bubble-text').forEach(t => {
+            if (!snap.get(expansionKey(t))) return;
+            t.classList.remove('truncated');
+            t.classList.add('expanded');
+            const btn = t.parentElement.querySelector('.wl-expand-btn');
+            if (btn) btn.remove();
+        });
+    }
+
+    function expansionKey(t) {
+        return t.textContent.slice(0, 200);
     }
 
     function runLogHtml(l) {
