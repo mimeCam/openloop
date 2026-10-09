@@ -15,13 +15,8 @@
     let personaIndex     = new Map();
     const ZOOM_STEPS    = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50];
     const ISOLATED_RUN  = false;
-    // Keep PANEL_DEFAULT_W in sync with --panel-w in workflow-log.html,
-    // and MOBILE_BP in sync with the @media (max-width: 768px) breakpoint
-    // there (and the project convention in styles.css).
-    const PANEL_DEFAULT_W = 420;
-    const PANEL_MIN_W     = 320;
-    const PANEL_MAX_FRAC  = 0.75;
-    const MOBILE_BP       = 768;
+    // Panel physics (clamp, drag, mobile sheet) live in panel.js,
+    // shared with graph.html via window.OpenLoopPanel.
 
     // ── Entry ────────────────────────────────────────────────────────────────
     function init() {
@@ -33,7 +28,9 @@
         document.getElementById('wl-zoom-in') .addEventListener('click', () => stepZoom(1));
         document.getElementById('wl-zoom-out').addEventListener('click', () => stepZoom(-1));
         document.getElementById('wl-zoom-label').addEventListener('click', () => applyZoom(1.0));
-        initPanelResize();
+        // Shared width memory: localStorage['openloop-panel-w'] is a contract
+        // with graph.html — both pages run the identical clamp in panel.js.
+        OpenLoopPanel.initPanelResize();
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape') { closeDetailPanel(); return; }
             if (!(e.metaKey || e.ctrlKey)) return;
@@ -264,56 +261,6 @@
         document.querySelectorAll('.node-card.selected').forEach(c => c.classList.remove('selected'));
     }
 
-    function initPanelResize() {
-        const saved = parseInt(localStorage.getItem('openloop-panel-w'));
-        if (saved && !isMobileWidth()) applyPanelWidth(saved); // desktop-saved width must not reach a phone
-        const handle = document.querySelector('.panel-resize');
-        handle.addEventListener('pointerdown', startPanelDrag);
-        handle.addEventListener('dblclick', resetPanelWidth);
-    }
-
-    function resetPanelWidth() {
-        applyPanelWidth(PANEL_DEFAULT_W);
-        persistPanelWidth(PANEL_DEFAULT_W);
-    }
-
-    function startPanelDrag(e) {
-        e.preventDefault();
-        document.body.classList.add('panel-resizing');
-        e.target.setPointerCapture(e.pointerId);
-        e.target.classList.add('dragging');
-        const move = ev => applyPanelWidth(window.innerWidth - ev.clientX);
-        e.target.addEventListener('pointermove', move);
-        e.target.addEventListener('pointerup', () => endPanelDrag(e.target, move), { once: true });
-    }
-
-    function endPanelDrag(target, move) {
-        target.removeEventListener('pointermove', move);
-        target.classList.remove('dragging');
-        document.body.classList.remove('panel-resizing');
-        persistPanelWidth(currentPanelWidth());
-    }
-
-    function isMobileWidth() { return window.innerWidth <= MOBILE_BP; }
-
-    function clampPanelWidth(w, vw) {
-        const floor = Math.min(PANEL_MIN_W, vw); // the floor must never exceed the viewport itself
-        return Math.max(floor, Math.min(w, vw * PANEL_MAX_FRAC));
-    }
-
-    function applyPanelWidth(w) {
-        document.documentElement.style.setProperty('--panel-w',
-            Math.round(clampPanelWidth(w, window.innerWidth)) + 'px');
-    }
-
-    function currentPanelWidth() {
-        return parseInt(document.documentElement.style.getPropertyValue('--panel-w')) || PANEL_DEFAULT_W;
-    }
-
-    function persistPanelWidth(w) {
-        localStorage.setItem('openloop-panel-w', String(w));
-    }
-
     function renderDetailContent(log) {
         return renderDetailHeader(log) + `<div class="detail-panel-body">${renderDetailBubbles(log)}</div>`;
     }
@@ -491,7 +438,7 @@
     function wireMinimapToggle(map) {
         map.querySelector('.mm-toggle-btn').addEventListener('click', toggleMinimap);
         // Phones start collapsed: the map is a pill, not a wall (UX spec §4.3)
-        if (isMobileWidth() && !minimapCollapsed) toggleMinimap();
+        if (OpenLoopPanel.isMobileWidth() && !minimapCollapsed) toggleMinimap();
     }
 
     function toggleMinimap() {
@@ -680,7 +627,6 @@
         checkRenderDetailHeader();
         checkRenderDetailBubbles();
         checkInnerPersonaFilter();
-        checkClampPanelWidth();
         console.log('All sanity checks passed.');
     }
 
@@ -737,12 +683,6 @@
         console.assert(filtered[0].personaId === 'Alice', 'filter: Alice');
         console.assert(filtered[1].personaId === 'Charlie', 'filter: Charlie');
         console.log('OK: innerPersonaFilter');
-    }
-
-    function checkClampPanelWidth() {
-        console.assert(clampPanelWidth(9999, 375)  <= 375,  'clamp: 375px phone');
-        console.assert(clampPanelWidth(9999, 1280) === 960, 'clamp: desktop 75% cap');
-        console.log('OK: clampPanelWidth');
     }
 
     // ── Boot ──────────────────────────────────────────────────────────────────

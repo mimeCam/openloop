@@ -15,6 +15,7 @@
     let countdownInterval = null;
     let countdownValue = 5;
     let viewMode = 'normal';
+    const ISOLATED_RUN = false; // flip to true to run sanity checks in DevTools
 
     const $ = id => document.getElementById(id);
 
@@ -517,49 +518,6 @@
         $('graph-canvas').addEventListener('click', e => {
             if (!e.target.closest('.node-card')) closePanel();
         });
-    }
-
-    function initPanelResize() {
-        const saved = parseInt(localStorage.getItem('openloop-panel-w'));
-        if (saved) applyPanelWidth(saved);
-        const handle = document.querySelector('.panel-resize');
-        handle.addEventListener('pointerdown', startPanelDrag);
-        handle.addEventListener('dblclick', resetPanelWidth);
-    }
-
-    function resetPanelWidth() {
-        applyPanelWidth(420);
-        persistPanelWidth(420);
-    }
-
-    function startPanelDrag(e) {
-        e.preventDefault();
-        document.body.classList.add('panel-resizing');
-        e.target.setPointerCapture(e.pointerId);
-        e.target.classList.add('dragging');
-        const move = ev => applyPanelWidth(window.innerWidth - ev.clientX);
-        e.target.addEventListener('pointermove', move);
-        e.target.addEventListener('pointerup', () => endPanelDrag(e.target, move), { once: true });
-    }
-
-    function endPanelDrag(target, move) {
-        target.removeEventListener('pointermove', move);
-        target.classList.remove('dragging');
-        document.body.classList.remove('panel-resizing');
-        persistPanelWidth(currentPanelWidth());
-    }
-
-    function applyPanelWidth(w) {
-        const clamped = Math.max(320, Math.min(w, window.innerWidth * 0.75));
-        document.documentElement.style.setProperty('--panel-w', Math.round(clamped) + 'px');
-    }
-
-    function currentPanelWidth() {
-        return parseInt(document.documentElement.style.getPropertyValue('--panel-w')) || 420;
-    }
-
-    function persistPanelWidth(w) {
-        localStorage.setItem('openloop-panel-w', String(w));
     }
 
     function selectNode(id) {
@@ -1385,6 +1343,37 @@
         return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
     }
 
+    // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
+    function runSanityChecks() {
+        checkFmtDur();
+        checkClampPanelWidth();
+        checkRenderBubbleTruncation();
+        console.log('All sanity checks passed.');
+    }
+
+    function checkFmtDur() {
+        console.assert(fmtDur(3)    === '3s',     'fmtDur: 3s');
+        console.assert(fmtDur(90)   === '1m 30s', 'fmtDur: 1m 30s');
+        console.assert(fmtDur(null) === '',       'fmtDur: null');
+        console.log('OK: fmtDur');
+    }
+
+    function checkClampPanelWidth() {
+        const clamp = OpenLoopPanel.clampPanelWidth;
+        console.assert(clamp(9999, 375)  <= 375,  'clamp: 375px phone must never overflow');
+        console.assert(clamp(9999, 1280) === 960, 'clamp: desktop 75% cap');
+        console.assert(clamp(200,  300)  === 300, 'clamp: floor never exceeds a tiny viewport');
+        console.log('OK: clampPanelWidth (shared panel.js)');
+    }
+
+    function checkRenderBubbleTruncation() {
+        const short = renderBubble('output', '', 'hi');
+        const long  = renderBubble('output', '', 'x'.repeat(301));
+        console.assert(!short.includes('wl-expand-btn'), 'bubble: short text has no expand button');
+        console.assert(long.includes('wl-expand-btn'),   'bubble: long text truncates with expand button');
+        console.log('OK: renderBubble truncation');
+    }
+
     $('composer-text').addEventListener('input', e => {
         const ready = e.target.value.trim().length > 0;
         document.querySelectorAll('.agent-btn').forEach(b => { b.disabled = !ready; });
@@ -1410,9 +1399,14 @@
         showError('Missing ?instance= parameter');
     } else {
         (async () => {
+            if (ISOLATED_RUN) { runSanityChecks(); return; }
             bindExpandButtons($('detail-panel-inner'));
             bindCanvasDismiss();
-            initPanelResize();
+            // Panel physics (clamp, drag, mobile sheet) live in panel.js,
+            // shared with workflow-log.html. Shared width memory:
+            // localStorage['openloop-panel-w'] is a contract with that page —
+            // both pages run the identical clamp.
+            OpenLoopPanel.initPanelResize();
             if (localStorage.getItem('openloop-birds-eye') === 'birds') setMode('birds');
             await loadAgents();
             await loadInstances();
