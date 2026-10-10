@@ -7,6 +7,7 @@
     let composerRefId = null;
     let mcpOriginal = '';
     let mcpAuthOriginal = '';
+    let nameOriginal = '';
     let promptEditing = false;
     let summaryEditing = false;
     let panelStatus = '';
@@ -15,6 +16,7 @@
     let countdownInterval = null;
     let countdownValue = 5;
     let viewMode = 'normal';
+    let attractPlayed = false; // one attract pulse per empty-graph period
     const ISOLATED_RUN = false; // flip to true to run sanity checks in DevTools
 
     const $ = id => document.getElementById(id);
@@ -143,6 +145,8 @@
         if (input && input.value.trim() !== mcpOriginal) return;
         const authInput = $('mcp-auth-input');
         if (authInput && authInput.value.trim() !== mcpAuthOriginal) return;
+        const nameInput = $('name-input');
+        if (nameInput && nameInput.value.trim() !== nameOriginal) return;
         openPanel(n);
     }
 
@@ -183,12 +187,22 @@
         return map;
     }
 
+    // root-ness has one definition: no parent, or a parent outside the graph
+    // (delete bridges children up; orphans re-root). Columns, card names and
+    // the panel's CHAIN NAME section all read from these two helpers.
+    function rootNodes() {
+        const ids = new Set(nodes.map(n => n.id));
+        return nodes.filter(n => !n.parent_id || !ids.has(n.parent_id));
+    }
+
+    function isRoot(n) {
+        return rootNodes().some(r => r.id === n.id);
+    }
+
     function buildColumns() {
         const byParent = childrenMap();
-        const ids = new Set(nodes.map(n => n.id));
-        const roots = nodes.filter(n => !n.parent_id || !ids.has(n.parent_id));
         const cols = [];
-        let level = roots;
+        let level = rootNodes();
         while (level.length) {
             cols.push(level);
             level = level.flatMap(n => byParent.get(n.id) || []);
@@ -228,16 +242,26 @@
     }
 
     function render() {
-        return viewMode === 'birds' ? renderBirdsEye() : renderGrid();
+        const out = viewMode === 'birds' ? renderBirdsEye() : renderGrid();
+        syncAddRootAttract();
+        return out;
+    }
+
+    // The pinned + is the empty state's front door: pulse when the canvas
+    // empties (first load or delete-all), once — never again until it refills.
+    function syncAddRootAttract() {
+        const btn = $('add-root');
+        if (nodes.length) { attractPlayed = false; return btn.classList.remove('attract'); }
+        if (!attractPlayed) { attractPlayed = true; btn.classList.add('attract'); }
     }
 
     function renderGrid() {
         const grid = $('graph-grid');
         const cols = buildColumns();
+        const roots = new Set(rootNodes().map(n => n.id));
         const hint = nodes.length ? '' : `<span id="empty-hint">${emptyHint()}</span>`;
-        grid.innerHTML = `<svg id="edge-layer"></svg>` +
-            `<button id="add-root" title="New root run">+</button>${hint}` +
-            cols.map(col => `<div class="depth-col">${col.map(nodeCell).join('')}</div>`).join('');
+        grid.innerHTML = `<svg id="edge-layer"></svg>` + hint +
+            cols.map(col => `<div class="depth-col">${col.map(n => nodeCell(n, roots.has(n.id))).join('')}</div>`).join('');
         bindGraph(grid);
         drawEdges();
         syncBirdsToggle();
@@ -245,8 +269,9 @@
 
     function renderBirdsEye() {
         const host = $('birds-eye');
+        const hasNames = nodes.some(n => n.name); // no names → no label strips → pixel-identical
         host.innerHTML = nodes.length
-            ? chainsFrom(nodes).map(laneHtml).join('')
+            ? chainsFrom(nodes).map((c, i, all) => laneHtml(c, hasNames, i ? all[i - 1][0].id : null)).join('')
             : `<span id="empty-hint">${emptyHint()}</span>`;
         syncBirdsToggle();
         bindBirdsEye(host);
@@ -258,29 +283,41 @@
             : 'no runs yet — tap + to start';
     }
 
-    function laneHtml(chain) {
+    function laneHtml(chain, hasNames, prevRootId) {
         const last = chain.length - 1;
-        return `<div class="be-lane">` +
-            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last)).join('') +
-            personaTrail(chain[last]) + `</div>`;
+        return `<div class="be-chain">` + chainLabelHtml(chain, hasNames, prevRootId) +
+            `<div class="be-lane">` +
+            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last, i === 0)).join('') +
+            personaTrail(chain[last]) + `</div></div>`;
     }
 
-    function slotHtml(n, next, last) {
+    // One label per root, not per lane: a braided root emits the name over its
+    // first lane only (lanes of one root are adjacent — laneOrder sorts by
+    // root created_at). Unnamed and deduped lanes keep an empty strip so every
+    // dot rail stays on the same horizontal grid.
+    function chainLabelHtml(chain, hasNames, prevRootId) {
+        const name = chain[0].name;
+        if (!hasNames || !name || chain[0].id === prevRootId) return '<div class="be-chain-label"></div>';
+        return `<div class="be-chain-label" title="${esc(name)}">${esc(name)}</div>`;
+    }
+
+    function slotHtml(n, next, last, head) {
         const cls = 'be-slot' +
             (last ? ' last' : '') +
             (next && next.status === 'progress' ? ' to-progress' : '') +
             (n.active === false ? ' inactive' : '');
-        return `<span class="${cls}">${dotHtml(n)}${last ? '' : miniPersonas(n)}</span>`;
+        return `<span class="${cls}">${dotHtml(n, head)}${last ? '' : miniPersonas(n)}</span>`;
     }
 
-    function dotLabel(n) {
+    function dotLabel(n, head) {
         const k = (n.personas || []).length;
         const took = n.took != null ? ` · ${fmtDur(n.took)}` : '';
-        return `${n.agent} · ${n.status}${took}${k ? ` · ${k} persona${k > 1 ? 's' : ''}` : ''}`;
+        const name = head && n.name ? `${n.name} · ` : '';
+        return `${name}${n.agent} · ${n.status}${took}${k ? ` · ${k} persona${k > 1 ? 's' : ''}` : ''}`;
     }
 
-    function dotHtml(n) {
-        const label = dotLabel(n);
+    function dotHtml(n, head) {
+        const label = dotLabel(n, head);
         return `<button class="node-status-dot be-dot ${esc(n.status)}" data-id="${esc(n.id)}"` +
             ` title="${esc(label)}" aria-label="${esc(label)}"></button>`;
     }
@@ -373,10 +410,10 @@
         setTimeout(() => w.remove(), 300);
     }
 
-    function nodeCell(n) {
+    function nodeCell(n, isRoot) {
         const inactive = n.active ? '' : ' inactive';
         return `<div class="node-cell${inactive}">` +
-            `<div class="node-slot">${nodeCard(n)}` +
+            `<div class="node-slot">${nodeCard(n, isRoot)}` +
             `<button class="node-insert-btn" data-id="${esc(n.id)}" title="Insert before">+</button></div>` +
             personaStrip(n) +
             runButton(n) +
@@ -414,27 +451,38 @@
         img.replaceWith(span);
     }
 
+    // Word-form, never a 4th pipe: "5 | 2 | 1 · Running: 2". Pipes are ledger
+    // columns (history); the middle dot separates tenses (present). A bare
+    // fourth digit would force arithmetic on every glance. Never renders at 0.
+    function runningTag(n) {
+        const a = n.runs && n.runs.active > 0 ? n.runs.active : 0;
+        return a ? ` <span class="live">· Running: <b>${a}</b></span>` : '';
+    }
+
     function runButton(n) {
         const disabled = n.runnable ? '' : ' disabled title="chain not ready — parents need summaries"';
         const counts = n.runs && n.runs.total > 0
-            ? `<span class="run-counts">${n.runs.total} | <b class="ok">${n.runs.success}</b> | <b class="bad">${n.runs.failed}</b></span>`
+            ? `<span class="run-counts">${n.runs.total} | <b class="ok">${n.runs.success}</b> | <b class="bad">${n.runs.failed}</b>${runningTag(n)}</span>`
             : '';
         return `<button class="node-run-btn" data-id="${esc(n.id)}"${disabled}>` +
             `<span class="run-label">Run</span>${counts}</button>`;
     }
 
-    function nodeCard(n) {
+    function nodeCard(n, isRoot) {
         return `<div class="node-card" data-id="${esc(n.id)}" data-status="${esc(n.status)}">` +
             `<div class="node-main">` +
-            cardHeader(n) + cardBody(n) +
+            cardHeader(n, isRoot) + cardBody(n) +
             `</div>` +
             `<button class="node-add-child" title="Add child">+</button>` +
             `</div>`;
     }
 
-    function cardHeader(n) {
+    function cardHeader(n, isRoot) {
         const badge = n.mcp ? '<span class="mcp-badge">mcp</span>' : '';
+        const name = isRoot && n.name
+            ? `<span class="node-name" title="${esc(n.name)}">${esc(n.name)}</span>` : '';
         return `<div class="node-card-header">` +
+            name +
             `<span class="node-dur">${esc(headerDur(n))}</span>` +
             badge +
             `<span class="node-status-dot ${esc(n.status)}"></span>` +
@@ -474,7 +522,6 @@
         bindCards(grid);
         bindRunButtons(grid);
         bindInsertButtons(grid);
-        $('add-root').addEventListener('click', () => openComposer(null));
         bindCopyButtons(grid);
         bindAvatarFallbacks(grid);
         markSelectedCard(grid);
@@ -681,6 +728,7 @@
 
     function bindPanelControls(n) {
         $('detail-panel-inner').querySelector('.detail-panel-close').addEventListener('click', closePanel);
+        bindNameField(n.id);
         bindActiveToggle(n);
         bindMcpField(n.id);
         bindPersonaPicks(n);
@@ -737,6 +785,12 @@
         bindFieldPair('mcp-auth', () => saveMcpAuth(nodeId), syncMcpAuthButton);
     }
 
+    function bindNameField(nodeId) {
+        if (!$('name-input')) return; // non-roots render no section
+        nameOriginal = $('name-input').value.trim();
+        bindFieldPair('name', () => saveName(nodeId), syncNameButton);
+    }
+
     function bindFieldPair(id, save, sync) {
         $(id + '-input').addEventListener('input', sync);
         $(id + '-input').addEventListener('keydown', e => {
@@ -756,6 +810,12 @@
         const dirty = $('mcp-auth-input').value.trim() !== mcpAuthOriginal;
         $('mcp-auth-save').textContent = dirty ? 'Save' : '✓';
         $('mcp-auth-save').classList.toggle('saved', !dirty);
+    }
+
+    function syncNameButton() {
+        const dirty = $('name-input').value.trim() !== nameOriginal;
+        $('name-save').textContent = dirty ? 'Save' : '✓';
+        $('name-save').classList.toggle('saved', !dirty);
     }
 
     async function putNode(nodeId, body) {
@@ -788,6 +848,19 @@
             await load();
         } catch (e) {
             showError(`Failed to save authorization: ${e.message}`);
+        }
+    }
+
+    async function saveName(nodeId) {
+        const name = $('name-input').value.trim();
+        try {
+            await putNode(nodeId, { name }); // "" clears — server normalizes to null
+            nameOriginal = name;
+            await load();
+            const fresh = nodes.find(x => x.id === selectedId);
+            if (fresh) openPanel(fresh); // re-render so the panel title swaps too
+        } catch (e) {
+            showError(`Failed to save name: ${e.message}`);
         }
     }
 
@@ -827,9 +900,20 @@
     }
 
     function panelTitleHtml(n, took) {
-        return `<div class="detail-panel-title">` +
-            `<div class="detail-panel-name">${esc(n.agent)}</div>` +
-            `<div class="detail-panel-meta">${esc(n.status)}${took} · ${fmtTime(n.created_at)}</div></div>`;
+        return `<div class="detail-panel-title">` + panelTitleLines(n, took) + `</div>`;
+    }
+
+    // Named node: the name is the title (Inter, via its own class — the page's
+    // .detail-panel-name mono override must not touch it), agent demotes into
+    // the meta line. A dormant name (no longer a root) still shows here.
+    function panelTitleLines(n, took) {
+        const time = ` · ${fmtTime(n.created_at)}`;
+        if (!n.name) {
+            return `<div class="detail-panel-name">${esc(n.agent)}</div>` +
+                `<div class="detail-panel-meta">${esc(n.status)}${took}${time}</div>`;
+        }
+        return `<div class="detail-panel-title-name" title="${esc(n.name)}">${esc(n.name)}</div>` +
+            `<div class="detail-panel-meta">${esc(n.agent)} · ${esc(n.status)}${took}${time}</div>`;
     }
 
     function activeToggleHtml(active) {
@@ -838,8 +922,21 @@
     }
 
     function panelBody(n) {
-        return activeSection(n) + summarySection(n) + promptSection(n) + resultSection(n) +
+        return nameSection(n) + activeSection(n) + summarySection(n) + promptSection(n) + resultSection(n) +
             personasSection(n) + mcpSection(n) + runsSection() + deleteSection(n);
+    }
+
+    // The name field exists only on chain heads: a field on a non-root invites
+    // "what does this name, then?" (its lane/card label is dormant by design).
+    function nameSection(n) {
+        if (!isRoot(n)) return '';
+        return `<div><div class="detail-section-label">CHAIN NAME</div>` +
+            `<div class="name-row">` +
+            `<input id="name-input" type="text" value="${esc(n.name || '')}" placeholder="Name this chain…" maxlength="64" spellcheck="false" autocomplete="off" aria-label="Chain name">` +
+            `<button id="name-save">Save</button>` +
+            `</div>` +
+            `<div class="mcp-hint">Shows above the lane in bird's-eye view and on this root card.</div>` +
+            `</div>`;
     }
 
     function activeSection(n) {
@@ -1348,6 +1445,7 @@
         checkFmtDur();
         checkClampPanelWidth();
         checkRenderBubbleTruncation();
+        checkAddRootPinned();
         console.log('All sanity checks passed.');
     }
 
@@ -1374,6 +1472,28 @@
         console.log('OK: renderBubble truncation');
     }
 
+    function checkAddRootPinned() {
+        const btn = $('add-root');
+        console.assert(btn && document.body.contains(btn), 'add-root: static body-level DOM');
+        console.assert(btn && !$('graph-grid').contains(btn), 'add-root: outside the 5s re-render');
+        console.assert(btn && !btn.classList.contains('be-toggle'), 'add-root: never disabled on empty graph');
+        console.assert(btn && getComputedStyle(btn).position === 'fixed', 'add-root: pinned fixed');
+        checkAddRootRenders();
+        console.log('OK: add-root pinned top-left');
+    }
+
+    function checkAddRootRenders() {
+        const btn = $('add-root');
+        nodes = []; renderGrid();
+        console.assert(btn && !btn.disabled, 'add-root: enabled on empty render');
+        nodes = [{ id: 'k', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 0 }];
+        renderGrid();
+        btn.click();
+        console.assert($('composer').classList.contains('open'), 'add-root: click opens composer');
+        closeComposer();
+        console.log('OK: add-root render + click');
+    }
+
     $('composer-text').addEventListener('input', e => {
         const ready = e.target.value.trim().length > 0;
         document.querySelectorAll('.agent-btn').forEach(b => { b.disabled = !ready; });
@@ -1387,6 +1507,14 @@
     document.querySelectorAll('.be-toggle').forEach(btn =>
         btn.addEventListener('click', () =>
             setMode(viewMode === 'birds' ? 'normal' : 'birds')));
+
+    // body-level static element: bind EXACTLY ONCE — a per-render binding here
+    // would stack one listener per 5s refresh (double-open composer)
+    $('add-root').addEventListener('click', () => {
+        attractPlayed = true; // the pulse never returns once the door is used
+        $('add-root').classList.remove('attract');
+        openComposer(null);
+    });
 
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;

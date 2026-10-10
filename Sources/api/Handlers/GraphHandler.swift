@@ -153,6 +153,7 @@ private extension GraphHandler {
     func applyUpdates(nodeId: String, body: GraphUpdateRequest, instancePath: String) throws {
         if let mcp = body.mcp { try GraphStore.updateMcp(id: nodeId, mcp: normalized(mcp), at: instancePath) }
         if let auth = body.mcp_auth { try GraphStore.updateMcpAuth(id: nodeId, auth: normalized(auth), at: instancePath) }
+        if let name = body.name { try GraphStore.updateName(id: nodeId, name: normalized(name), at: instancePath) }
         if let active = body.active { try GraphStore.updateActive(id: nodeId, active: active, at: instancePath) }
         try applyDetailUpdates(nodeId: nodeId, body: body, instancePath: instancePath)
     }
@@ -372,8 +373,8 @@ private extension GraphHandler {
             id: node.id, parent_id: node.parentId, prompt: node.prompt, agent: node.agent,
             status: node.status, output: node.output, took: node.took, mcp: node.mcp,
             mcp_auth: node.mcpAuth,
-            summary: node.summary, personas: node.personas, active: node.active, runnable: runnable,
-            runs: RunCountsContent(total: counts.total, success: counts.success, failed: counts.failed),
+            summary: node.summary, personas: node.personas, active: node.active, name: node.name, runnable: runnable,
+            runs: RunCountsContent(total: counts.total, success: counts.success, failed: counts.failed, active: counts.active),
             created_at: unixMs(node.createdAt), completed_at: node.completedAt.map(unixMs)
         )
     }
@@ -568,6 +569,7 @@ extension GraphHandler {
         var summary: String?
         var personas: [String]
         var active: Bool
+        var name: String?
         var runnable: Bool
         var runs: RunCountsContent
         var created_at: Int64
@@ -578,6 +580,7 @@ extension GraphHandler {
         var total: Int
         var success: Int
         var failed: Int
+        var active: Int
     }
 
     struct GraphRunLogContent: Content, Sendable {
@@ -622,6 +625,7 @@ extension GraphHandler {
         var summary: String?
         var personas: [String]?
         var active: Bool?
+        var name: String?
     }
 
     struct AgentEntry: Content, Sendable {

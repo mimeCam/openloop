@@ -17,6 +17,7 @@ public struct GraphNode: Sendable {
     public let mcp: String?
     public let mcpAuth: String?
     public let summary: String?
+    public let name: String?
     public let personas: [String]
     public let createdAt: Double
     public let completedAt: Double?
@@ -33,6 +34,7 @@ public struct GraphNode: Sendable {
         mcp: String?,
         mcpAuth: String? = nil,
         summary: String? = nil,
+        name: String? = nil,
         personas: [String] = [],
         createdAt: Double,
         completedAt: Double?,
@@ -48,6 +50,7 @@ public struct GraphNode: Sendable {
         self.mcp = mcp
         self.mcpAuth = mcpAuth
         self.summary = summary
+        self.name = name
         self.personas = personas
         self.createdAt = createdAt
         self.completedAt = completedAt
@@ -115,11 +118,15 @@ public struct RunCounts: Sendable {
     public var total: Int
     public var success: Int
     public var failed: Int
+    /// Run-log rows currently in "progress" — NOT the node `active` (dormant) flag.
+    /// Invariant: total == success + failed + active (GROUP BY counts every status into total).
+    public var active: Int
 
-    public init(total: Int = 0, success: Int = 0, failed: Int = 0) {
+    public init(total: Int = 0, success: Int = 0, failed: Int = 0, active: Int = 0) {
         self.total = total
         self.success = success
         self.failed = failed
+        self.active = active
     }
 }
 
@@ -188,6 +195,7 @@ public struct GraphStore {
         try? db.run("ALTER TABLE graph_nodes ADD COLUMN mcp_auth TEXT;")
         try? db.run("ALTER TABLE graph_nodes ADD COLUMN summary TEXT;")
         try? db.run("ALTER TABLE graph_nodes ADD COLUMN personas TEXT;")
+        try? db.run("ALTER TABLE graph_nodes ADD COLUMN name TEXT;")
         try? db.run("ALTER TABLE graph_nodes ADD COLUMN active INTEGER NOT NULL DEFAULT 1;")
         try? db.run("UPDATE graph_nodes SET status='answered' WHERE status='success' AND summary IS NULL;")
     }
@@ -202,7 +210,7 @@ public struct GraphStore {
     public static func insertNode(_ node: GraphNode, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run(
-            "INSERT INTO graph_nodes (id, parent_id, prompt, agent, status, output, took, mcp, mcp_auth, summary, personas, created_at, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO graph_nodes (id, parent_id, prompt, agent, status, output, took, mcp, mcp_auth, summary, personas, created_at, active, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             node.id,
             node.parentId,
             node.prompt,
@@ -215,14 +223,15 @@ public struct GraphStore {
             node.summary,
             encodePersonas(node.personas),
             node.createdAt,
-            node.active
+            node.active,
+            node.name
         )
     }
 
     public static func fetchNodes(at instancePath: String) throws -> [GraphNode] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
-            "SELECT id, parent_id, prompt, agent, status, output, took, mcp, created_at, completed_at, summary, personas, mcp_auth, active FROM graph_nodes ORDER BY created_at;"
+            "SELECT id, parent_id, prompt, agent, status, output, took, mcp, created_at, completed_at, summary, personas, mcp_auth, active, name FROM graph_nodes ORDER BY created_at;"
         )
         return rows.compactMap(toNode)
     }
@@ -267,6 +276,19 @@ public struct GraphStore {
         try db.run(
             "UPDATE graph_nodes SET summary = ? WHERE id = ?;",
             summary,
+            id
+        )
+    }
+
+    public static func updateName(
+        id: String,
+        name: String?,
+        at instancePath: String
+    ) throws {
+        let db = try connect(at: instancePath)
+        try db.run(
+            "UPDATE graph_nodes SET name = ? WHERE id = ?;",
+            name,
             id
         )
     }
@@ -536,6 +558,7 @@ public struct GraphStore {
             mcp: row[7] as? String,
             mcpAuth: row[12] as? String,
             summary: row[10] as? String,
+            name: row[14] as? String,
             personas: decodePersonas(row[11] as? String),
             createdAt: createdAt,
             completedAt: row[9] as? Double,
@@ -623,6 +646,7 @@ public struct GraphStore {
             counts[parts.id, default: RunCounts()].total += parts.n
             if parts.status == "success" { counts[parts.id]!.success += parts.n }
             if parts.status == "failed" { counts[parts.id]!.failed += parts.n }
+            if parts.status == "progress" { counts[parts.id]!.active += parts.n }
         }
     }
 

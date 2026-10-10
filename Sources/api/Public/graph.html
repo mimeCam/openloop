@@ -148,7 +148,7 @@
             width: max-content;
             min-width: 100%;
             box-sizing: border-box;
-            padding: 32px 48px;
+            padding: 76px 48px 32px; /* clears the pinned #add-root at scroll origin */
             position: relative;
         }
 
@@ -172,22 +172,42 @@
             z-index: 1;
         }
 
+        /* pinned chrome, not grid content: fixed top-left, so it survives the
+           scroll and the 5s renderGrid() innerHTML rewrite (the element itself
+           lives in the static body next to #birds-eye-float — a left control
+           rail). Dashed ring = the .be-trail grammar: "a slot not yet filled".
+           Solid canvas fill + float shadow: cards scroll beneath it. */
         #add-root {
-            width: 44px; height: 44px;
+            position: fixed;
+            top: calc(var(--content-top) + 12px);
+            left: 16px;
+            width: 48px; height: 48px;
             border-radius: 50%;
-            border: 1px dashed rgba(255,255,255,0.22);
-            background: rgba(255,255,255,0.03);
+            border: 1.5px dashed rgba(255,255,255,0.22);
+            background: var(--bg-canvas);
             color: var(--text-muted);
-            font-size: 20px;
+            display: flex; align-items: center; justify-content: center;
             cursor: pointer;
-            flex-shrink: 0;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.45);
             transition: all 0.15s ease;
-            z-index: 1;
+            z-index: 300;
+            padding: 0;
         }
         #add-root:hover {
             border-color: var(--accent-green);
             color: var(--accent-green);
             background: rgba(52,199,89,0.08);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.55), 0 0 0 1px rgba(52,199,89,0.22);
+        }
+        #add-root:active { transform: scale(0.94); }
+        #add-root:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        /* empty-graph attract: the beacon keyframe grammar adapted to the
+           button — 2 beats, once per empty period (syncAddRootAttract, graph.js) */
+        #add-root.attract { animation: attract 1.2s ease-out 2; }
+        @keyframes attract {
+            0%   { box-shadow: 0 4px 16px rgba(0,0,0,0.45), 0 0 0 0 rgba(52,199,89,0.40); }
+            100% { box-shadow: 0 4px 16px rgba(0,0,0,0.45), 0 0 0 14px rgba(52,199,89,0); }
         }
 
         #empty-hint {
@@ -251,9 +271,18 @@
             font-size: 9px;
             font-weight: 500;
             color: var(--text-muted);
+            white-space: nowrap;  /* counts line never wraps — no reflow when runs start/finish */
         }
         .run-counts .ok { color: var(--accent-green); }
         .run-counts .bad { color: var(--accent-red); }
+        /* "· Running: N" token — amber already means "running" on this page
+           (status dot, card ring, incoming edge). Opacity-only breathe: 9px mono
+           text must not scale-wobble, floor 0.65 keeps it readable mid-breath;
+           2.5s tempo matches the instances page's secondary-live pulse. */
+        .run-counts .live {
+            color: var(--accent-amber);
+            animation: live-breathe 2.5s ease-in-out infinite;
+        }
 
         .node-insert-btn {
             position: absolute;
@@ -368,6 +397,21 @@
         }
         .node-dur:empty { display: none; }
 
+        /* chain name on root cards: identity is typeset, not decorated —
+           ink, not chrome (no bg/border/shadow). Name leads, duration
+           demotes to content; the status dot never moves. */
+        .node-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .node-name + .node-dur { flex: 0 0 auto; }
+
         .mcp-badge {
             font-size: 9px;
             font-weight: 700;
@@ -418,6 +462,40 @@
             color: var(--text-faint);
             margin-top: 6px;
         }
+
+        /* CHAIN NAME row: mcp-row geometry, neutral/green skin — amber is the
+           mcp domain; the name is a human word, so Inter, not mono. */
+        .name-row { display: flex; gap: 8px; }
+        .name-row input {
+            flex: 1;
+            min-width: 0;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12px;
+            padding: 8px 10px;
+        }
+        .name-row input:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        .name-row button {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 600;
+            font-family: inherit;
+            padding: 0 14px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .name-row button:hover { color: var(--text-primary); border-color: rgba(255,255,255,0.25); }
+        .name-row button.saved {
+            background: rgba(52,199,89,0.14);
+            border-color: rgba(52,199,89,0.40);
+            color: #34c759;
+        }
         .node-status-dot {
             width: 8px; height: 8px;
             border-radius: 50%;
@@ -437,6 +515,10 @@
         @keyframes pulse {
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.35; transform: scale(0.75); }
+        }
+        @keyframes live-breathe {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.65; }
         }
 
         .node-add-child {
@@ -593,6 +675,17 @@
             font-family: "SF Mono", ui-monospace, monospace;
             font-size: 13px;
             font-weight: 400;
+        }
+        /* a chain name is a human word: the shared .detail-panel-name base
+           (Inter 14/600, ellipsis), restated under its own class so the mono
+           override above never touches it */
+        .detail-panel-title-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .active-section {
             display: flex;
@@ -773,7 +866,7 @@
             width: max-content;
             min-width: 100%;
             box-sizing: border-box;
-            padding: 32px 24px 96px 48px;
+            padding: 76px 24px 96px 48px; /* same top clearance as the grid */
         }
         body.birds-eye #birds-eye {
             display: flex;
@@ -783,6 +876,30 @@
             from { opacity: 0; transform: translateY(10px) scale(1.02); }
         }
         #birds-eye #empty-hint { align-self: center; }
+
+        /* chain label: plain text on the canvas, no chrome. The fixed-height
+           strip renders on EVERY lane (named or not) once any name exists, so
+           dot rails keep one horizontal grid; with zero names the wrapper and
+           strip don't render at all — the view stays pixel-identical. Text
+           hangs off the center of the first dot (48px slot → x=24). */
+        .be-chain {
+            display: flex;
+            flex-direction: column;
+        }
+        .be-chain-label {
+            height: 14px;
+            line-height: 14px;
+            margin-bottom: 6px;
+            padding-left: 24px;
+            max-width: 360px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
 
         .be-lane {
             display: flex;
@@ -899,18 +1016,20 @@
             .be-slot { width: 40px; }
             .be-slot::after { left: 28px; width: 24px; }
             .be-dot::before { inset: -16px; }
+            .be-chain-label { padding-left: 20px; } /* 40px slot → dot center at x=20 */
         }
         @media (prefers-reduced-motion: reduce) {
             body.birds-eye #birds-eye { animation: none; }
             .node-card.beacon { animation: none; }
-            .be-dot, .be-toggle { transition: none; }
+            #add-root.attract { animation: none; }
+            .be-dot, .be-toggle, #add-root { transition: none; }
         }
 
         @media (max-width: 768px) {
             .gt-subtitle, .gt-version { display: none; }
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */
-            #prompt-section textarea, #summary-section textarea, .mcp-row input { font-size: 16px; }
+            #prompt-section textarea, #summary-section textarea, .mcp-row input, .name-row input { font-size: 16px; }
         }
 
         /* — delete actions: danger zone at the panel bottom, calm until armed — */
@@ -977,6 +1096,7 @@
         @media (prefers-reduced-motion: reduce) {
             .delete-btn.armed::after { animation: none; background: rgba(255,255,255,0.25); }
             .delete-btn.deleting { animation: none; }
+            .run-counts .live { animation: none; }
         }
     </style>
 </head>
@@ -1017,6 +1137,15 @@
             <circle cx="12" cy="12" r="8"/>
             <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/>
             <path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>
+        </svg>
+    </button>
+
+    <!-- pinned top-left: static body-level DOM, outside the 5s renderGrid()
+         rewrite; NOT a .be-toggle — it must stay enabled on an empty graph,
+         where it is the start affordance. Bound once at module scope. -->
+    <button id="add-root" title="New root run" aria-label="New root run">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14"/>
         </svg>
     </button>
 

@@ -70,7 +70,10 @@ let package = Package(
         ),
         .testTarget(
             name: "sharedTests",
-            dependencies: ["shared"],
+            dependencies: [
+                "shared",
+                .product(name: "SQLite", package: "SQLite.swift"),
+            ],
         ),
     ]
 )

@@ -1,4 +1,5 @@
 import XCTest
+import SQLite
 import shared
 
 final class GraphStoreTests: XCTestCase {
@@ -30,8 +31,8 @@ final class GraphStoreTests: XCTestCase {
         try GraphStore.fetchNodes(at: path).reduce(into: [:]) { $0[$1.id] = $1 }
     }
 
-    func runLog(_ id: String, node: String) -> GraphRunLog {
-        GraphRunLog(id: id, nodeId: node, prompt: "p", status: "success", output: nil, took: nil, createdAt: 1, completedAt: nil)
+    func runLog(_ id: String, node: String, status: String = "success") -> GraphRunLog {
+        GraphRunLog(id: id, nodeId: node, prompt: "p", status: status, output: nil, took: nil, createdAt: 1, completedAt: nil)
     }
 
     func testDeleteLeafRemovesOnlyThatNode() throws {
@@ -73,6 +74,19 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertNil(try GraphStore.fetchRunCounts(at: path)["a"])
     }
 
+    func testRunCountsTrackProgressRows() throws {
+        // pins the counting invariant where it lives: total = success + failed + active
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("l1", node: "a", status: "success"), at: path)
+        try GraphStore.insertRunLog(runLog("l2", node: "a", status: "progress"), at: path)
+        try GraphStore.insertRunLog(runLog("l3", node: "a", status: "progress"), at: path)
+        let counts = try XCTUnwrap(GraphStore.fetchRunCounts(at: path)["a"])
+        XCTAssertEqual(counts.total, 3)
+        XCTAssertEqual(counts.success, 1)
+        XCTAssertEqual(counts.failed, 0)
+        XCTAssertEqual(counts.active, 2)
+    }
+
     func testDeleteNodesCascadesRunLogsOfDescendants() throws {
         try insert(node("a", nil), node("b", "a"))
         try GraphStore.insertRunLog(runLog("l1", node: "a"), at: path)
@@ -94,5 +108,62 @@ final class GraphStoreTests: XCTestCase {
         try GraphStore.deleteNode(id: "a", at: path)
         let left = try remaining()
         XCTAssertEqual(left["y"]?.parentId, "x")
+    }
+
+    // — chain names (name lives on the node; NULL = unnamed) —
+
+    func testNameRoundtripsThroughInsertAndFetch() throws {
+        // summary/mcpAuth asserted alongside: SELECT order and toNode indices
+        // are decoupled positional knowledge — any reshuffle must fail loudly
+        // on more than the new field.
+        try insert(
+            node("a", nil),
+            GraphNode(
+                id: "n", parentId: nil, prompt: "p", agent: "a", status: "success",
+                output: nil, took: nil, mcp: "https://mcp.example", mcpAuth: "Bearer t",
+                summary: "s", name: "alpha", createdAt: 1, completedAt: nil
+            )
+        )
+        let left = try remaining()
+        XCTAssertEqual(left["n"]?.name, "alpha")
+        XCTAssertEqual(left["n"]?.summary, "s")
+        XCTAssertEqual(left["n"]?.mcpAuth, "Bearer t")
+        XCTAssertNil(left["a"]?.name) // default nil — proves row index 14, not a shift
+    }
+
+    func testUpdateNameSetsAndClears() throws {
+        try insert(node("a", nil))
+        try GraphStore.updateName(id: "a", name: "alpha", at: path)
+        XCTAssertEqual(try remaining()["a"]?.name, "alpha")
+        try GraphStore.updateName(id: "a", name: nil, at: path) // nil = clear to NULL
+        XCTAssertNil(try remaining()["a"]?.name)
+    }
+
+    func testLegacyDbMigratesNameColumn() throws {
+        // pre-name database: the original 8-column schema. createTables runs
+        // migrateNodeColumns; if the ALTER is missing, insertNode throws.
+        let legacy = NSTemporaryDirectory() + "openloop-graphstore-legacy-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: (legacy as NSString).appendingPathComponent(Paths.dataFolderName),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: legacy) }
+        let db = try Connection(GraphStore.dbPath(at: legacy))
+        try db.execute("""
+        CREATE TABLE graph_nodes (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT,
+            prompt TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            status TEXT NOT NULL,
+            output TEXT,
+            created_at REAL NOT NULL,
+            completed_at REAL
+        );
+        """)
+        try GraphStore.createTables(at: legacy)
+        try GraphStore.insertNode(node("a", nil), at: legacy)
+        try GraphStore.updateName(id: "a", name: "old db", at: legacy)
+        XCTAssertEqual(try GraphStore.fetchNodes(at: legacy).first?.name, "old db")
     }
 }

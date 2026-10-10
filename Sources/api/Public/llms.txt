@@ -108,13 +108,21 @@ Graph — node graph per instance (powers /graph.html)
                                                    insert_before?, mcp?, mcp_auth? }
                                                    → { node fields… }   (launches a run)
   PUT    /api/instances/:id/graph/:nid         body: any subset (mcp, mcp_auth,
-                                                   summary, personas, active)
+                                                   summary, personas, active, name)
+                                                   name = chain label shown in the
+                                                   graph UI; empty string clears it
   DELETE /api/instances/:id/graph/:nid[?chain=true] → { nodes:[GraphNode] }
   POST   /api/instances/:id/graph/:nid/summary body { prompt? }  → regenerate /
                                                    re-run with the edited prompt
   POST   /api/instances/:id/graph/:nid/run     body { prompt }   → run log entry
   GET    /api/instances/:id/graph/:nid/logs    → { logs:[…] }
   GET    /api/agents                           → { agents:[{ name }] }
+  Node : { id, parent_id?, prompt, agent, status, output?, took?, mcp?,
+           mcp_auth?, summary?, personas, active (dormant flag), name?, runnable,
+           runs:{ total, success, failed, active }, created_at, completed_at? }
+           runs.active = run-log rows currently "progress" (GET /graph sweeps
+           orphaned progress rows to failed first; PUT replies skip the sweep
+           and heal on the next poll). total = success + failed + active.
   Node delete keeps children — they move up to the deleted node's parent, or
   become roots. ?chain=true deletes the node plus its whole subtree. Run logs
   cascade with the node(s), inside one transaction. 409 while the node (or any
