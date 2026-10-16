@@ -67,6 +67,9 @@ public struct GraphRunLog: Sendable {
     public let took: Int?
     public let createdAt: Double
     public let completedAt: Double?
+    public let parentRunId: String?
+    public let summary: String?
+    public let rootRunId: String?
 
     public init(
         id: String,
@@ -76,7 +79,10 @@ public struct GraphRunLog: Sendable {
         output: String?,
         took: Int?,
         createdAt: Double,
-        completedAt: Double?
+        completedAt: Double?,
+        parentRunId: String? = nil,
+        summary: String? = nil,
+        rootRunId: String? = nil
     ) {
         self.id = id
         self.nodeId = nodeId
@@ -86,6 +92,9 @@ public struct GraphRunLog: Sendable {
         self.took = took
         self.createdAt = createdAt
         self.completedAt = completedAt
+        self.parentRunId = parentRunId
+        self.summary = summary
+        self.rootRunId = rootRunId
     }
 }
 
@@ -173,7 +182,8 @@ public struct GraphStore {
         output TEXT,
         took INTEGER,
         created_at REAL NOT NULL,
-        completed_at REAL
+        completed_at REAL,
+        root_run_id TEXT
     );
     """
 
@@ -205,6 +215,46 @@ public struct GraphStore {
         try db.execute(runLogTableDdl)
         try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_node ON graph_run_logs(node_id);")
         try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_completed_at ON graph_run_logs(completed_at);")
+        migrateRunLogColumns(db)
+        try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_root ON graph_run_logs(root_run_id);")
+    }
+
+    static func migrateRunLogColumns(_ db: Connection) {
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN parent_run_id TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN summary TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN root_run_id TEXT;")
+        backfillRootRunIds(db)
+    }
+
+    static func backfillRootRunIds(_ db: Connection) {
+        let rows = unrootedRunRows(db)
+        guard !rows.isEmpty else { return }
+        let pairs: [(String, String)] = rows.compactMap { row in
+            guard let id = row[0] as? String, let parent = row[1] as? String else { return nil }
+            return (id, parent)
+        }
+        let parentOf = Dictionary(uniqueKeysWithValues: pairs)
+        for id in rows.compactMap({ $0[0] as? String }) {
+            guard let root = convoRoot(of: id, parentOf: parentOf) else { continue }
+            try? db.run("UPDATE graph_run_logs SET root_run_id = ? WHERE id = ?;", root, id)
+        }
+    }
+
+    static func unrootedRunRows(_ db: Connection) -> [[Binding?]] {
+        guard let statement = try? db.prepare("SELECT id, parent_run_id FROM graph_run_logs WHERE root_run_id IS NULL;") else { return [] }
+        var rows: [[Binding?]] = []
+        for row in statement { rows.append(row) }
+        return rows
+    }
+
+    static func convoRoot(of id: String, parentOf: [String: String]) -> String? {
+        var seen: Set<String> = []
+        var cur = id
+        while let parent = parentOf[cur] {
+            if !seen.insert(cur).inserted { return nil }
+            cur = parent
+        }
+        return cur
     }
 
     public static func insertNode(_ node: GraphNode, at instancePath: String) throws {
@@ -579,14 +629,41 @@ public struct GraphStore {
         return list
     }
 
-    static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at"
+    static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id"
 
     public static func insertRunLog(_ log: GraphRunLog, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run(
-            "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
-            log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt
+            "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, parent_run_id, root_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt, log.parentRunId, log.rootRunId
         )
+    }
+
+    public static func finishRunSummary(id: String, summary: String?, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.run(
+            "UPDATE graph_run_logs SET summary = ?, status = ? WHERE id = ?;",
+            summary,
+            summary == nil ? "answered" : "success",
+            id
+        )
+    }
+
+    public static func runChain(of log: GraphRunLog, in logs: [GraphRunLog]) -> [GraphRunLog] {
+        let byId = Dictionary(logs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var lineage: [GraphRunLog] = []
+        var seen = Set<String>()
+        var current: GraphRunLog? = log
+        while let c = current, !seen.contains(c.id) {
+            seen.insert(c.id)
+            lineage.append(c)
+            current = c.parentRunId.flatMap { byId[$0] }
+        }
+        return lineage.reversed()
+    }
+
+    public static func runSummaries(_ chain: [GraphRunLog]) -> String {
+        chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
     }
 
     public static func updateRunLog(
@@ -603,6 +680,14 @@ public struct GraphStore {
         )
     }
 
+    public static func restartRunLog(id: String, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.run(
+            "UPDATE graph_run_logs SET status = 'progress', output = NULL, took = NULL, completed_at = NULL WHERE id = ?;",
+            id
+        )
+    }
+
     public static func fetchRunLogs(nodeId: String, at instancePath: String) throws -> [GraphRunLog] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
@@ -614,7 +699,7 @@ public struct GraphStore {
     public static func fetchProgressRunLogs(at instancePath: String) throws -> [GraphRunLog] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
-            "SELECT \(runLogColumns) FROM graph_run_logs WHERE status = 'progress';"
+            "SELECT \(runLogColumns) FROM graph_run_logs WHERE status IN ('progress', 'summarizing');"
         )
         return rows.compactMap(toRunLog)
     }
@@ -639,14 +724,14 @@ public struct GraphStore {
     public static func fetchRunCounts(at instancePath: String) throws -> [String: RunCounts] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
-            "SELECT node_id, status, COUNT(*) FROM graph_run_logs GROUP BY node_id, status;"
+            "SELECT node_id, status, COUNT(*) FROM graph_run_logs WHERE parent_run_id IS NULL GROUP BY node_id, status;"
         )
         return rows.reduce(into: [:]) { counts, row in
             guard let parts = countParts(row) else { return }
             counts[parts.id, default: RunCounts()].total += parts.n
             if parts.status == "success" { counts[parts.id]!.success += parts.n }
             if parts.status == "failed" { counts[parts.id]!.failed += parts.n }
-            if parts.status == "progress" { counts[parts.id]!.active += parts.n }
+            if parts.status == "progress" || parts.status == "summarizing" { counts[parts.id]!.active += parts.n }
         }
     }
 
@@ -666,7 +751,8 @@ public struct GraphStore {
         return GraphRunLog(
             id: id, nodeId: nodeId, prompt: prompt, status: status,
             output: row[4] as? String, took: (row[5] as? Int64).map(Int.init),
-            createdAt: createdAt, completedAt: row[7] as? Double
+            createdAt: createdAt, completedAt: row[7] as? Double,
+            parentRunId: row[8] as? String, summary: row[9] as? String, rootRunId: row[10] as? String
         )
     }
 }

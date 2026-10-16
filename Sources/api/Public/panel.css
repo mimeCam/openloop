@@ -130,6 +130,15 @@ body.panel-resizing #graph-canvas { transition: none; }
    copy must clear 4.5:1 contrast (faint is ~2.1:1 on this surface). */
 .summary-missing { font-size: 11px; color: var(--text-muted); }
 
+/* Clamp a text block to 10 lines (the chain-name contract). Pure clamp
+   grammar, no mask — consumers bring their own typography alongside. */
+.clamp-10 {
+    display: -webkit-box;
+    -webkit-line-clamp: 10;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 /* ── Bubble skeleton: layout, truncation, touch targets.
    Color variants stay in each page's own stylesheet. ── */
 .wl-bubble {

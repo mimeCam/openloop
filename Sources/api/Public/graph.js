@@ -13,6 +13,11 @@
     let panelStatus = '';
     let panelJson = '';
     let logsJson = '';
+    let runsCache = [];
+    let focusedRunId = null;
+    let footerKey = null;
+    let pendingRowFocus = null;
+    let runSummaryEditing = false;
     let countdownInterval = null;
     let countdownValue = 5;
     let viewMode = 'normal';
@@ -139,6 +144,7 @@
         if (!selectedId) return;
         const n = nodes.find(x => x.id === selectedId);
         if (!n) return closePanel();
+        if (focusedRunId) return loadLogs(selectedId);
         if (promptEditing || summaryEditing) return;
         if (n.status === panelStatus) return loadLogs(selectedId);
         const input = $('mcp-input');
@@ -269,12 +275,23 @@
 
     function renderBirdsEye() {
         const host = $('birds-eye');
-        const hasNames = nodes.some(n => n.name); // no names → no label strips → pixel-identical
+        const hasNames = nodes.some(n => n.name); // no names → no label text → pixel-identical
         host.innerHTML = nodes.length
             ? chainsFrom(nodes).map((c, i, all) => laneHtml(c, hasNames, i ? all[i - 1][0].id : null)).join('')
             : `<span id="empty-hint">${emptyHint()}</span>`;
         syncBirdsToggle();
         bindBirdsEye(host);
+        syncBeLabelHeights(host);
+    }
+
+    // Labels wrap now, so one tall name must not shift its lane's dot rail off
+    // the shared horizontal grid: measure the tallest strip, apply to all.
+    // Runs on every render (the 5s refresh rewrites innerHTML) — nothing to sync.
+    function syncBeLabelHeights(host) {
+        const strips = host.querySelectorAll('.be-chain-label');
+        if (!strips.length) return;
+        const max = Math.max(...[...strips].map(s => s.offsetHeight));
+        strips.forEach(s => { s.style.minHeight = max + 'px'; });
     }
 
     function emptyHint() {
@@ -298,7 +315,7 @@
     function chainLabelHtml(chain, hasNames, prevRootId) {
         const name = chain[0].name;
         if (!hasNames || !name || chain[0].id === prevRootId) return '<div class="be-chain-label"></div>';
-        return `<div class="be-chain-label" title="${esc(name)}">${esc(name)}</div>`;
+        return `<div class="be-chain-label clamp-10" title="${esc(name)}">${esc(name)}</div>`;
     }
 
     function slotHtml(n, next, last, head) {
@@ -413,11 +430,20 @@
     function nodeCell(n, isRoot) {
         const inactive = n.active ? '' : ' inactive';
         return `<div class="node-cell${inactive}">` +
+            nodeNameHtml(n, isRoot) + // before .node-slot: inside it, a title would shift the top:50% insert +
             `<div class="node-slot">${nodeCard(n, isRoot)}` +
             `<button class="node-insert-btn" data-id="${esc(n.id)}" title="Insert before">+</button></div>` +
             personaStrip(n) +
             runButton(n) +
             `</div>`;
+    }
+
+    // Chain-head title: ink above the card, never inside it — the card header
+    // is machine facts (dur · mcp · dot); a name is a human word that wraps.
+    // Dormant names (root became non-root via delete-bridge) render nothing.
+    function nodeNameHtml(n, isRoot) {
+        if (!isRoot || !n.name) return '';
+        return `<div class="node-title clamp-10" title="${esc(n.name)}">${esc(n.name)}</div>`;
     }
 
     function personaStrip(n) {
@@ -471,18 +497,15 @@
     function nodeCard(n, isRoot) {
         return `<div class="node-card" data-id="${esc(n.id)}" data-status="${esc(n.status)}">` +
             `<div class="node-main">` +
-            cardHeader(n, isRoot) + cardBody(n) +
+            cardHeader(n) + cardBody(n) +
             `</div>` +
             `<button class="node-add-child" title="Add child">+</button>` +
             `</div>`;
     }
 
-    function cardHeader(n, isRoot) {
+    function cardHeader(n) {
         const badge = n.mcp ? '<span class="mcp-badge">mcp</span>' : '';
-        const name = isRoot && n.name
-            ? `<span class="node-name" title="${esc(n.name)}">${esc(n.name)}</span>` : '';
         return `<div class="node-card-header">` +
-            name +
             `<span class="node-dur">${esc(headerDur(n))}</span>` +
             badge +
             `<span class="node-status-dot ${esc(n.status)}"></span>` +
@@ -685,14 +708,16 @@
         }
     }
 
-    async function postRun(prompt) {
-        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(composerRefId)}/run`;
+    async function postRun(prompt, parentId) {
+        const nodeId = parentId ? selectedId : composerRefId;
+        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(nodeId)}/run`;
+        const body = parentId ? { prompt, parent_run_id: parentId } : { prompt };
         const opts = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt })
+            body: JSON.stringify(body)
         };
-        await fetchJson(url, opts);
+        return fetchJson(url, opts);
     }
 
     async function postNode(prompt, agent) {
@@ -714,6 +739,9 @@
     function openPanel(n) {
         if (!n) return;
         disarmDelete(); // a re-render silently disarms a pending confirm — always the safe direction
+        focusedRunId = null;
+        logsJson = ''; // innerHTML rebuild wipes #runs-list — the cache guard in loadLogs must not skip the re-render
+        runSummaryEditing = false;
         promptEditing = false;
         summaryEditing = false;
         panelStatus = n.status;
@@ -881,6 +909,10 @@
         selectedId = null;
         panelJson = '';
         logsJson = '';
+        runsCache = [];
+        pendingRowFocus = null;
+        focusedRunId = null;
+        runSummaryEditing = false;
         promptEditing = false;
         summaryEditing = false;
         panelStatus = '';
@@ -895,7 +927,7 @@
         return `<div class="detail-panel-header">` +
             `<div class="detail-panel-accent"></div>` +
             panelTitleHtml(n, took) +
-            `<button class="detail-panel-close">✕</button>` +
+            `<button class="detail-panel-close" title="Close panel" aria-label="Close panel">✕</button>` +
             `</div>`;
     }
 
@@ -912,7 +944,7 @@
             return `<div class="detail-panel-name">${esc(n.agent)}</div>` +
                 `<div class="detail-panel-meta">${esc(n.status)}${took}${time}</div>`;
         }
-        return `<div class="detail-panel-title-name" title="${esc(n.name)}">${esc(n.name)}</div>` +
+        return `<div class="detail-panel-title-name clamp-10" title="${esc(n.name)}">${esc(n.name)}</div>` +
             `<div class="detail-panel-meta">${esc(n.agent)} · ${esc(n.status)}${took}${time}</div>`;
     }
 
@@ -928,14 +960,16 @@
 
     // The name field exists only on chain heads: a field on a non-root invites
     // "what does this name, then?" (its lane/card label is dormant by design).
+    // No maxlength: the backend has no cap (GraphStore.updateName stores TEXT)
+    // and every surface that renders the name wraps it.
     function nameSection(n) {
         if (!isRoot(n)) return '';
         return `<div><div class="detail-section-label">CHAIN NAME</div>` +
             `<div class="name-row">` +
-            `<input id="name-input" type="text" value="${esc(n.name || '')}" placeholder="Name this chain…" maxlength="64" spellcheck="false" autocomplete="off" aria-label="Chain name">` +
+            `<input id="name-input" type="text" value="${esc(n.name || '')}" placeholder="Name this chain…" spellcheck="false" autocomplete="off" aria-label="Chain name">` +
             `<button id="name-save">Save</button>` +
             `</div>` +
-            `<div class="mcp-hint">Shows above the lane in bird's-eye view and on this root card.</div>` +
+            `<div class="mcp-hint">Shows above this root card and its lane in bird's-eye view.</div>` +
             `</div>`;
     }
 
@@ -1004,24 +1038,52 @@
         try {
             const data = await fetchJson(url);
             if (selectedId !== nodeId) return;
+            runsCache = data.logs;
+            if (blockedByTyping()) return;
             const json = JSON.stringify(data.logs);
             if (json === logsJson) return;
             logsJson = json;
-            renderLogs(data.logs);
+            if (focusedRunId) refreshRunView(data.logs);
+            else renderLogs(data.logs);
         } catch (e) {
             showError(`Failed to load runs: ${e.message}`);
         }
+    }
+
+    function blockedByTyping() {
+        return runSummaryEditing || panelHasTyping();
+    }
+
+    function panelHasTyping() {
+        const inner = $('detail-panel-inner');
+        if (!inner) return false;
+        return [...inner.querySelectorAll('input, textarea')].some(fieldHasTyping);
+    }
+
+    function fieldHasTyping(el) {
+        return el === document.activeElement || (el.tagName === 'TEXTAREA' && el.value.trim() !== '');
+    }
+
+    function rootRuns(logs) {
+        return logs.filter(l => !l.parent_run_id).sort((a, b) => b.created_at - a.created_at);
+    }
+
+    function threadOf(rootId, logs) {
+        return logs.filter(l => l.root_run_id === rootId).sort((a, b) => a.created_at - b.created_at);
     }
 
     function renderLogs(logs) {
         const el = $('runs-list');
         if (!el) return;
         const snap = expansionSnapshot(el);
-        el.innerHTML = logs.length
-            ? logs.map(runLogHtml).join('')
+        const roots = rootRuns(logs);
+        el.innerHTML = roots.length
+            ? roots.map(l => runLogHtml(l, logs)).join('')
             : '<div class="summary-missing">no runs yet</div>';
         bindCopyButtons(el);
+        bindRunFocusButtons(el);
         restoreExpansion(el, snap);
+        focusPendingRow();
     }
 
     function expansionSnapshot(container) {
@@ -1046,15 +1108,357 @@
         return t.textContent.slice(0, 200);
     }
 
-    function runLogHtml(l) {
+    function runLogHtml(l, logs) {
         const cls = l.status === 'failed' ? 'output error' : 'output';
-        const took = l.took != null ? ` · took ${fmtDur(l.took)}` : '';
-        const meta = `${esc(l.status)}${took} · ${ago(l.created_at)}`;
-        return `<div class="run-log">` +
-            `<div class="run-log-meta">${meta}</div>` +
+        return `<div class="run-log" data-run-id="${esc(l.id)}">` +
+            `<div class="run-log-meta">${runFocusBtn()}<span>${rootMeta(l, logs)}</span></div>` +
             renderBubble('input', '', l.prompt) +
-            renderBubble(cls, '', l.output || 'in progress…') +
+            renderBubble(cls, '', l.output || (l.status === 'progress' ? 'in progress…' : '(empty)')) +
+            `<div class="run-log-focus-row">${runFocusBtn()}</div>` +
             `</div>`;
+    }
+
+    function rootMeta(l, logs) {
+        const n = threadOf(l.id, logs).length - 1;
+        return `${runMeta(l)}${n ? ` · <span class="convo-count">+${n}</span>` : ''}`;
+    }
+
+    function runMeta(l) {
+        const took = l.took != null ? ` · took ${fmtDur(l.took)}` : '';
+        return `${esc(l.status)}${took} · ${ago(l.created_at)}`;
+    }
+
+    function runFocusBtn() {
+        return `<button class="run-focus-btn" title="Open run" aria-label="Open run details">` +
+            `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>`;
+    }
+
+    function bindRunFocusButtons(el) {
+        el.querySelectorAll('.run-focus-btn').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                focusRun(btn.closest('.run-log').dataset.runId);
+            });
+        });
+    }
+
+    function focusRun(runId) {
+        const root = runsCache.find(l => l.id === runId && !l.parent_run_id);
+        if (!root) return;
+        focusedRunId = runId;
+        renderRunView(root, true);
+        $('detail-panel-inner').querySelector('.run-back-btn').focus();
+    }
+
+    function refreshRunView(logs) {
+        const root = logs.find(l => l.id === focusedRunId && !l.parent_run_id);
+        root ? renderRunView(root, false) : backToNode();
+    }
+
+    function backToNode() {
+        const from = focusedRunId;
+        focusedRunId = null;
+        runSummaryEditing = false;
+        logsJson = '';
+        pendingRowFocus = from; // rows re-render async (loadLogs) — restore focus then
+        const n = nodes.find(x => x.id === selectedId);
+        if (!n) return closePanel();
+        openPanel(n);
+        leanBackIn();
+    }
+
+    function focusPendingRow() {
+        if (!pendingRowFocus) return;
+        const row = document.querySelector(`.run-log[data-run-id="${pendingRowFocus}"]`);
+        pendingRowFocus = null;
+        if (row) { row.tabIndex = -1; row.focus(); }
+    }
+
+    function leanBackIn() {
+        const body = $('detail-panel-inner').querySelector('.detail-panel-body');
+        if (body) body.classList.add('run-back');
+    }
+
+    function renderRunView(root, animate) {
+        if (animate) return enterThread(root);
+        const thread = threadOf(root.id, runsCache);
+        refreshThreadMessages(thread);
+        reconcileFooter(thread[thread.length - 1]);
+    }
+
+    function enterThread(root) {
+        const inner = $('detail-panel-inner');
+        const thread = threadOf(root.id, runsCache);
+        footerKey = footerKeyOf(thread[thread.length - 1]);
+        inner.innerHTML = threadViewHtml(root, thread);
+        inner.querySelector('.detail-panel-body').classList.add('run-enter');
+        bindRunViewControls();
+    }
+
+    function refreshThreadMessages(thread) {
+        const el = $('thread-messages');
+        if (!el) return;
+        const snap = expansionSnapshot(el);
+        el.innerHTML = thread.map(threadEntryHtml).join('');
+        restoreExpansion(el, snap);
+        bindThreadMessages(el);
+    }
+
+    function bindThreadMessages(el) {
+        bindCopyButtons(el);
+        bindSummaryEdit(el);
+    }
+
+    function bindSummaryEdit(scope) {
+        scope.querySelectorAll('.summary-edit-btn').forEach(btn =>
+            btn.addEventListener('click', () => startRunSummaryEdit(btn.dataset.runId)));
+    }
+
+    function bindRunViewControls() {
+        const inner = $('detail-panel-inner');
+        inner.querySelector('.detail-panel-close').addEventListener('click', closePanel);
+        inner.querySelector('.run-back-btn').addEventListener('click', backToNode);
+        bindRunComposer();
+    }
+
+    function threadViewHtml(root, thread) {
+        return runViewHeader(root, thread) +
+            `<div class="detail-panel-body">${messagesHtml(thread)}${threadFooterHtml(thread)}</div>`;
+    }
+
+    function messagesHtml(thread) {
+        return `<div id="thread-messages">${thread.map(threadEntryHtml).join('')}</div>`;
+    }
+
+    function threadFooterHtml(thread) {
+        return `<div id="thread-footer">${runFollowupSection(thread[thread.length - 1])}</div>`;
+    }
+
+    function threadEntryHtml(l) {
+        return `<div class="run-log" data-run-id="${esc(l.id)}">` +
+            `<div class="run-log-meta"><span>${runMeta(l)}</span></div>` +
+            renderBubble('input', '', l.prompt) +
+            runResultSection(l) +
+            runSummarySection(l) +
+            `</div>`;
+    }
+
+    function runBackBtn() {
+        return `<button class="run-back-btn" title="Back to node" aria-label="Back to node">` +
+            `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>`;
+    }
+
+    function runViewHeader(root, thread) {
+        const n = thread.length;
+        return `<div class="detail-panel-header">` +
+            `<div class="detail-panel-accent"></div>` +
+            runBackBtn() +
+            `<div class="detail-panel-title">` +
+            `<div class="detail-panel-name">Conversation · ${fmtTime(root.created_at)}</div>` +
+            `<div class="detail-panel-meta">${n} run${n > 1 ? 's' : ''} · ${runMeta(thread[n - 1])}</div>` +
+            `</div>` +
+            `<button class="detail-panel-close" title="Close panel" aria-label="Close panel">✕</button>` +
+            `</div>`;
+    }
+
+    function runSummarySection(l) {
+        if (['progress', 'summarizing', 'failed'].includes(l.status)) return '';
+        return `<div class="run-summary-section" data-run-id="${esc(l.id)}">${summarySectionInner(l)}</div>`;
+    }
+
+    function summarySectionInner(l) {
+        const body = l.summary
+            ? renderBubble('summary', '', l.summary)
+            : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
+        return `<div class="summary-head">` +
+            `<div class="detail-section-label summary">SUMMARY</div>` +
+            `<span class="summary-actions"><button class="summary-edit-btn" data-run-id="${esc(l.id)}">${l.summary ? 'Edit' : 'Add'}</button></span></div>${body}`;
+    }
+
+    function runSummaryEditHtml(l) {
+        return `<div class="summary-head">` +
+            `<div class="detail-section-label summary">SUMMARY</div></div>` +
+            `<textarea id="run-summary-input" spellcheck="false">${esc(l.summary || '')}</textarea>` +
+            `<button class="regen-submit" id="run-summary-update" disabled>Update</button>`;
+    }
+
+    function startRunSummaryEdit(runId) {
+        const l = runsCache.find(x => x.id === runId);
+        const section = document.querySelector(`.run-summary-section[data-run-id="${CSS.escape(runId)}"]`);
+        if (!l || !section) return;
+        runSummaryEditing = true;
+        section.innerHTML = runSummaryEditHtml(l);
+        bindRunSummaryUpdate(l);
+        $('run-summary-input').focus();
+    }
+
+    function bindRunSummaryUpdate(l) {
+        const input = $('run-summary-input');
+        const update = $('run-summary-update');
+        const dirty = () => input.value.trim() !== (l.summary || '') && !!input.value.trim();
+        const sync = () => { update.disabled = !dirty(); };
+        input.addEventListener('input', sync);
+        update.addEventListener('click', () => submitRunSummary(l.id));
+        sync();
+    }
+
+    async function submitRunSummary(runId) {
+        const summary = $('run-summary-input').value.trim();
+        if (!summary) return;
+        runSummaryEditing = false;
+        try {
+            applyRunSummary(await putRunSummary(runId, summary));
+            logsJson = '';
+            await loadLogs(selectedId);
+        } catch (e) {
+            showError(`Failed to save summary: ${e.message}`);
+        }
+    }
+
+    function applyRunSummary(updated) {
+        runsCache = runsCache.map(l => (l.id === updated.id ? updated : l));
+        const section = document.querySelector(`.run-summary-section[data-run-id="${CSS.escape(updated.id)}"]`);
+        if (section) { section.innerHTML = summarySectionInner(updated); bindSummaryEdit(section); }
+    }
+
+    async function putRunSummary(runId, summary) {
+        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(selectedId)}/runs/${encodeURIComponent(runId)}`;
+        return await fetchJson(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ summary })
+        });
+    }
+
+    function runFollowupSection(tip) {
+        if (!tip) return '';
+        if (tip.status === 'progress') return runHint('Run in progress…');
+        if (tip.status === 'summarizing') return runHint('Summarizing…');
+        if (tip.status === 'failed') return failedFooterHtml();
+        if (!tip.summary) return runHint('Write a summary above to continue this conversation.');
+        return followupComposerHtml();
+    }
+
+    function failedFooterHtml() {
+        return `<div class="run-followup-hint">This run failed — restart it to try again.` +
+            `<button class="regen-submit run-retry" id="run-retry-btn">Retry</button></div>`;
+    }
+
+    function followupComposerHtml() {
+        return `<div class="run-composer">` +
+            `<textarea id="run-followup-text" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
+            `<button class="regen-submit" id="run-followup-send" disabled>Send</button>` +
+            `</div>`;
+    }
+
+    function runHint(text) {
+        return `<div class="run-followup-hint">${esc(text)}</div>`;
+    }
+
+    function reconcileFooter(tip) {
+        const key = footerKeyOf(tip);
+        if (key === footerKey) return;
+        const footer = $('thread-footer');
+        if (!footer) return;
+        const draft = footerDraft();
+        footerKey = key;
+        footer.innerHTML = runFollowupSection(tip);
+        bindRunComposer();
+        restoreFooterDraft(draft);
+    }
+
+    function footerKeyOf(tip) {
+        return tip ? `${tip.id}:${tip.status}:${tip.summary ? 1 : 0}` : 'empty';
+    }
+
+    function footerDraft() {
+        const text = $('run-followup-text');
+        return text && text.value.trim() ? text.value : '';
+    }
+
+    function restoreFooterDraft(draft) {
+        const text = $('run-followup-text');
+        if (!text || !draft) return;
+        text.value = draft;
+        text.dispatchEvent(new Event('input'));
+    }
+
+    function bindRunComposer() {
+        const send = $('run-followup-send');
+        if (send) bindFollowupComposer(send);
+        bindFooterRetry();
+    }
+
+    function bindFollowupComposer(send) {
+        const text = $('run-followup-text');
+        const sync = () => { send.disabled = !text.value.trim(); };
+        text.addEventListener('input', sync);
+        text.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitFollowup();
+        });
+        send.addEventListener('click', () => submitFollowup());
+    }
+
+    function bindFooterRetry() {
+        const btn = $('run-retry-btn');
+        if (btn) btn.addEventListener('click', submitFooterRetry);
+    }
+
+    async function submitFooterRetry() {
+        const tip = threadOf(focusedRunId, runsCache).pop();
+        if (!tip) return;
+        try {
+            await postRetry(tip.id);
+            await load();
+            logsJson = '';
+            await loadLogs(selectedId);
+            scrollToThreadEnd();
+        } catch (e) {
+            showError(`Failed to restart run: ${e.message}`);
+        }
+    }
+
+    function postRetry(runId) {
+        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(selectedId)}/runs/${encodeURIComponent(runId)}/retry`;
+        return fetchJson(url, { method: 'POST' });
+    }
+
+    async function submitFollowup() {
+        const prompt = $('run-followup-text').value.trim();
+        if (!prompt) return;
+        const tip = threadOf(focusedRunId, runsCache).pop();
+        if (!tip) return;
+        try {
+            await postRun(prompt, tip.id);
+            clearFollowupDraft();
+            await load();
+            logsJson = '';
+            await loadLogs(selectedId);
+            scrollToThreadEnd();
+        } catch (e) {
+            showError(`Failed to continue run: ${e.message}`);
+        }
+    }
+
+    function clearFollowupDraft() {
+        const text = $('run-followup-text');
+        if (text) { text.value = ''; text.dispatchEvent(new Event('input')); }
+    }
+
+    function scrollToThreadEnd() {
+        const body = $('detail-panel-inner').querySelector('.detail-panel-body');
+        if (body) body.scrollTop = body.scrollHeight;
+    }
+
+    function runResultSection(l) {
+        const progress = l.status === 'progress';
+        const failed = l.status === 'failed';
+        const cls = failed ? 'detail-section-label result error' : 'detail-section-label result';
+        const label = progress ? '<div class="detail-section-label running">RUNNING</div>' : `<div class="${cls}">${failed ? 'ERROR' : 'RESULT'}</div>`;
+        const bubble = progress
+            ? renderBubble('output', '', 'in progress…')
+            : renderBubble(failed ? 'output error' : 'output', '', l.output || '(empty)');
+        return `<div>${label}${bubble}</div>`;
     }
 
     function ago(ms) {
@@ -1370,7 +1774,7 @@
 
     function resultSection(n) {
         if (n.status === 'progress') {
-            return `<div><div class="detail-section-label">RUNNING</div>` +
+            return `<div><div class="detail-section-label running">RUNNING</div>` +
                 renderBubble('output', '', 'in progress…') + `</div>`;
         }
         const failed = n.status === 'failed';
@@ -1397,12 +1801,37 @@
             btn.addEventListener('click', e => {
                 e.stopPropagation();
                 const text = btn.closest('.wl-bubble').querySelector('.wl-bubble-text').textContent;
-                navigator.clipboard.writeText(text).then(() => {
-                    btn.innerHTML = checkIcon();
-                    setTimeout(() => { btn.innerHTML = copyIcon(); }, 2000);
-                });
+                flashCopyState(btn, copyText(text));
             });
         });
+    }
+
+    function flashCopyState(btn, write) {
+        btn.innerHTML = checkIcon();
+        clearTimeout(btn.copyTimer);
+        write.then(
+            () => { btn.copyTimer = setTimeout(() => { btn.innerHTML = copyIcon(); }, 2000); },
+            () => {
+                btn.innerHTML = copyIcon();
+                showError('Copy failed — clipboard unavailable');
+            }
+        );
+    }
+
+    function copyText(text) {
+        if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+        return legacyCopy(text);
+    }
+
+    function legacyCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
     }
 
     function bindExpandButtons(panel) {
@@ -1446,6 +1875,16 @@
         checkClampPanelWidth();
         checkRenderBubbleTruncation();
         checkAddRootPinned();
+        checkRunLogHtml();
+        checkRunLogEmpty();
+        checkRunViewHtml();
+        checkNodeTitleAboveCard();
+        checkInsertBtnStillCentered();
+        checkEdgesStillDrawn();
+        checkBeLabelsAlign();
+        checkBeNoNamesUnchanged();
+        checkNameInputUncapped();
+        checkClampGrammar();
         console.log('All sanity checks passed.');
     }
 
@@ -1454,6 +1893,43 @@
         console.assert(fmtDur(90)   === '1m 30s', 'fmtDur: 1m 30s');
         console.assert(fmtDur(null) === '',       'fmtDur: null');
         console.log('OK: fmtDur');
+    }
+
+    function checkRunLogHtml() {
+        const l = { id: 'r1', root_run_id: 'r1', status: 'success', took: 2, created_at: Date.now(), prompt: 'p', output: 'o' };
+        const html = runLogHtml(l, [l, { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', created_at: Date.now() + 1, prompt: 'x' }]);
+        console.assert(html.includes('data-run-id="r1"'), 'runLog: run id attr');
+        console.assert((html.match(/run-focus-btn/g) || []).length === 2, 'runLog: two focus arrows');
+        console.assert(html.includes('convo-count">+1'), 'runLog: follow-up count badge');
+        console.assert(html.includes('run-log-meta"><button'), 'runLog: header arrow first (left)');
+        console.log('OK: runLogHtml arrows');
+    }
+
+    function checkRunLogEmpty() {
+        const l = { id: 'r2', root_run_id: 'r2', status: 'failed', created_at: Date.now(), prompt: 'p', output: null };
+        const html = runLogHtml(l, [l]);
+        console.assert(html.includes('(empty)') && !html.includes('in progress'), 'runLog: failed + empty → (empty)');
+        console.assert(!html.includes('convo-count'), 'runLog: no badge on single-run convo');
+        console.log('OK: runLogHtml empty output');
+    }
+
+    function checkRunViewHtml() {
+        const now = Date.now();
+        const thread = [
+            { id: 'r1', root_run_id: 'r1', status: 'failed', took: 3, created_at: now, prompt: 'p', output: 'boom' },
+            { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'progress', created_at: now + 1, prompt: 'p2' },
+            { id: 'r3', root_run_id: 'r1', parent_run_id: 'r2', status: 'success', created_at: now + 2, prompt: 'p3', output: 'o', summary: 's' },
+            { id: 'r4', root_run_id: 'r1', parent_run_id: 'r3', status: 'answered', created_at: now + 3, prompt: 'p4', output: 'o' }
+        ];
+        const html = threadViewHtml(thread[0], thread);
+        console.assert(html.includes('run-back-btn'), 'runView: back button');
+        console.assert(html.includes('4 runs'), 'runView: thread length in header');
+        console.assert(html.includes('ERROR') && html.includes('RUNNING') && html.includes('RESULT'), 'runView: per-run labels');
+        console.assert(!html.includes('run-composer'), 'runView: answered tip without summary → no composer');
+        const done = threadViewHtml(thread[0], thread.slice(0, 3));
+        console.assert(done.includes('SUMMARY') && done.includes('summary-edit-btn'), 'runView: summary + edit');
+        console.assert(done.includes('run-composer'), 'runView: follow-up composer on summarised tip');
+        console.log('OK: runViewHtml');
     }
 
     function checkClampPanelWidth() {
@@ -1494,6 +1970,85 @@
         console.log('OK: add-root render + click');
     }
 
+    function checkNodeTitleAboveCard() {
+        nodes = [
+            { id: 't1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'Long chain name' },
+            { id: 't2', parent_id: 't1', agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'dormant' }];
+        renderGrid();
+        const title = document.querySelector('.node-title');
+        const cell = document.querySelector('.node-cell');
+        console.assert(title && cell.firstElementChild === title, 'nodeTitle: first child of the cell (before .node-slot)');
+        console.assert(title && title.title === 'Long chain name', 'nodeTitle: tooltip carries the full name');
+        console.assert(document.querySelectorAll('.node-title').length === 1, 'nodeTitle: child + dormant names render none');
+        console.assert(!$('graph-grid').querySelector('.node-name'), 'nodeTitle: legacy .node-name gone from the grid');
+        console.log('OK: node title above card');
+    }
+
+    function checkInsertBtnStillCentered() {
+        if (!document.querySelector('.node-cell')) renderGrid();
+        const btn = document.querySelector('.node-slot .node-insert-btn');
+        const slot = btn.closest('.node-slot');
+        // offsetTop ignores the translateY(-50%), so the visual center sits AT it
+        console.assert(Math.abs(btn.offsetTop - slot.offsetHeight / 2) < 1, 'insertBtn: the + stays dead-center despite the title above');
+        console.log('OK: insert button centered');
+    }
+
+    function checkEdgesStillDrawn() {
+        const paths = document.querySelectorAll('#edge-layer path').length;
+        console.assert(paths === nodes.length - rootNodes().length, 'edges: re-measured paths === nodes − roots');
+        console.log('OK: edges drawn after title shift');
+    }
+
+    function checkBeLabelsAlign() {
+        nodes = [
+            { id: 'b1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x'.repeat(300) },
+            { id: 'b2', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'short' },
+            { id: 'b3', parent_id: 'b2', agent: 'a', prompt: 'p', status: 'success', created_at: 3 },
+            { id: 'b4', parent_id: 'b2', agent: 'a', prompt: 'p', status: 'success', created_at: 4 },
+            { id: 'b5', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 5 }];
+        document.body.classList.add('birds-eye'); // #birds-eye must be visible to measure
+        renderBirdsEye();
+        const strips = [...document.querySelectorAll('.be-chain-label')];
+        const heights = strips.map(s => s.offsetHeight);
+        const cs = strips.length ? getComputedStyle(strips[0]) : {};
+        console.assert(strips.length === 4, 'beLabels: a strip per lane — named, braided-dedup AND unnamed');
+        console.assert(Math.max(...heights) - Math.min(...heights) < 1, 'beLabels: strips equalized — rails share one grid');
+        console.assert(strips[0].offsetHeight > 14, 'beLabels: long name wrapped — the old 14px clip is gone');
+        console.assert(cs.whiteSpace === 'normal' && parseFloat(cs.lineHeight) / parseFloat(cs.fontSize) > 1.2,
+            'beLabels: wraps with a living line-height (descenders visible)');
+        document.body.classList.remove('birds-eye');
+        console.log('OK: birds-eye labels align');
+    }
+
+    function checkBeNoNamesUnchanged() {
+        nodes = nodes.map(n => ({ ...n, name: null }));
+        renderBirdsEye();
+        const strips = [...document.querySelectorAll('.be-chain-label')];
+        console.assert(strips.every(s => !s.textContent), 'beNoNames: zero names → every strip stays silent (pixel-identical)');
+        console.log('OK: birds-eye unchanged without names');
+    }
+
+    function checkNameInputUncapped() {
+        const root = { id: 'n1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x' };
+        nodes = [root];
+        const html = nameSection(root);
+        console.assert(!html.includes('maxlength'), 'nameInput: the UI-only 64-char cap is gone');
+        console.assert(html.includes('above this root card'), 'nameInput: hint names the primary surface');
+        console.log('OK: name input uncapped');
+    }
+
+    function checkClampGrammar() {
+        const probe = document.createElement('div');
+        probe.className = 'clamp-10';
+        probe.textContent = 'x';
+        document.body.appendChild(probe);
+        const cs = getComputedStyle(probe);
+        console.assert(cs.webkitLineClamp === '10', 'clamp10: ten lines');
+        console.assert(cs.webkitBoxOrient === 'vertical' && cs.overflow === 'hidden', 'clamp10: vertical box, hidden tail');
+        probe.remove();
+        console.log('OK: clamp-10 utility');
+    }
+
     $('composer-text').addEventListener('input', e => {
         const ready = e.target.value.trim().length > 0;
         document.querySelectorAll('.agent-btn').forEach(b => { b.disabled = !ready; });
@@ -1520,6 +2075,7 @@
         if (e.key !== 'Escape') return;
         if ($('composer').classList.contains('open')) return closeComposer();
         if (disarmDelete()) return; // first Esc disarms an armed delete, only then other Escape behavior
+        if (focusedRunId) return backToNode();
         if (viewMode === 'birds') setMode('normal');
     });
 

@@ -103,10 +103,14 @@ public enum Notifications {
         try LogManager.fetchRunEnds(since: 0, at: instancePath).map { end in
             NotificationItem(
                 kind: "workflow", refId: end.session, workflowId: end.workflowId,
-                nodeId: nil, prompt: nil, success: end.success,
-                took: end.took, endedAt: end.endedAt, read: false
+                nodeId: nil, prompt: ask(forSession: end.session, at: instancePath),
+                success: end.success, took: end.took, endedAt: end.endedAt, read: false
             )
         }
+    }
+
+    static func ask(forSession session: String, at instancePath: String) -> String? {
+        (try? LogManager.fetchFirstAsk(session: session, at: instancePath)).flatMap { $0 }
     }
 
     static func nodeRunItems(at instancePath: String) throws -> [NotificationItem] {

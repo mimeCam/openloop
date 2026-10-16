@@ -114,8 +114,25 @@ Graph — node graph per instance (powers /graph.html)
   DELETE /api/instances/:id/graph/:nid[?chain=true] → { nodes:[GraphNode] }
   POST   /api/instances/:id/graph/:nid/summary body { prompt? }  → regenerate /
                                                    re-run with the edited prompt
-  POST   /api/instances/:id/graph/:nid/run     body { prompt }   → run log entry
+  POST   /api/instances/:id/graph/:nid/run     body { prompt, parent_run_id? }
+                                                   → run log entry (prompt stored
+                                                   & returned raw; context file
+                                                   lines are added only at exec
+                                                   time). parent_run_id = follow-up:
+                                                   requires that run status
+                                                   "success"; its thread's
+                                                   summaries are written to
+                                                   convo.md and referenced with
+                                                   @/context/convo.md
+  PUT    /api/instances/:id/graph/:nid/runs/:rid  body { summary } → edited
+                                                   run summary (enables
+                                                   follow-ups on it)
   GET    /api/instances/:id/graph/:nid/logs    → { logs:[…] }
+           Run : { id, node_id, prompt, status, output?, took?, created_at,
+           completed_at?, parent_run_id?, summary? }
+           status: progress → summarizing → success | failed (answered =
+           finished with no summary). Every successful run is summarized
+           right after completion, like node creation.
   GET    /api/agents                           → { agents:[{ name }] }
   Node : { id, parent_id?, prompt, agent, status, output?, took?, mcp?,
            mcp_auth?, summary?, personas, active (dormant flag), name?, runnable,

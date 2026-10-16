@@ -86,12 +86,34 @@ struct GraphHandler: Sendable {
         guard body.prompt.trimmingCharacters(in: .whitespacesAndNewlines).notEmpty else {
             throw Abort(.badRequest, reason: "prompt must not be empty")
         }
-        return toContent(try await runLogFor(nodeId: nodeId, prompt: body.prompt, at: instancePath))
+        return toContent(try await runLogFor(
+            nodeId: nodeId, prompt: body.prompt, parentRunId: body.parent_run_id, at: instancePath
+        ))
+    }
+
+    func retryRun(req: Request) async throws -> GraphRunLogContent {
+        let instancePath = try instancePathFrom(req)
+        let nodeId = try nodeIdFrom(req)
+        let runId = try runIdFrom(req)
+        return try await retryRunLog(nodeId: nodeId, runId: runId, at: instancePath)
+    }
+
+    func updateRun(req: Request) async throws -> GraphRunLogContent {
+        let instancePath = try instancePathFrom(req)
+        let nodeId = try nodeIdFrom(req)
+        let runId = try runIdFrom(req)
+        let body = try req.content.decode(GraphRunSummaryRequest.self)
+        let summary = body.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard summary.notEmpty else { throw Abort(.badRequest, reason: "summary must not be empty") }
+        try assertRunExists(runId, nodeId: nodeId, at: instancePath)
+        try GraphStore.finishRunSummary(id: runId, summary: summary, at: instancePath)
+        return try fetchedRun(runId, nodeId: nodeId, at: instancePath)
     }
 
     func logs(req: Request) async throws -> GraphRunLogsResponse {
         let instancePath = try instancePathFrom(req)
         let nodeId = try nodeIdFrom(req)
+        try GraphStore.createTables(at: instancePath)
         guard try findNode(id: nodeId, at: instancePath) != nil else {
             throw Abort(.notFound, reason: "Node not found: \(nodeId)")
         }
@@ -322,49 +344,141 @@ private extension GraphHandler {
         GraphStore.chain(of: node, in: nodes).allSatisfy { $0.status == "success" }
     }
 
-    func runLogFor(nodeId: String, prompt: String, at instancePath: String) async throws -> GraphRunLog {
+    func runLogFor(nodeId: String, prompt: String, parentRunId: String?, at instancePath: String) async throws -> GraphRunLog {
         guard let node = try findNode(id: nodeId, at: instancePath) else { throw Abort(.notFound, reason: "Node not found: \(nodeId)") }
         let nodes = try GraphStore.fetchNodes(at: instancePath)
         let chain = GraphStore.chain(of: node, in: nodes)
         guard chain.allSatisfy({ $0.status == "success" }) else { throw Abort(.badRequest, reason: "Chain not ready — parents need summaries") }
         let logId = UUID().uuidString
-        let ctxPath = try writeContext(ancestors(of: node, in: nodes), id: logId)
+        let parent = try parentRun(parentRunId, nodeId: nodeId, at: instancePath)
+        try writeRunContext(node, nodes: nodes, parent: parent, id: logId, at: instancePath)
         let mcpPath = GraphStore.writeMcpConfig(GraphStore.chainMcpEndpoints(chain), runId: logId)
-        return try await scheduleRunLog(node, prompt: prefixedPrompt(prompt, ctxPath), logId: logId, mcpPath: mcpPath, at: instancePath)
+        let rootRunId = parent?.rootRunId ?? parent?.id ?? logId
+        return try await scheduleRunLog(node, prompt: prompt, logId: logId, parentRunId: parentRunId, rootRunId: rootRunId, mcpPath: mcpPath, at: instancePath)
     }
 
-    func newRunLog(id: String, nodeId: String, prompt: String) -> GraphRunLog {
+    func parentRun(_ id: String?, nodeId: String, at instancePath: String) throws -> GraphRunLog? {
+        guard let id else { return nil }
+        let logs = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath)
+        guard let run = logs.first(where: { $0.id == id }) else {
+            throw Abort(.notFound, reason: "Run not found: \(id)")
+        }
+        guard !logs.contains(where: { $0.parentRunId == id }) else {
+            throw Abort(.conflict, reason: "Run already continued — append to the conversation tip")
+        }
+        guard run.status == "success" else {
+            throw Abort(.badRequest, reason: "Run not ready — it needs a summary before a follow-up")
+        }
+        return run
+    }
+
+    func writeRunContext(_ node: GraphNode, nodes: [GraphNode], parent: GraphRunLog?, id: String, at instancePath: String) throws {
+        _ = try writeContext(GraphStore.chain(of: node, in: nodes), id: id)
+        _ = try writeConvo(parent, id: id, at: instancePath)
+    }
+
+    func writeConvo(_ parent: GraphRunLog?, id: String, at instancePath: String) throws -> String? {
+        guard let parent else { return nil }
+        let logs = try GraphStore.fetchRunLogs(nodeId: parent.nodeId, at: instancePath)
+        let text = GraphStore.runSummaries(GraphStore.runChain(of: parent, in: logs))
+        return try writeIfNotEmpty(text, in: try runDir(id), name: "convo.md")
+    }
+
+    func newRunLog(id: String, nodeId: String, prompt: String, parentRunId: String?, rootRunId: String?) -> GraphRunLog {
         GraphRunLog(
             id: id, nodeId: nodeId, prompt: prompt, status: "progress",
-            output: nil, took: nil, createdAt: Date().timeIntervalSinceReferenceDate, completedAt: nil
+            output: nil, took: nil, createdAt: Date().timeIntervalSinceReferenceDate, completedAt: nil,
+            parentRunId: parentRunId, rootRunId: rootRunId
         )
     }
 
     func scheduleRunLog(
-        _ node: GraphNode, prompt: String, logId: String, mcpPath: String?, at instancePath: String
+        _ node: GraphNode, prompt: String, logId: String, parentRunId: String?, rootRunId: String, mcpPath: String?, at instancePath: String
     ) async throws -> GraphRunLog {
-        let script = try resolveScript(for: node.agent)
-        let log = newRunLog(id: logId, nodeId: node.id, prompt: prompt)
+        let log = newRunLog(id: logId, nodeId: node.id, prompt: prompt, parentRunId: parentRunId, rootRunId: rootRunId)
         await GraphRunRegistry.shared.add(log.id)
         try GraphStore.insertRunLog(log, at: instancePath)
-        Task.detached { await executeRunLog(log, script: script, instancePath: instancePath, mcpPath: mcpPath) }
+        try detachRun(log, agent: node.agent, mcpPath: mcpPath, instancePath: instancePath)
         return log
+    }
+
+    func retryRunLog(nodeId: String, runId: String, at instancePath: String) async throws -> GraphRunLogContent {
+        try GraphStore.createTables(at: instancePath)
+        guard let node = try findNode(id: nodeId, at: instancePath) else { throw Abort(.notFound, reason: "Node not found: \(nodeId)") }
+        let nodes = try GraphStore.fetchNodes(at: instancePath)
+        guard GraphStore.chain(of: node, in: nodes).allSatisfy({ $0.status == "success" }) else {
+            throw Abort(.badRequest, reason: "Chain not ready — parents need summaries")
+        }
+        let run = try await failedTipRun(runId, nodeId: nodeId, at: instancePath)
+        return try await relaunchRun(run, node: node, nodes: nodes, at: instancePath)
+    }
+
+    func failedTipRun(_ runId: String, nodeId: String, at instancePath: String) async throws -> GraphRunLog {
+        let logs = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath)
+        guard let run = logs.first(where: { $0.id == runId }) else { throw Abort(.notFound, reason: "Run not found: \(runId)") }
+        guard run.status == "failed" else { throw Abort(.badRequest, reason: "Only failed runs can be restarted") }
+        guard !logs.contains(where: { $0.parentRunId == runId }) else {
+            throw Abort(.conflict, reason: "Run already continued — restart the conversation tip")
+        }
+        if await GraphRunRegistry.shared.isLive(runId) { throw Abort(.conflict, reason: "Restart already in flight") }
+        return run
+    }
+
+    func relaunchRun(_ run: GraphRunLog, node: GraphNode, nodes: [GraphNode], at instancePath: String) async throws -> GraphRunLogContent {
+        let logs = try GraphStore.fetchRunLogs(nodeId: node.id, at: instancePath)
+        let parent = run.parentRunId.flatMap { pid in logs.first { $0.id == pid } }
+        try writeRunContext(node, nodes: nodes, parent: parent, id: run.id, at: instancePath)
+        let chain = GraphStore.chain(of: node, in: nodes)
+        let mcpPath = GraphStore.writeMcpConfig(GraphStore.chainMcpEndpoints(chain), runId: run.id)
+        await GraphRunRegistry.shared.add(run.id)
+        try GraphStore.restartRunLog(id: run.id, at: instancePath)
+        try detachRun(run, agent: node.agent, mcpPath: mcpPath, instancePath: instancePath)
+        return try fetchedRun(run.id, nodeId: node.id, at: instancePath)
+    }
+
+    func detachRun(_ run: GraphRunLog, agent: String, mcpPath: String?, instancePath: String) throws {
+        let script = try resolveScript(for: agent)
+        Task.detached { await executeRunLog(run, script: script, instancePath: instancePath, mcpPath: mcpPath) }
     }
 
     func sweepRunLogs(instancePath: String) async throws {
         let stale = try GraphStore.fetchProgressRunLogs(at: instancePath)
         for log in stale where !(await GraphRunRegistry.shared.isLive(log.id)) {
-            try GraphStore.updateRunLog(
-                id: log.id, status: "failed", output: "interrupted", took: nil, at: instancePath
-            )
+            try sweepRunLog(log, at: instancePath)
         }
+    }
+
+    func sweepRunLog(_ log: GraphRunLog, at instancePath: String) throws {
+        if log.status == "summarizing" {
+            return try GraphStore.finishRunSummary(id: log.id, summary: nil, at: instancePath)
+        }
+        try GraphStore.updateRunLog(id: log.id, status: "failed", output: "interrupted", took: nil, at: instancePath)
+    }
+
+    func runIdFrom(_ req: Request) throws -> String {
+        guard let raw = req.parameters.get("rid") else { throw Abort(.badRequest) }
+        return raw.removingPercentEncoding ?? raw
+    }
+
+    func assertRunExists(_ runId: String, nodeId: String, at instancePath: String) throws {
+        guard try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath).contains(where: { $0.id == runId }) else {
+            throw Abort(.notFound, reason: "Run not found: \(runId)")
+        }
+    }
+
+    func fetchedRun(_ runId: String, nodeId: String, at instancePath: String) throws -> GraphRunLogContent {
+        guard let run = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath).first(where: { $0.id == runId }) else {
+            throw Abort(.notFound, reason: "Run not found: \(runId)")
+        }
+        return toContent(run)
     }
 
     func toContent(_ log: GraphRunLog) -> GraphRunLogContent {
         GraphRunLogContent(
             id: log.id, node_id: log.nodeId, prompt: log.prompt, status: log.status,
             output: log.output, took: log.took,
-            created_at: unixMs(log.createdAt), completed_at: log.completedAt.map(unixMs)
+            created_at: unixMs(log.createdAt), completed_at: log.completedAt.map(unixMs),
+            parent_run_id: log.parentRunId, summary: log.summary, root_run_id: log.rootRunId
         )
     }
 
@@ -407,15 +521,41 @@ private func runAnswerPhase(_ node: GraphNode, runId: String, script: FilePath, 
 
 private func executeRunLog(_ log: GraphRunLog, script: FilePath, instancePath: String, mcpPath: String?) async {
     let tb = TimedBenchmark()
-    let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(log.id))
-    let out = (try? await exec(script.string, args: runArgs(log.prompt, instancePath), chroot: instancePath, env: env)) ?? nil
-    let ok = out?.notEmpty == true
-    try? GraphStore.updateRunLog(
-        id: log.id, status: ok ? "success" : "failed", output: out,
-        took: Int(tb.intervalSinceInitialized), at: instancePath
-    )
+    let out = await execRunLog(log, script: script, instancePath: instancePath, mcpPath: mcpPath)
+    let took = Int(tb.intervalSinceInitialized)
+    try? GraphStore.updateRunLog(id: log.id, status: out?.notEmpty == true ? "summarizing" : "failed", output: out, took: took, at: instancePath)
+    if let output = out, output.notEmpty {
+        await summarizeRunLog(log, output: output, script: script, instancePath: instancePath, mcpPath: mcpPath)
+    }
     await GraphRunRegistry.shared.remove(log.id)
     cleanupRunArtifacts(log.id, mcpPath: mcpPath)
+}
+
+private func execRunLog(_ log: GraphRunLog, script: FilePath, instancePath: String, mcpPath: String?) async -> String? {
+    let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(log.id))
+    return (try? await exec(script.string, args: runArgs(runExecPrompt(log), instancePath), chroot: instancePath, env: env)) ?? nil
+}
+
+private func runExecPrompt(_ log: GraphRunLog) -> String {
+    var prefix = runFile(log.id, "ctx.md") != nil ? ctxFileLine : ""
+    if runFile(log.id, "convo.md") != nil { prefix += convoFileLine }
+    return prefix + log.prompt
+}
+
+private func runFile(_ runId: String, _ name: String) -> String? {
+    let file = GraphStore.contextRunDir(runId).appending(name)
+    return PathIO.isFileExistent(atPath: file.string) ? file.string : nil
+}
+
+private func summarizeRunLog(_ log: GraphRunLog, output: String, script: FilePath, instancePath: String, mcpPath: String?) async {
+    let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(log.id))
+    guard let prompt = qaSummaryPrompt(question: log.prompt, answer: output, runId: log.id) else {
+        try? GraphStore.finishRunSummary(id: log.id, summary: nil, at: instancePath)
+        return
+    }
+    let run = await runScript(script, args: runArgs(prompt, instancePath), chroot: instancePath, env: env)
+    let trimmed = run.out?.trimmingCharacters(in: .whitespacesAndNewlines)
+    try? GraphStore.finishRunSummary(id: log.id, summary: (trimmed?.isEmpty == true) ? nil : trimmed, at: instancePath)
 }
 
 private func cleanupRunArtifacts(_ runId: String, mcpPath: String?) {
@@ -451,11 +591,11 @@ private func writeIfNotEmpty(_ text: String, in dir: FilePath, name: String) thr
     return try GraphStore.writeContextFile(text, in: dir, fileName: name).string
 }
 
-private func writeQa(_ node: GraphNode, id: String) throws -> (question: String, answer: String) {
+private func writeQa(_ question: String, _ answer: String, id: String) throws -> (question: String, answer: String) {
     let dir = try runDir(id)
     return (
-        try GraphStore.writeContextFile(node.prompt, in: dir, fileName: "question.md").string,
-        try GraphStore.writeContextFile(node.output ?? "", in: dir, fileName: "answer.md").string
+        try GraphStore.writeContextFile(question, in: dir, fileName: "question.md").string,
+        try GraphStore.writeContextFile(answer, in: dir, fileName: "answer.md").string
     )
 }
 
@@ -472,9 +612,12 @@ private func ancestors(of node: GraphNode, in nodes: [GraphNode]) -> [GraphNode]
     Array(GraphStore.chain(of: node, in: nodes).dropLast())
 }
 
+private let ctxFileLine = "Context file: \(GraphStore.containerCtxDir)/ctx.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
+
+private let convoFileLine = "Previous conversation summary: @\(GraphStore.containerCtxDir)/convo.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
+
 private func prefixedPrompt(_ prompt: String, _ ctxPath: String?) -> String {
-    let ctx = "Context file: \(GraphStore.containerCtxDir)/ctx.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
-    return ctxPath.map { _ in ctx + prompt } ?? prompt
+    ctxPath.map { _ in ctxFileLine + prompt } ?? prompt
 }
 
 private func runScript(
@@ -509,7 +652,7 @@ private func maybeSummarize(id: String, runId: String, script: FilePath, instanc
 private func summarize(_ node: GraphNode, runId: String, script: FilePath, instancePath: String) async {
     let mcpPath = mcpConfigFor(node, runId: runId, at: instancePath)
     defer { deleteMcpConfig(mcpPath) }
-    guard let prompt = summaryPrompt(node, runId: runId) else {
+    guard let prompt = qaSummaryPrompt(question: node.prompt, answer: node.output ?? "", runId: runId) else {
         await GraphRunRegistry.shared.remove(node.id)
         return
     }
@@ -536,8 +679,8 @@ private func runSummary(
 
 private let summaryInstruction = "Summarize the QUESTION and ANSWER below concisely, plain text, no preamble, just state the found fact, dont mention question and/or answer."
 
-private func summaryPrompt(_ node: GraphNode, runId: String) -> String? {
-    guard (try? writeQa(node, id: runId)) != nil else { return nil }
+private func qaSummaryPrompt(question: String, answer: String, runId: String) -> String? {
+    guard (try? writeQa(question, answer, id: runId)) != nil else { return nil }
     let c = GraphStore.containerCtxDir
     let files = "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(c)/question.md and \(c)/answer.md\n"
     return files + "\(summaryInstruction)\n\nQUESTION: @\(c)/question.md\n\nANSWER: @\(c)/answer.md"
@@ -592,6 +735,9 @@ extension GraphHandler {
         var took: Int?
         var created_at: Int64
         var completed_at: Int64?
+        var parent_run_id: String?
+        var summary: String?
+        var root_run_id: String?
     }
 
     struct GraphRunLogsResponse: Content, Sendable {
@@ -600,6 +746,11 @@ extension GraphHandler {
 
     struct GraphRunRequest: Content, Sendable {
         var prompt: String
+        var parent_run_id: String?
+    }
+
+    struct GraphRunSummaryRequest: Content, Sendable {
+        var summary: String
     }
 
     struct GraphSummaryRequest: Content, Sendable {

@@ -504,6 +504,19 @@ public struct LogManager {
         }
     }
 
+    public static func fetchFirstAsk(session: String, at instancePath: String) throws -> String? {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let rows = try db.prepare(
+            """
+            SELECT m.input FROM logs l
+            JOIN messages m ON m.id = l.message_id
+            WHERE l.session = ? ORDER BY l.started_at ASC LIMIT 1;
+            """,
+            session
+        )
+        return rows.compactMap { $0[0] as? String }.first
+    }
+
     public static func markNotificationRead(
         kind: String, refId: String, at instancePath: String
     ) throws {

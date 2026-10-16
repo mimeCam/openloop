@@ -172,6 +172,12 @@ func configure(_ app: Application) async throws {
     instances.grouped(":id", "graph", ":nid").post("run") { req async throws in
         try await GraphHandler().run(req: req)
     }
+    instances.grouped(":id", "graph", ":nid").put("runs", ":rid") { req async throws in
+        try await GraphHandler().updateRun(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").post("runs", ":rid", "retry") { req async throws in
+        try await GraphHandler().retryRun(req: req)
+    }
     instances.grouped(":id", "graph", ":nid").get("logs") { req async throws in
         try await GraphHandler().logs(req: req)
     }

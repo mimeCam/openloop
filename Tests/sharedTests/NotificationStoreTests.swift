@@ -49,6 +49,32 @@ final class NotificationStoreTests: XCTestCase {
         XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 2)
     }
 
+    func testWorkflowItemCarriesOriginalAsk() throws {
+        try seedMessage(session: "s1", input: "fix the bug", startedAt: 90)
+        try seedMessage(session: "s1", input: "follow-up ask", startedAt: 95)
+        try runEnd("s1", endedAt: 100)
+        let items = try Notifications.list(at: instanceDir)
+        XCTAssertEqual(items.first?.prompt, "fix the bug")
+    }
+
+    func testWorkflowItemWithoutSavedAskHasNilPrompt() throws {
+        try runEnd("s1", endedAt: 100)
+        let items = try Notifications.list(at: instanceDir)
+        XCTAssertEqual(items.first?.prompt, nil)
+    }
+
+    func seedMessage(session: String, input: String, startedAt: Double) throws {
+        try LogManager.saveLog(
+            RunLog(
+                success: true, took: 1, startedAt: startedAt, endedAt: startedAt + 1,
+                workflowId: "wf", personaId: nil, agent: "a",
+                msg: .init(input: input, output: "ok", parents: []),
+                session: session, level: nil
+            ),
+            at: instanceDir
+        )
+    }
+
     func testMarkReadHidesFromUnreadButKeepsInList() throws {
         try runEnd("s1", endedAt: 100)
         try Notifications.markRead(kind: "workflow", refId: "s1", at: instanceDir)

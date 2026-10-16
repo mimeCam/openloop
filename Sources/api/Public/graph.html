@@ -27,6 +27,9 @@
             --chain-height:   34px;
             --content-top:    calc(var(--toolbar-height) + var(--chain-height));
             --panel-top:      var(--content-top); /* consumed by panel.css */
+            /* root-title side overhang: must stay <= the grid's 48px side
+               padding, or a leftmost root title clips at scroll origin */
+            --title-overhang: 48px;
         }
 
         html, body {
@@ -397,20 +400,27 @@
         }
         .node-dur:empty { display: none; }
 
-        /* chain name on root cards: identity is typeset, not decorated —
-           ink, not chrome (no bg/border/shadow). Name leads, duration
-           demotes to content; the status dot never moves. */
-        .node-name {
+        /* chain-head title: ink on the canvas ABOVE the card, never inside it
+           (a card is 240px of machine facts; a name is a human word that
+           wraps). Geometry: borrows var(--title-overhang) per side from the
+           56px column gap — 240 card + 48 + 48 = 336px, leaving 8px of air to
+           the neighbouring card; 48px equals the grid's side padding, so a
+           leftmost root title sits flush with the grid edge at scroll origin
+           and is never clipped. Clamped at 10 lines; the tooltip carries the
+           full text. No chrome — no bg/border/shadow; the 6px gap parents it. */
+        .node-title {
             font-size: 12px;
             font-weight: 600;
             color: var(--text-primary);
-            flex: 1;
-            min-width: 0;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            text-align: center;
+            line-height: 1.4;
+            word-break: break-word;
+            margin: 0 calc(-1 * var(--title-overhang)) 6px;
+            max-width: calc(240px + 2 * var(--title-overhang));
         }
-        .node-name + .node-dur { flex: 0 0 auto; }
+        /* selected root: green ink — the page's "selected = green" grammar
+           (:has() progressive enhancement: no support, no loss) */
+        .node-cell:has(.node-card.selected) .node-title { color: var(--accent-green); }
 
         .mcp-badge {
             font-size: 9px;
@@ -677,15 +687,16 @@
             font-weight: 400;
         }
         /* a chain name is a human word: the shared .detail-panel-name base
-           (Inter 14/600, ellipsis), restated under its own class so the mono
-           override above never touches it */
+           (Inter 14/600), restated under its own class so the mono override
+           above never touches it. Wraps + clamps (clamp-10 from panel.css) —
+           every surface that shows a name must show it in full */
         .detail-panel-title-name {
             font-size: 14px;
             font-weight: 600;
             color: var(--text-primary);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            line-height: 1.4;
+            white-space: normal;
+            word-break: break-word;
         }
         .active-section {
             display: flex;
@@ -715,11 +726,64 @@
         .detail-section-label.runs { color: var(--accent-blue); text-transform: none; }
         .run-log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
         .run-log:last-child { margin-bottom: 0; }
+        .run-log:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 4px; border-radius: 8px; }
         .run-log-meta {
             font-family: "SF Mono", ui-monospace, monospace;
             font-size: 10px;
             color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            justify-content: flex-start; /* arrow leads the caption: disclosure, not toolbar */
+            gap: 8px;
         }
+        .run-log .wl-bubble-text.truncated { -webkit-line-clamp: 3; }
+        .convo-count { color: var(--accent-green); font-weight: 600; }
+        .run-log-focus-row { display: flex; justify-content: flex-end; }
+        .run-focus-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 6px;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 0;
+            flex-shrink: 0;
+        }
+        .run-focus-btn:hover {
+            color: var(--accent-green);
+            border-color: rgba(52,199,89,0.30);
+            background: rgba(52,199,89,0.10);
+        }
+        .run-focus-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        .run-back-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: transparent;
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            flex-shrink: 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .run-back-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-primary); }
+        .run-back-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        @keyframes run-view-in { from { opacity: 0; transform: translateX(24px); } }
+        .detail-panel-body.run-enter { animation: run-view-in 0.20s ease-out; }
+        /* lean-out: returning to the node panel completes the in/out pair */
+        @keyframes run-view-back { from { opacity: 0; transform: translateX(-24px); } }
+        .detail-panel-body.run-back { animation: run-view-back 0.20s ease-out; }
+        /* running heartbeat — the page's amber pulse, same grammar as .run-counts .live */
+        .detail-section-label.running { color: var(--accent-amber); animation: live-breathe 2.5s ease-in-out infinite; }
         .detail-section-label.prompt { color: var(--accent-blue); }
         .detail-section-label.result { color: var(--accent-green); }
         .detail-section-label.result.error { color: var(--accent-red); }
@@ -744,7 +808,7 @@
         }
         .summary-regen:hover { background: rgba(52,199,89,0.22); }
         .summary-regen:disabled { opacity: 0.55; cursor: default; }
-        #prompt-section textarea, #summary-section textarea {
+        #prompt-section textarea, #summary-section textarea, .run-summary-section textarea {
             width: 100%;
             box-sizing: border-box;
             background: rgba(255,255,255,0.04);
@@ -758,7 +822,37 @@
             resize: vertical;
             min-height: 80px;
         }
-        #prompt-section textarea:focus, #summary-section textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        #prompt-section textarea:focus, #summary-section textarea:focus, .run-summary-section textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        .run-composer {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            padding-top: 14px;
+        }
+        .run-composer textarea {
+            width: 100%;
+            box-sizing: border-box;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12px;
+            line-height: 1.5;
+            padding: 8px 10px;
+            resize: vertical;
+            min-height: 60px;
+        }
+        .run-composer textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        .run-composer .regen-submit { align-self: flex-end; }
+        .run-followup-hint {
+            font-size: 11px;
+            color: var(--text-muted);
+            border-top: 1px solid rgba(255,255,255,0.06);
+            padding-top: 14px;
+        }
+        .run-followup-hint .run-retry { margin-top: 10px; display: block; }
         .summary-actions { display: flex; align-items: center; gap: 6px; }
         .summary-edit-btn {
             background: rgba(255,255,255,0.05);
@@ -877,28 +971,30 @@
         }
         #birds-eye #empty-hint { align-self: center; }
 
-        /* chain label: plain text on the canvas, no chrome. The fixed-height
-           strip renders on EVERY lane (named or not) once any name exists, so
-           dot rails keep one horizontal grid; with zero names the wrapper and
-           strip don't render at all — the view stays pixel-identical. Text
-           hangs off the center of the first dot (48px slot → x=24). */
+        /* chain label: plain text on the canvas, no chrome. The strip renders
+           on EVERY lane (named, deduped or unnamed) so dot rails keep one
+           horizontal grid — labels wrap now, so syncBeLabelHeights() (graph.js)
+           equalizes strip heights each render by writing the tallest height
+           back as inline min-height. line-height 1.35 lets descenders live
+           (the old 14px/nowrap clip amputated g/y/p); clamp-10 + tooltip carry
+           the worst case. Text hangs off the center of the first dot
+           (48px slot → x=24). */
         .be-chain {
             display: flex;
             flex-direction: column;
         }
         .be-chain-label {
-            height: 14px;
-            line-height: 14px;
+            min-height: 14px;
+            line-height: 1.35;
             margin-bottom: 6px;
             padding-left: 24px;
-            max-width: 360px;
+            max-width: 480px;
             font-size: 11px;
             font-weight: 600;
             letter-spacing: 0.2px;
             color: var(--text-primary);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            word-break: break-word;
         }
 
         .be-lane {
@@ -1029,7 +1125,14 @@
             .gt-subtitle, .gt-version { display: none; }
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */
-            #prompt-section textarea, #summary-section textarea, .mcp-row input, .name-row input { font-size: 16px; }
+            #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .mcp-row input, .name-row input { font-size: 16px; }
+            .run-back-btn { width: 44px; height: 44px; }
+            .run-focus-btn { width: 32px; height: 32px; }
+            /* under-log arrow owns its row: full 44px, no cost */
+            .run-log-focus-row .run-focus-btn { width: 44px; height: 44px; }
+            /* header arrow shares the caption line: 32px visual, 44px hit via ::after */
+            .run-log-meta .run-focus-btn { position: relative; }
+            .run-log-meta .run-focus-btn::after { content: ''; position: absolute; inset: -6px; }
         }
 
         /* — delete actions: danger zone at the panel bottom, calm until armed — */
@@ -1097,6 +1200,9 @@
             .delete-btn.armed::after { animation: none; background: rgba(255,255,255,0.25); }
             .delete-btn.deleting { animation: none; }
             .run-counts .live { animation: none; }
+            .detail-section-label.running { animation: none; }
+            .detail-panel-body.run-enter { animation: none; }
+            .detail-panel-body.run-back { animation: none; }
         }
     </style>
 </head>
