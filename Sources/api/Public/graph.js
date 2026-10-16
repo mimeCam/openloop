@@ -194,15 +194,11 @@
     }
 
     // root-ness has one definition: no parent, or a parent outside the graph
-    // (delete bridges children up; orphans re-root). Columns, card names and
-    // the panel's CHAIN NAME section all read from these two helpers.
+    // (delete bridges children up; orphans re-root). Column building and the
+    // edge count read from this helper; naming is per-cell and needs no root.
     function rootNodes() {
         const ids = new Set(nodes.map(n => n.id));
         return nodes.filter(n => !n.parent_id || !ids.has(n.parent_id));
-    }
-
-    function isRoot(n) {
-        return rootNodes().some(r => r.id === n.id);
     }
 
     function buildColumns() {
@@ -218,7 +214,9 @@
 
     // — birds-eye view —
     // One lane per root→leaf chain, ordered by root creation time so lanes
-    // keep their vertical position across refreshes; connectors are pure CSS; dot tap → focusFromBirds.
+    // keep their vertical position across refreshes; connectors are pure CSS;
+    // dot or caption tap → focusFromBirds. Named cells add a caption cascade
+    // under the rail (captionsHtml) — the rail stays the first thing you scan.
 
     function nodeIndex(nodes) {
         return new Map(nodes.map(n => [n.id, n]));
@@ -264,10 +262,9 @@
     function renderGrid() {
         const grid = $('graph-grid');
         const cols = buildColumns();
-        const roots = new Set(rootNodes().map(n => n.id));
         const hint = nodes.length ? '' : `<span id="empty-hint">${emptyHint()}</span>`;
         grid.innerHTML = `<svg id="edge-layer"></svg>` + hint +
-            cols.map(col => `<div class="depth-col">${col.map(n => nodeCell(n, roots.has(n.id))).join('')}</div>`).join('');
+            cols.map(col => `<div class="depth-col">${col.map(nodeCell).join('')}</div>`).join('');
         bindGraph(grid);
         drawEdges();
         syncBirdsToggle();
@@ -275,23 +272,11 @@
 
     function renderBirdsEye() {
         const host = $('birds-eye');
-        const hasNames = nodes.some(n => n.name); // no names → no label text → pixel-identical
         host.innerHTML = nodes.length
-            ? chainsFrom(nodes).map((c, i, all) => laneHtml(c, hasNames, i ? all[i - 1][0].id : null)).join('')
+            ? chainsFrom(nodes).map(laneHtml).join('')
             : `<span id="empty-hint">${emptyHint()}</span>`;
         syncBirdsToggle();
         bindBirdsEye(host);
-        syncBeLabelHeights(host);
-    }
-
-    // Labels wrap now, so one tall name must not shift its lane's dot rail off
-    // the shared horizontal grid: measure the tallest strip, apply to all.
-    // Runs on every render (the 5s refresh rewrites innerHTML) — nothing to sync.
-    function syncBeLabelHeights(host) {
-        const strips = host.querySelectorAll('.be-chain-label');
-        if (!strips.length) return;
-        const max = Math.max(...[...strips].map(s => s.offsetHeight));
-        strips.forEach(s => { s.style.minHeight = max + 'px'; });
     }
 
     function emptyHint() {
@@ -300,41 +285,51 @@
             : 'no runs yet — tap + to start';
     }
 
-    function laneHtml(chain, hasNames, prevRootId) {
+    function laneHtml(chain) {
         const last = chain.length - 1;
-        return `<div class="be-chain">` + chainLabelHtml(chain, hasNames, prevRootId) +
+        return `<div class="be-chain">` +
             `<div class="be-lane">` +
-            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last, i === 0)).join('') +
-            personaTrail(chain[last]) + `</div></div>`;
+            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last)).join('') +
+            personaTrail(chain[last]) + `</div>` +
+            captionsHtml(chain) + `</div>`;
     }
 
-    // One label per root, not per lane: a braided root emits the name over its
-    // first lane only (lanes of one root are adjacent — laneOrder sorts by
-    // root created_at). Unnamed and deduped lanes keep an empty strip so every
-    // dot rail stays on the same horizontal grid.
-    function chainLabelHtml(chain, hasNames, prevRootId) {
-        const name = chain[0].name;
-        if (!hasNames || !name || chain[0].id === prevRootId) return '<div class="be-chain-label"></div>';
-        return `<div class="be-chain-label clamp-10" title="${esc(name)}">${esc(name)}</div>`;
+    // The caption cascade: one row per named cell, stacked under the rail in
+    // chain order — block flow, so two rows can never overlap, and each spans
+    // the full remaining width. Row i indents to its cell's dot (geometry in
+    // .be-caption, graph.html); a braided root legitimately repeats in every
+    // lane it leads. Unnamed cells (or a fully unnamed chain) render nothing.
+    function captionsHtml(chain) {
+        const rows = chain.map(beCaptionHtml).join('');
+        return rows ? `<div class="be-captions">${rows}</div>` : '';
     }
 
-    function slotHtml(n, next, last, head) {
+    function beCaptionHtml(n, i) {
+        if (!n.name) return '';
+        const cls = `be-caption clamp-10 ${esc(n.status)}${n.active === false ? ' inactive' : ''}`;
+        return `<button class="${cls}" data-id="${esc(n.id)}" style="--i:${i}"` +
+            ` title="${esc(n.name)}">${esc(n.name)}</button>`;
+    }
+
+    function slotHtml(n, next, last) {
         const cls = 'be-slot' +
             (last ? ' last' : '') +
             (next && next.status === 'progress' ? ' to-progress' : '') +
             (n.active === false ? ' inactive' : '');
-        return `<span class="${cls}">${dotHtml(n, head)}${last ? '' : miniPersonas(n)}</span>`;
+        return `<span class="${cls}">${dotHtml(n)}${last ? '' : miniPersonas(n)}</span>`;
     }
 
-    function dotLabel(n, head) {
+    // A named cell leads its dot tooltip — names are per-cell now, so the
+    // chain-head-only gate is gone (head == i === 0 died with it).
+    function dotLabel(n) {
         const k = (n.personas || []).length;
         const took = n.took != null ? ` · ${fmtDur(n.took)}` : '';
-        const name = head && n.name ? `${n.name} · ` : '';
+        const name = n.name ? `${n.name} · ` : '';
         return `${name}${n.agent} · ${n.status}${took}${k ? ` · ${k} persona${k > 1 ? 's' : ''}` : ''}`;
     }
 
-    function dotHtml(n, head) {
-        const label = dotLabel(n, head);
+    function dotHtml(n) {
+        const label = dotLabel(n);
         return `<button class="node-status-dot be-dot ${esc(n.status)}" data-id="${esc(n.id)}"` +
             ` title="${esc(label)}" aria-label="${esc(label)}"></button>`;
     }
@@ -388,7 +383,7 @@
     }
 
     function bindBirdsEye(host) {
-        host.querySelectorAll('.be-dot, .be-more').forEach(el => {
+        host.querySelectorAll('.be-dot, .be-more, .be-caption').forEach(el => {
             el.addEventListener('click', e => {
                 e.stopPropagation();
                 focusFromBirds(el.dataset.id);
@@ -427,22 +422,23 @@
         setTimeout(() => w.remove(), 300);
     }
 
-    function nodeCell(n, isRoot) {
+    function nodeCell(n) {
         const inactive = n.active ? '' : ' inactive';
         return `<div class="node-cell${inactive}">` +
-            nodeNameHtml(n, isRoot) + // before .node-slot: inside it, a title would shift the top:50% insert +
-            `<div class="node-slot">${nodeCard(n, isRoot)}` +
+            nodeNameHtml(n) + // before .node-slot: inside it, a title would shift the top:50% insert +
+            `<div class="node-slot">${nodeCard(n)}` +
             `<button class="node-insert-btn" data-id="${esc(n.id)}" title="Insert before">+</button></div>` +
             personaStrip(n) +
             runButton(n) +
             `</div>`;
     }
 
-    // Chain-head title: ink above the card, never inside it — the card header
-    // is machine facts (dur · mcp · dot); a name is a human word that wraps.
-    // Dormant names (root became non-root via delete-bridge) render nothing.
-    function nodeNameHtml(n, isRoot) {
-        if (!isRoot || !n.name) return '';
+    // Cell title: ink above the card, never inside it — the card header is
+    // machine facts (dur · mcp · dot); a name is a human word that wraps.
+    // Card-bounded and left-aligned (see .node-title in graph.html), so
+    // neighbouring titles can never collide. Unnamed cells render nothing.
+    function nodeNameHtml(n) {
+        if (!n.name) return '';
         return `<div class="node-title clamp-10" title="${esc(n.name)}">${esc(n.name)}</div>`;
     }
 
@@ -494,7 +490,7 @@
             `<span class="run-label">Run</span>${counts}</button>`;
     }
 
-    function nodeCard(n, isRoot) {
+    function nodeCard(n) {
         return `<div class="node-card" data-id="${esc(n.id)}" data-status="${esc(n.status)}">` +
             `<div class="node-main">` +
             cardHeader(n) + cardBody(n) +
@@ -813,16 +809,27 @@
         bindFieldPair('mcp-auth', () => saveMcpAuth(nodeId), syncMcpAuthButton);
     }
 
+    // The NAME section renders on every node; autosize keeps a long
+    // description visible as it is written, and survives re-opens.
     function bindNameField(nodeId) {
-        if (!$('name-input')) return; // non-roots render no section
         nameOriginal = $('name-input').value.trim();
+        autosizeName();
+        $('name-input').addEventListener('input', autosizeName);
         bindFieldPair('name', () => saveName(nodeId), syncNameButton);
+    }
+
+    function autosizeName() {
+        const ta = $('name-input');
+        ta.style.height = 'auto';
+        ta.style.height = ta.scrollHeight + 'px';
     }
 
     function bindFieldPair(id, save, sync) {
         $(id + '-input').addEventListener('input', sync);
         $(id + '-input').addEventListener('keydown', e => {
-            if (e.key === 'Enter') save();
+            // Enter always saves; in the name textarea it must not also
+            // insert a newline (no rendering surface keeps newlines)
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
         });
         $(id + '-save').addEventListener('click', save);
         sync();
@@ -937,7 +944,7 @@
 
     // Named node: the name is the title (Inter, via its own class — the page's
     // .detail-panel-name mono override must not touch it), agent demotes into
-    // the meta line. A dormant name (no longer a root) still shows here.
+    // the meta line. True for any named cell, root or not.
     function panelTitleLines(n, took) {
         const time = ` · ${fmtTime(n.created_at)}`;
         if (!n.name) {
@@ -958,18 +965,18 @@
             personasSection(n) + mcpSection(n) + runsSection() + deleteSection(n);
     }
 
-    // The name field exists only on chain heads: a field on a non-root invites
-    // "what does this name, then?" (its lane/card label is dormant by design).
-    // No maxlength: the backend has no cap (GraphStore.updateName stores TEXT)
-    // and every surface that renders the name wraps it.
+    // NAME on every node: names are usually descriptions, so the field is a
+    // one-row textarea that grows (autosizeName) — a single-line input cannot
+    // show a description while it is being written. No maxlength: the backend
+    // has no cap (GraphStore.updateName stores TEXT) and every surface that
+    // renders the name wraps it. "" clears — server normalizes to null.
     function nameSection(n) {
-        if (!isRoot(n)) return '';
-        return `<div><div class="detail-section-label">CHAIN NAME</div>` +
+        return `<div><div class="detail-section-label">NAME</div>` +
             `<div class="name-row">` +
-            `<input id="name-input" type="text" value="${esc(n.name || '')}" placeholder="Name this chain…" spellcheck="false" autocomplete="off" aria-label="Chain name">` +
+            `<textarea id="name-input" rows="1" spellcheck="false" autocomplete="off" aria-label="Node name" placeholder="Name or describe this node…">${esc(n.name || '')}</textarea>` +
             `<button id="name-save">Save</button>` +
             `</div>` +
-            `<div class="mcp-hint">Shows above this root card and its lane in bird's-eye view.</div>` +
+            `<div class="mcp-hint">Shows above this card and beneath its dot in bird's-eye view.</div>` +
             `</div>`;
     }
 
@@ -1057,7 +1064,12 @@
     function panelHasTyping() {
         const inner = $('detail-panel-inner');
         if (!inner) return false;
-        return [...inner.querySelectorAll('input, textarea')].some(fieldHasTyping);
+        // #name-input is excluded: it holds a durable saved value (not a
+        // draft), and refreshPanel already guards it against nameOriginal —
+        // a saved non-empty name must not freeze the runs list forever.
+        return [...inner.querySelectorAll('input, textarea')]
+            .filter(el => el.id !== 'name-input')
+            .some(fieldHasTyping);
     }
 
     function fieldHasTyping(el) {
@@ -1878,12 +1890,16 @@
         checkRunLogHtml();
         checkRunLogEmpty();
         checkRunViewHtml();
-        checkNodeTitleAboveCard();
+        checkNodeTitleEveryCard();
+        checkNeighborTitlesClear();
         checkInsertBtnStillCentered();
         checkEdgesStillDrawn();
-        checkBeLabelsAlign();
+        checkBeCaptionCascade();
+        checkBeCaptionColors();
+        checkBeDeepChainIndent();
         checkBeNoNamesUnchanged();
-        checkNameInputUncapped();
+        checkDotTooltipNames();
+        checkNameInputEveryNode();
         checkClampGrammar();
         console.log('All sanity checks passed.');
     }
@@ -1970,18 +1986,37 @@
         console.log('OK: add-root render + click');
     }
 
-    function checkNodeTitleAboveCard() {
+    // Names are per-cell: every named node — root, child, deep descendant —
+    // renders exactly one .node-title, card-bounded so neighbours cannot
+    // collide by construction; unnamed cells render nothing.
+    function checkNodeTitleEveryCard() {
         nodes = [
-            { id: 't1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'Long chain name' },
-            { id: 't2', parent_id: 't1', agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'dormant' }];
+            { id: 't1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'Root description words' },
+            { id: 't2', parent_id: 't1', agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'Child description words' },
+            { id: 't3', parent_id: 't2', agent: 'a', prompt: 'p', status: 'success', created_at: 3, name: 'Deep description words' },
+            { id: 't4', parent_id: 't1', agent: 'a', prompt: 'p', status: 'success', created_at: 4 }];
         renderGrid();
-        const title = document.querySelector('.node-title');
-        const cell = document.querySelector('.node-cell');
-        console.assert(title && cell.firstElementChild === title, 'nodeTitle: first child of the cell (before .node-slot)');
-        console.assert(title && title.title === 'Long chain name', 'nodeTitle: tooltip carries the full name');
-        console.assert(document.querySelectorAll('.node-title').length === 1, 'nodeTitle: child + dormant names render none');
+        const titles = [...document.querySelectorAll('.node-title')];
+        console.assert(titles.length === 3, 'nodeTitle: one per named cell — root, child AND deep descendant');
+        console.assert(titles.every(t => t.closest('.node-cell').firstElementChild === t), 'nodeTitle: first child of its cell (before .node-slot)');
+        console.assert(titles.every(t => t.title === t.textContent), 'nodeTitle: tooltip carries the full name');
+        console.assert(titles.every(t => t.offsetWidth <= 241), 'nodeTitle: card-bounded (≤240px) — neighbours cannot collide');
         console.assert(!$('graph-grid').querySelector('.node-name'), 'nodeTitle: legacy .node-name gone from the grid');
-        console.log('OK: node title above card');
+        console.log('OK: node title on every named card');
+    }
+
+    // Two long-named neighbours: rect proof that reserved-flow titles never
+    // touch, and the leftmost title never clips left of the grid origin.
+    function checkNeighborTitlesClear() {
+        nodes = [
+            { id: 'a1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x'.repeat(300) },
+            { id: 'a2', parent_id: 'a1', agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'y'.repeat(300) }];
+        renderGrid();
+        const rects = [...document.querySelectorAll('.node-title')].map(t => t.getBoundingClientRect());
+        console.assert(rects.length === 2 && rects[0].right <= rects[1].left + 0.5, 'neighborTitles: adjacent named cells keep a clear gap');
+        const grid = $('graph-grid').getBoundingClientRect();
+        console.assert(rects.every(r => r.left >= grid.left - 0.5), 'neighborTitles: no title clips left of the grid at scroll origin');
+        console.log('OK: neighbour titles clear');
     }
 
     function checkInsertBtnStillCentered() {
@@ -1999,42 +2034,114 @@
         console.log('OK: edges drawn after title shift');
     }
 
-    function checkBeLabelsAlign() {
+    // One caption row per NAMED cell, flowing after the rail in chain order;
+    // rows stack one under another (block flow — rect-proofed, never overlay),
+    // row i pins to its cell's dot left edge, wraps instead of clipping.
+    // Geometry is viewport-aware: 48/16px slots desktop, 40/12px ≤768px.
+    function checkBeCaptionCascade() {
         nodes = [
             { id: 'b1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x'.repeat(300) },
-            { id: 'b2', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'short' },
-            { id: 'b3', parent_id: 'b2', agent: 'a', prompt: 'p', status: 'success', created_at: 3 },
-            { id: 'b4', parent_id: 'b2', agent: 'a', prompt: 'p', status: 'success', created_at: 4 },
-            { id: 'b5', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 5 }];
+            { id: 'b2', parent_id: 'b1', agent: 'a', prompt: 'p', status: 'progress', created_at: 2, name: 'second cell note' },
+            { id: 'b3', parent_id: 'b1', agent: 'a', prompt: 'p', status: 'success', created_at: 3 },
+            { id: 'b4', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 4, name: 'other chain note' }];
+        const m = beGeom(); // {slot, dotLeft} — matches the .be-caption CSS vars
         document.body.classList.add('birds-eye'); // #birds-eye must be visible to measure
         renderBirdsEye();
-        const strips = [...document.querySelectorAll('.be-chain-label')];
-        const heights = strips.map(s => s.offsetHeight);
-        const cs = strips.length ? getComputedStyle(strips[0]) : {};
-        console.assert(strips.length === 4, 'beLabels: a strip per lane — named, braided-dedup AND unnamed');
-        console.assert(Math.max(...heights) - Math.min(...heights) < 1, 'beLabels: strips equalized — rails share one grid');
-        console.assert(strips[0].offsetHeight > 14, 'beLabels: long name wrapped — the old 14px clip is gone');
-        console.assert(cs.whiteSpace === 'normal' && parseFloat(cs.lineHeight) / parseFloat(cs.fontSize) > 1.2,
-            'beLabels: wraps with a living line-height (descenders visible)');
+        const chain = document.querySelector('.be-chain');
+        const rows = [...chain.querySelectorAll('.be-caption')];
+        const rr = rows.map(r => r.getBoundingClientRect());
+        console.assert(rows.length === 2, 'beCaptions: one row per NAMED cell — unnamed renders none');
+        console.assert(chain.querySelector('.be-lane').nextElementSibling.classList.contains('be-captions'),
+            'beCaptions: cascade flows after the rail');
+        // offsetLeft, not rects: the be-enter animation starts at scale(1.02),
+        // and getBoundingClientRect would measure that mid-flight transform
+        const lane = chain.querySelector('.be-lane');
+        console.assert(Math.abs(rows[0].offsetLeft - (lane.offsetLeft + m.dotLeft)) <= 1, `beCaptions: row 0 pins to cell 0 dot (${m.slot}·0+${m.dotLeft})`);
+        console.assert(Math.abs(rows[1].offsetLeft - (lane.offsetLeft + m.slot + m.dotLeft)) <= 1, `beCaptions: row 1 one slot deeper (${m.slot}·1+${m.dotLeft})`);
+        console.assert(rr[0].bottom <= rr[1].top + 0.5, 'beCaptions: rows stack one under another — never overlap');
+        console.assert(rows[0].offsetHeight > 16, 'beCaptions: a 300-char name wraps — no cut-off');
+        console.assert(rr[1].width >= 150, 'beCaptions: rows span the full remaining width');
+        console.assert(rows.every(r => r.classList.contains('clamp-10')), 'beCaptions: clamp-10 guards runaway height');
+        console.assert(rows.every(r => r.title === r.textContent), 'beCaptions: tooltip carries the full name');
         document.body.classList.remove('birds-eye');
-        console.log('OK: birds-eye labels align');
+        console.log('OK: birds-eye caption cascade');
+    }
+
+    function beGeom() {
+        return window.matchMedia('(max-width: 768px)').matches
+            ? { slot: 40, dotLeft: 12, cap: '160px' }
+            : { slot: 48, dotLeft: 16, cap: '192px' };
+    }
+
+    // The caption bubble wears its cell's status hue: border/bg/dot agree —
+    // parsed channel-wise so the check survives color-string formatting.
+    function checkBeCaptionColors() {
+        document.body.classList.add('birds-eye');
+        renderBirdsEye();
+        const rows = [...document.querySelectorAll('.be-caption')];
+        const successRow = rows.find(r => r.classList.contains('success'));
+        const progressRow = rows.find(r => r.classList.contains('progress'));
+        console.assert(successRow && progressRow, 'beColors: rows carry their cell status class');
+        console.assert(channelsOf(successRow, 'borderTopColor') === '52,199,89', 'beColors: success border = accent-green');
+        console.assert(channelsOf(progressRow, 'borderTopColor') === '245,158,11', 'beColors: progress border = accent-amber');
+        const dot = document.querySelector('.be-dot.success');
+        console.assert(dot && channelsOf(dot, 'backgroundColor') === channelsOf(successRow, 'borderTopColor'),
+            'beColors: caption border shares the dot hue');
+        document.body.classList.remove('birds-eye');
+        console.log('OK: birds-eye caption colors');
+    }
+
+    function channelsOf(el, prop) {
+        const m = getComputedStyle(el)[prop].match(/[\d.]+/g) || [];
+        return m.slice(0, 3).join(',');
+    }
+
+    // Deep chains: the indent caps so far and no further — the 10th cell's
+    // row keeps ≥ half the lane width for its text.
+    function checkBeDeepChainIndent() {
+        nodes = Array.from({ length: 10 }, (_, i) => ({
+            id: 'd' + i, parent_id: i ? 'd' + (i - 1) : null, agent: 'a', prompt: 'p',
+            status: 'success', created_at: i + 1, name: 'deep ' + i + ' — ' + 'w'.repeat(120)
+        }));
+        const cap = beGeom().cap;
+        document.body.classList.add('birds-eye');
+        renderBirdsEye();
+        const rows = [...document.querySelectorAll('.be-caption')];
+        const last = rows[rows.length - 1];
+        console.assert(rows.length === 10 && getComputedStyle(last).marginLeft === cap,
+            `beDeep: indent caps at ${cap} — geometry stops early, text keeps the row`);
+        console.assert(last.offsetWidth >= 100, 'beDeep: capped row still spans a readable width');
+        document.body.classList.remove('birds-eye');
+        console.log('OK: deep-chain indent cap');
     }
 
     function checkBeNoNamesUnchanged() {
         nodes = nodes.map(n => ({ ...n, name: null }));
         renderBirdsEye();
-        const strips = [...document.querySelectorAll('.be-chain-label')];
-        console.assert(strips.every(s => !s.textContent), 'beNoNames: zero names → every strip stays silent (pixel-identical)');
+        console.assert(!document.querySelector('.be-captions'), 'beNoNames: zero names → zero caption blocks (rails pixel-identical)');
         console.log('OK: birds-eye unchanged without names');
     }
 
-    function checkNameInputUncapped() {
-        const root = { id: 'n1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x' };
-        nodes = [root];
-        const html = nameSection(root);
-        console.assert(!html.includes('maxlength'), 'nameInput: the UI-only 64-char cap is gone');
-        console.assert(html.includes('above this root card'), 'nameInput: hint names the primary surface');
-        console.log('OK: name input uncapped');
+    // Every named cell's dot tooltip leads with the name; unnamed cells
+    // render no empty name token.
+    function checkDotTooltipNames() {
+        const base = { id: 'c1', parent_id: 'x', agent: 'codex', prompt: 'p', status: 'success', took: 3, created_at: 1 };
+        console.assert(dotLabel({ ...base, name: 'child note' }).startsWith('child note · '), 'dotTooltip: a named child leads with its name');
+        console.assert(!dotLabel({ ...base }).includes('undefined'), 'dotTooltip: unnamed cell renders no empty name token');
+        console.log('OK: dot tooltip names');
+    }
+
+    // NAME section on every node: non-roots included, textarea for long
+    // descriptions, no maxlength, label/hint speak the per-cell surfaces.
+    function checkNameInputEveryNode() {
+        const child = { id: 'n2', parent_id: 'n1', agent: 'a', prompt: 'p', status: 'success', created_at: 2, name: 'x' };
+        const html = nameSection(child);
+        console.assert(html.includes('name-input'), 'nameInput: a non-root renders the section');
+        console.assert(html.includes('<textarea'), 'nameInput: a growing textarea — descriptions are the use case');
+        console.assert(!html.includes('maxlength'), 'nameInput: no cap');
+        console.assert(html.includes('>NAME<'), 'nameInput: label reads NAME');
+        console.assert(html.includes('above this card'), 'nameInput: hint names both surfaces');
+        console.log('OK: name input on every node');
     }
 
     function checkClampGrammar() {

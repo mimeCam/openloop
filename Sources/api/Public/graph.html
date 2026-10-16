@@ -27,9 +27,6 @@
             --chain-height:   34px;
             --content-top:    calc(var(--toolbar-height) + var(--chain-height));
             --panel-top:      var(--content-top); /* consumed by panel.css */
-            /* root-title side overhang: must stay <= the grid's 48px side
-               padding, or a leftmost root title clips at scroll origin */
-            --title-overhang: 48px;
         }
 
         html, body {
@@ -400,25 +397,27 @@
         }
         .node-dur:empty { display: none; }
 
-        /* chain-head title: ink on the canvas ABOVE the card, never inside it
-           (a card is 240px of machine facts; a name is a human word that
-           wraps). Geometry: borrows var(--title-overhang) per side from the
-           56px column gap — 240 card + 48 + 48 = 336px, leaving 8px of air to
-           the neighbouring card; 48px equals the grid's side padding, so a
-           leftmost root title sits flush with the grid edge at scroll origin
-           and is never clipped. Clamped at 10 lines; the tooltip carries the
-           full text. No chrome — no bg/border/shadow; the 6px gap parents it. */
+        /* cell title: ink on the canvas ABOVE the card, never inside it (a
+           card is 240px of machine facts; a name is a human word that wraps).
+           Card-bounded — exactly the card's 240px column track, left-aligned:
+           a title confined to its column cannot collide with a neighbour's,
+           safe by construction (no negative-margin geometry to maintain), and
+           the leftmost title sits flush with its card at scroll origin. One
+           alignment: title text → card border → bubble text. Clamped at 10
+           lines; the tooltip carries the full text. No chrome — no
+           bg/border/shadow; the 6px gap parents it. */
         .node-title {
             font-size: 12px;
             font-weight: 600;
             color: var(--text-primary);
-            text-align: center;
+            text-align: left;
             line-height: 1.4;
             word-break: break-word;
-            margin: 0 calc(-1 * var(--title-overhang)) 6px;
-            max-width: calc(240px + 2 * var(--title-overhang));
+            margin: 0 0 6px;
+            max-width: 240px;
         }
-        /* selected root: green ink — the page's "selected = green" grammar
+        /* selected cell: green ink — the page's "selected = green" grammar,
+           now naturally true for every named cell
            (:has() progressive enhancement: no support, no loss) */
         .node-cell:has(.node-card.selected) .node-title { color: var(--accent-green); }
 
@@ -473,10 +472,13 @@
             margin-top: 6px;
         }
 
-        /* CHAIN NAME row: mcp-row geometry, neutral/green skin — amber is the
-           mcp domain; the name is a human word, so Inter, not mono. */
-        .name-row { display: flex; gap: 8px; }
-        .name-row input {
+        /* NAME row: mcp-row geometry, neutral/green skin — amber is the mcp
+           domain; the name is a human word, so Inter, not mono. A one-row
+           textarea that grows (autosizeName, graph.js): names are usually
+           descriptions, and comfort while authoring is the feature. The Save
+           button stays pinned top as the field grows. */
+        .name-row { display: flex; gap: 8px; align-items: flex-start; }
+        .name-row textarea {
             flex: 1;
             min-width: 0;
             background: rgba(255,255,255,0.04);
@@ -485,9 +487,14 @@
             color: var(--text-primary);
             font-family: inherit;
             font-size: 12px;
+            line-height: 1.5;
             padding: 8px 10px;
+            box-sizing: border-box;
+            min-height: 37px;
+            resize: none;
+            overflow: hidden;
         }
-        .name-row input:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        .name-row textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
         .name-row button {
             background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.12);
@@ -522,6 +529,15 @@
         .node-status-dot.answered { background: #ff9f0a; }
         .node-status-dot.success { background: var(--accent-green); }
         .node-status-dot.failed { background: var(--accent-red); }
+        /* bird's-eye caption tints — same status tokens as the dots above:
+           the bubble's border/bg wear the cell's hue at whisper volume
+           (badge grammar: fill ≤ 0.12, border ≤ 0.35) so the dot above the
+           row and the bubble below it read as one colored object */
+        .be-caption.progress    { background: rgba(245,158,11,0.10); border-color: rgba(245,158,11,0.26); }
+        .be-caption.summarizing { background: rgba(10,132,255,0.10); border-color: rgba(10,132,255,0.26); }
+        .be-caption.answered    { background: rgba(255,159,10,0.10); border-color: rgba(255,159,10,0.26); }
+        .be-caption.success     { background: rgba(52,199,89,0.10); border-color: rgba(52,199,89,0.26); }
+        .be-caption.failed      { background: rgba(255,69,58,0.12); border-color: rgba(255,69,58,0.32); }
         @keyframes pulse {
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.35; transform: scale(0.75); }
@@ -971,31 +987,61 @@
         }
         #birds-eye #empty-hint { align-self: center; }
 
-        /* chain label: plain text on the canvas, no chrome. The strip renders
-           on EVERY lane (named, deduped or unnamed) so dot rails keep one
-           horizontal grid — labels wrap now, so syncBeLabelHeights() (graph.js)
-           equalizes strip heights each render by writing the tallest height
-           back as inline min-height. line-height 1.35 lets descenders live
-           (the old 14px/nowrap clip amputated g/y/p); clamp-10 + tooltip carry
-           the worst case. Text hangs off the center of the first dot
-           (48px slot → x=24). */
         .be-chain {
             display: flex;
             flex-direction: column;
         }
-        .be-chain-label {
-            min-height: 14px;
-            line-height: 1.35;
-            margin-bottom: 6px;
-            padding-left: 24px;
-            max-width: 480px;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.2px;
-            color: var(--text-primary);
-            white-space: normal;
-            word-break: break-word;
+
+        /* — caption cascade: the chain explains itself under its rail —
+           One row per named cell, stacked in chain order (block flow: two
+           rows can never overlap), each spanning the full remaining width.
+           Row i's left edge pins to its cell's dot left edge — slot 48px,
+           dot 16px wide, center x=24 → left edge x=16 (mobile: 40/12) — the
+           dot sits atop the bubble's left corner like a timeline marker
+           pinning its own note. The indent caps (--cap) so deep chains keep
+           ≥ half the row for text. Skin: the cell's status hue at whisper
+           volume (.wl-bubble tint grammar) — dot, border and fill agree;
+           text stays --text-primary (≈14:1 on the tinted canvas). Tap = its
+           dot's tap (focusFromBirds). clamp-10 + tooltip carry the worst
+           case; unnamed chains render no cascade at all. */
+        .be-captions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-top: 6px;
+            /* width:0 keeps the block OUT of the chain's intrinsic width —
+               #birds-eye is width:max-content, so an unbroken 300-char word
+               in a row would otherwise balloon the whole host past the
+               viewport (the old 480px strip cap prevented it); min-width:100%
+               stretches the block back to the full chain width at layout.
+               Lanes size the chain; captions only read it. */
+            width: 0;
+            min-width: 100%;
+            box-sizing: border-box;
         }
+        .be-caption {
+            --slot: 48px;     /* one rail slot of indent per chain step */
+            --dot-left: 16px; /* dot left edge inside its slot */
+            --cap: 192px;     /* indent ceiling — deep cells keep readable width */
+            margin-left: min(calc(var(--slot) * var(--i, 0) + var(--dot-left)), var(--cap));
+            border-radius: 8px;
+            padding: 4px 10px;
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1.45;
+            text-align: left;
+            color: var(--text-primary);
+            word-break: break-word;
+            overflow-wrap: anywhere; /* long tokens break at any width, not just line edges */
+            cursor: pointer;
+            background: rgba(255,255,255,0.04);  /* neutral fallback tint */
+            border: 1px solid rgba(255,255,255,0.10);
+            transition: border-color 0.15s ease;
+        }
+        .be-caption:hover { filter: brightness(1.4); }
+        .be-caption:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        .be-caption.inactive { opacity: 0.55; }
 
         .be-lane {
             display: flex;
@@ -1112,20 +1158,22 @@
             .be-slot { width: 40px; }
             .be-slot::after { left: 28px; width: 24px; }
             .be-dot::before { inset: -16px; }
-            .be-chain-label { padding-left: 20px; } /* 40px slot → dot center at x=20 */
+            /* 40px slot → dot left edge at x=12; tighter cap keeps ≥ half a
+               phone width for text (tooltip + panel carry the full name) */
+            .be-caption { --slot: 40px; --dot-left: 12px; --cap: 160px; }
         }
         @media (prefers-reduced-motion: reduce) {
             body.birds-eye #birds-eye { animation: none; }
             .node-card.beacon { animation: none; }
             #add-root.attract { animation: none; }
-            .be-dot, .be-toggle, #add-root { transition: none; }
+            .be-dot, .be-toggle, .be-caption, #add-root { transition: none; }
         }
 
         @media (max-width: 768px) {
             .gt-subtitle, .gt-version { display: none; }
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */
-            #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .mcp-row input, .name-row input { font-size: 16px; }
+            #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .mcp-row input, .name-row textarea { font-size: 16px; }
             .run-back-btn { width: 44px; height: 44px; }
             .run-focus-btn { width: 32px; height: 32px; }
             /* under-log arrow owns its row: full 44px, no cost */
