@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 #
+# openloop_cc_docker-swiftbridge-z — z.ai provider, swiftbridge image.
+# Config (API_KEY, API_ENDPOINT, model overrides) is read from
+# openloop_cc_docker-swiftbridge-z.env next to this script. See scripts/yolo/README.md.
 
 IMAGE="yolo_devcontainer:swiftbridge"
 _dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-unset API_KEY API_ENDPOINT
-export API_KEY="🔥🔥🔥"
-export API_ENDPOINT="https://api.z.ai/api/anthropic"
-
-export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
-export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7
-export CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3
+. "$_dir/load-env-file"
 
 "$_dir/openloop_cc_docker-base" "$IMAGE" "-z" "$@"

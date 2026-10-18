@@ -1,0 +1,19 @@
+{
+  "id" : "3C4836E6-C804-47BD-9C57-04215EECE9CE",
+  "parent_id" : null,
+  "created_at" : 813867308.916624,
+  "agent" : "cc_docker-z",
+  "took" : 266,
+  "completed_at" : 813867574.954345,
+  "name" : null,
+  "summary" : "In claude-code `--bare` mode, MCP servers can be passed manually with `--mcp-config` (path or inline JSON in `{\"mcpServers\": ...}` format); without it, bare mode loads zero MCP servers since `.mcp.json` and user config are skipped. Skills aren't advertised in the system prompt in bare mode but still load on-demand when invoked via `/skill-name`, working from `<cwd>/.claude/skills/<name>/SKILL.md` or a plugin supplied with `--plugin-dir`. Since the model doesn't see skill descriptions, they must be invoked explicitly or referenced in a custom system prompt. `--settings`-based MCP and plugin-manifest MCP don't work in bare mode, and `CLAUDE.md` auto-discovery is skipped unless `--add-dir` is used.",
+  "prompt" : "when i run claude-code in `--bare` mode, is there a way to manually pass MCPs config & Skills?",
+  "status" : "success",
+  "active" : true,
+  "personas" : [
+
+],
+  "mcp" : null,
+  "mcp_requires_auth" : false,
+  "output" : "Yes to both — but the mechanics differ. Here's what I verified empirically on your install (v2.1.289):\n\n## MCP: use `--mcp-config`\n\n```bash\nclaude --bare --mcp-config ./mcp.json\n# or inline JSON, and multiple sources:\nclaude --bare --mcp-config '{\"mcpServers\":{\"fs\":{\"command\":\"npx\",\"args\":[\"-y\",\"@modelcontextprotocol/server-filesystem\",\"/tmp\"]}}}'\n```\n\n- Format is the standard `{\"mcpServers\": {...}}` with stdio/http/sse entries.\n- **Without** this flag, bare mode loads *zero* MCP servers — your usual `.mcp.json` and user-configured servers are skipped (confirmed: a bare run with no flag saw no servers). So `--strict-mcp-config` is effectively already implied in bare mode.\n- What does **not** work in bare mode (tested): `--settings '{\"mcpServers\": ...}'`, plugin-bundled MCP via `--plugin-dir` (both in `plugin.json` manifest and `.mcp.json` form).\n\n## Skills: discovered, but only load on-demand via `/name`\n\nThis is the subtle one. In bare mode, skills are **not advertised** in the system prompt (the model will tell you it has \"no skills\"), but they **are still resolvable** when explicitly invoked with slash syntax — exactly as the `--bare` help text says (\"Skills still resolve via `/skill-name`\"). Verified working sources:\n\n1. **Project skills**: `<cwd>/.claude/skills/<name>/SKILL.md` → invoke as `/name`\n2. **Via plugin**: `--plugin-dir /path/to/plugin` with `skills/<name>/SKILL.md` → invoke as `/name`\n\nSo a complete bare invocation looks like:\n\n```bash\nclaude --bare \\\n  --mcp-config ./mcp.json \\\n  --plugin-dir ./my-plugin \\\n  -p \"/my-skill do the thing\"\n```\n\nCaveats worth knowing:\n- Since skills aren't in the prompt, the model won't *autonomously* decide to use them based on descriptions — you have to name them, or reference them in your prompt/system prompt (`--append-system-prompt`) so the model knows to call them.\n- Note that bare mode also skips `CLAUDE.md` auto-discovery; `--add-dir` is the escape hatch if you need dirs with CLAUDE.md context.\n\nAlso, unrelated heads-up: your environment routes through `api.z.ai` with a GLM model — that works fine in bare mode (env-based auth survives), just be aware tool availability there may differ from Anthropic defaults.\n"
+}

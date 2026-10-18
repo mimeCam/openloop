@@ -74,6 +74,148 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertNil(try GraphStore.fetchRunCounts(at: path)["a"])
     }
 
+    // ── deleteRunLog: the "delete a turn" contract shared by node threads
+    // and session threads — `next` reparents to `deleted.parent`. ─────────
+
+    func runLogsById() throws -> [String: GraphRunLog] {
+        try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+            .reduce(into: [:]) { $0[$1.id] = $1 }
+    }
+
+    func testDeleteRunLogLeafRemovesOnlyThatRun() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", parent: "r1", root: "r1"), at: path)
+        try GraphStore.deleteRunLog(id: "r2", at: path)
+        XCTAssertEqual(Set(try runLogsById().keys), ["r1"])
+    }
+
+    func testDeleteRunLogMidThreadBridgesChildrenToGrandparent() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", parent: "r1", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r3", node: "a", parent: "r2", root: "r1"), at: path)
+        try GraphStore.deleteRunLog(id: "r2", at: path)
+        let left = try runLogsById()
+        XCTAssertEqual(left["r3"]?.parentRunId, "r1") // next reparents to deleted.parent
+        XCTAssertEqual(left["r3"]?.rootRunId, "r1") // living root — untouched
+    }
+
+    func testDeleteRunLogRootReRootsChildren() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", parent: "r1", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r3", node: "a", parent: "r2", root: "r1"), at: path)
+        try GraphStore.deleteRunLog(id: "r1", at: path)
+        let left = try runLogsById()
+        XCTAssertNil(left["r2"]?.parentRunId)
+        XCTAssertEqual(left["r2"]?.rootRunId, "r2") // child promotes to root
+        XCTAssertEqual(left["r3"]?.rootRunId, "r2") // descendants follow
+    }
+
+    func testDeleteRunLogKeepsUnrelatedThreadsIntact() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("t1", node: "a", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("t2", node: "a", parent: "t1", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("u1", node: "a", root: "u1"), at: path)
+        try GraphStore.deleteRunLog(id: "t1", at: path)
+        let left = try runLogsById()
+        XCTAssertEqual(left["u1"]?.rootRunId, "u1")
+        XCTAssertNil(left["t2"]?.parentRunId)
+    }
+
+    func testDeleteRunLogDropsKindMarkerAndReads() throws {
+        try LogManager.createTables(at: path) // owns notification_reads
+        try GraphStore.insertSessionRunLog(
+            GraphRunLog(id: "sr1", nodeId: "sess-1", prompt: "p", status: "success", output: "o", took: 1, createdAt: 2, completedAt: 3),
+            session: "sess-1", workflowId: "wf", at: path
+        )
+        try LogManager.markNotificationRead(kind: "session_run", refId: "sr1", at: path)
+        try GraphStore.deleteRunLog(id: "sr1", at: path)
+        XCTAssertNil(try LogManager.fetchNotificationKinds(at: path)["sr1"])
+        XCTAssertFalse(try LogManager.fetchReadNotificationRefs(kind: "session_run", at: path).contains("sr1"))
+        XCTAssertTrue(try GraphStore.fetchRunLogs(nodeId: "sess-1", at: path).isEmpty)
+    }
+
+    func testDeleteRunLogDoesNotChangeThreadCounts() throws {
+        // the fetchRunCounts invariant: badges track thread ROOTS only —
+        // mid delete keeps the root, root delete promotes its child. Deleting
+        // a turn never moves the badge.
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "success", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", status: "success", parent: "r1", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r3", node: "a", status: "success", parent: "r2", root: "r1"), at: path)
+        try GraphStore.deleteRunLog(id: "r2", at: path) // mid
+        XCTAssertEqual(try GraphStore.fetchRunCounts(at: path)["a"]?.total, 1)
+        try GraphStore.deleteRunLog(id: "r1", at: path) // root
+        XCTAssertEqual(try GraphStore.fetchRunCounts(at: path)["a"]?.total, 1)
+    }
+
+    // ── deleteRunThread: the runs-list delete — root + every follow-up go,
+    // the conversation twin of deleteNodes' subtree cascade. ──────────────
+
+    func testDeleteRunThreadRemovesRootAndFollowUps() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("t1", node: "a", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("t2", node: "a", parent: "t1", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("t3", node: "a", parent: "t2", root: "t1"), at: path)
+        let thread = try GraphStore.fetchRunThread(rootId: "t1", at: path)
+        XCTAssertEqual(thread.map(\.id), ["t1", "t2", "t3"], "fetchRunThread: root included, oldest first")
+        try GraphStore.deleteRunThread(id: "t1", at: path)
+        XCTAssertTrue(try runLogsById().isEmpty)
+    }
+
+    func testDeleteRunThreadKeepsUnrelatedThreadsIntact() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("t1", node: "a", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("t2", node: "a", parent: "t1", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("u1", node: "a", root: "u1"), at: path)
+        try GraphStore.insertRunLog(runLog("u2", node: "a", parent: "u1", root: "u1"), at: path)
+        try GraphStore.deleteRunThread(id: "t1", at: path)
+        let left = try runLogsById()
+        XCTAssertEqual(Set(left.keys), ["u1", "u2"])
+        XCTAssertEqual(left["u2"]?.rootRunId, "u1")
+    }
+
+    func testDeleteRunThreadDropsKindMarkersAndReads() throws {
+        try LogManager.createTables(at: path) // owns notification_reads
+        for id in ["sr1", "sr2"] {
+            try GraphStore.insertSessionRunLog(
+                GraphRunLog(id: id, nodeId: "sess-1", prompt: "p", status: "success", output: "o", took: 1, createdAt: 2, completedAt: 3, parentRunId: id == "sr1" ? nil : "sr1", rootRunId: "sr1"),
+                session: "sess-1", workflowId: "wf", at: path
+            )
+            try LogManager.markNotificationRead(kind: "session_run", refId: id, at: path)
+        }
+        try GraphStore.deleteRunThread(id: "sr1", at: path)
+        XCTAssertTrue(try LogManager.fetchNotificationKinds(at: path).isEmpty, "every deleted row's marker drops")
+        XCTAssertTrue(try LogManager.fetchReadNotificationRefs(kind: "session_run", at: path).isEmpty)
+        XCTAssertTrue(try GraphStore.fetchRunLogs(nodeId: "sess-1", at: path).isEmpty)
+    }
+
+    func testDeleteRunThreadDecrementsThreadCounts() throws {
+        // the badge tracks roots — a turn delete never moves it, a thread
+        // delete removes exactly one root.
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("t1", node: "a", status: "success", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("t2", node: "a", status: "success", parent: "t1", root: "t1"), at: path)
+        try GraphStore.insertRunLog(runLog("u1", node: "a", status: "success", root: "u1"), at: path)
+        XCTAssertEqual(try GraphStore.fetchRunCounts(at: path)["a"]?.total, 2)
+        try GraphStore.deleteRunThread(id: "t1", at: path)
+        XCTAssertEqual(try GraphStore.fetchRunCounts(at: path)["a"]?.total, 1)
+    }
+
+    func testCreateTablesRepairsDanglingRootRunIds() throws {
+        // pre-feature manual delete / interrupted splice: a row whose root
+        // points at a run that no longer exists self-heals at boot
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", parent: "r1", root: "r1"), at: path)
+        let db = try Connection(GraphStore.dbPath(at: path))
+        try db.run("DELETE FROM graph_run_logs WHERE id = 'r1';")
+        try GraphStore.createTables(at: path) // boot path
+        XCTAssertEqual(try runLogsById()["r2"]?.rootRunId, "r2")
+    }
+
     func testRunCountsTrackProgressRows() throws {
         // pins the counting invariant where it lives: total = success + failed + active
         try insert(node("a", nil))
@@ -177,6 +319,39 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(counts?.active, 0)
     }
 
+    // ── Session follow-ups: rows anchored on the session UUID (node_id),
+    // kind persisted transactionally as a notification_kinds marker. ───────
+
+    func testInsertSessionRunLogWritesRowAndKindMarker() throws {
+        let log = GraphRunLog(
+            id: "sr1", nodeId: "sess-1", prompt: "p", status: "summarizing",
+            output: "answer", took: 1, createdAt: 10, completedAt: 11,
+            rootRunId: "sr1"
+        )
+        try GraphStore.insertSessionRunLog(log, session: "sess-1", workflowId: "wf", at: path)
+        let rows = try GraphStore.fetchRunLogs(nodeId: "sess-1", at: path)
+        XCTAssertEqual(rows.map(\.id), ["sr1"])
+        XCTAssertEqual(rows[0].completedAt, 11) // seed rows are born completed
+        let markers = try LogManager.fetchNotificationKinds(at: path)
+        XCTAssertEqual(
+            markers["sr1"],
+            NotificationKindMarker(runId: "sr1", kind: "session_run", session: "sess-1", workflowId: "wf")
+        )
+    }
+
+    func testSessionRunsDoNotInflateNodeRunCounts() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "success"), at: path)
+        try GraphStore.insertSessionRunLog(
+            GraphRunLog(id: "sr1", nodeId: "sess-1", prompt: "p", status: "success", output: "o", took: 1, createdAt: 2, completedAt: 3),
+            session: "sess-1", workflowId: "wf", at: path
+        )
+        // the session UUID is not a node id — its rows are inert for counts
+        let counts = try GraphStore.fetchRunCounts(at: path)
+        XCTAssertEqual(counts["a"]?.total, 1)
+        XCTAssertNil(counts["sess-1"])
+    }
+
     func testChainTextIncludesNodeOwnSummary() throws {
         try insert(node("a", nil))
         try insert(GraphNode(
@@ -259,22 +434,23 @@ final class GraphStoreTests: XCTestCase {
     // — chain names (name lives on the node; NULL = unnamed) —
 
     func testNameRoundtripsThroughInsertAndFetch() throws {
-        // summary/mcpAuth asserted alongside: SELECT order and toNode indices
-        // are decoupled positional knowledge — any reshuffle must fail loudly
-        // on more than the new field.
+        // summary/mcpRequiresAuth asserted alongside: file keys and decoder are
+        // decoupled knowledge — any reshuffle must fail loudly on more than
+        // the new field.
         try insert(
             node("a", nil),
             GraphNode(
                 id: "n", parentId: nil, prompt: "p", agent: "a", status: "success",
-                output: nil, took: nil, mcp: "https://mcp.example", mcpAuth: "Bearer t",
+                output: nil, took: nil, mcp: "https://mcp.example", mcpRequiresAuth: true,
                 summary: "s", name: "alpha", createdAt: 1, completedAt: nil
             )
         )
         let left = try remaining()
         XCTAssertEqual(left["n"]?.name, "alpha")
         XCTAssertEqual(left["n"]?.summary, "s")
-        XCTAssertEqual(left["n"]?.mcpAuth, "Bearer t")
-        XCTAssertNil(left["a"]?.name) // default nil — proves row index 14, not a shift
+        XCTAssertEqual(left["n"]?.mcpRequiresAuth, true)
+        XCTAssertEqual(left["a"]?.mcpRequiresAuth, false) // default — proves the flag is not stuck on
+        XCTAssertNil(left["a"]?.name)
     }
 
     func testUpdateNameSetsAndClears() throws {
@@ -283,6 +459,82 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(try remaining()["a"]?.name, "alpha")
         try GraphStore.updateName(id: "a", name: nil, at: path) // nil = clear to NULL
         XCTAssertNil(try remaining()["a"]?.name)
+    }
+
+    func testUpdateAgentSwitchesAndPreservesOtherFields() throws {
+        try insert(node("a", nil))
+        try GraphStore.updateAgent(id: "a", agent: "cc_docker", at: path)
+        let n = try XCTUnwrap(remaining()["a"])
+        XCTAssertEqual(n.agent, "cc_docker")
+        XCTAssertEqual(n.prompt, "p a") // the switch must not disturb neighbours
+    }
+
+    // — MCP auth: key in the per-machine secrets store, marker on the node —
+
+    func testUpdateMcpAuthStoresKeyAndMarkerThenClearsBoth() throws {
+        try insert(GraphNode(
+            id: "a", parentId: nil, prompt: "p", agent: "x", status: "success",
+            output: nil, took: nil, mcp: "https://mcp.example",
+            createdAt: 1, completedAt: nil
+        ))
+        try GraphStore.updateMcpAuth(id: "a", auth: "Bearer k", at: path)
+        XCTAssertEqual(SecretStore.secret(for: "https://mcp.example", at: path), "Bearer k")
+        XCTAssertEqual(try remaining()["a"]?.mcpRequiresAuth, true)
+
+        try GraphStore.updateMcpAuth(id: "a", auth: nil, at: path) // clear
+        XCTAssertNil(SecretStore.secret(for: "https://mcp.example", at: path))
+        XCTAssertEqual(try remaining()["a"]?.mcpRequiresAuth, false)
+    }
+
+    func testChainMcpEndpointsResolvesAuthFromSecretsOfThatInstance() throws {
+        // auth is per-URL-per-instance: nodes read the secrets file of the
+        // dir they live in — never a co-located node's stored key, never
+        // another instance's store
+        try insert(
+            GraphNode(id: "a", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://one.example", mcpRequiresAuth: true,
+                      summary: "s", createdAt: 1, completedAt: nil),
+            GraphNode(id: "b", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://two.example", mcpRequiresAuth: true,
+                      summary: "s", createdAt: 1, completedAt: nil)
+        )
+        try SecretStore.setSecret("k1", for: "https://one.example", at: path)
+        let nodes = try GraphStore.fetchNodes(at: path)
+        let endpoints = GraphStore.chainMcpEndpoints(nodes, at: path)
+        XCTAssertEqual(endpoints, Set([
+            GraphMcpEndpoint(url: "https://one.example", auth: "k1"),
+            // marker says a key exists, this machine doesn't hold it (clone)
+            GraphMcpEndpoint(url: "https://two.example", auth: nil),
+        ]))
+    }
+
+    // The wire pair mcp_requires_auth/mcp_auth_local, aggregated for the graph
+    // header warning and the instances list: only marker-set-but-not-held
+    // counts. A marker-less URL (no key configured) and a held key are both
+    // silence, and a missing nodes dir is 0 — the list API must stay cheap
+    // and side-effect free.
+    func testMcpAuthMissingCountCountsOnlyMarkerSetWithoutLocalKey() throws {
+        try insert(
+            GraphNode(id: "held", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://one.example", mcpRequiresAuth: true,
+                      summary: "s", createdAt: 1, completedAt: nil),
+            GraphNode(id: "gone", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://two.example", mcpRequiresAuth: true,
+                      summary: "s", createdAt: 1, completedAt: nil),
+            GraphNode(id: "gone2", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://two.example", mcpRequiresAuth: true,
+                      summary: "s", createdAt: 1, completedAt: nil),
+            GraphNode(id: "bare", parentId: nil, prompt: "p", agent: "x", status: "success",
+                      output: nil, took: nil, mcp: "https://three.example",
+                      summary: "s", createdAt: 1, completedAt: nil)
+        )
+        try SecretStore.setSecret("k1", for: "https://one.example", at: path)
+        XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: path), 2)
+        // one key fixes every node on that URL (dedup is the store's point)
+        try SecretStore.setSecret("k2", for: "https://two.example", at: path)
+        XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: path), 0)
+        let empty = NSTemporaryDirectory() + "openloop-graphstore-none-\(UUID().uuidString)"
+        XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: empty), 0)
     }
 
     func testLegacyDbMigratesNameColumn() throws {

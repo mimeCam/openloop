@@ -174,7 +174,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = personas.length + ' persona' + (personas.length !== 1 ? 's' : '');
                     const emptyMsg = isGlobal
-                        ? 'No system-wide personas. Add personas to ~/.local/share/openloop/personas/ to share across all projects.'
+                        ? 'No system-wide personas. Global personas are deprecated in favor of <code>w2</code>, which downloads them directly into your project.'
                         : 'No personas in this instance.';
                     body.innerHTML = personas.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
@@ -184,7 +184,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = workflows.length + ' workflow' + (workflows.length !== 1 ? 's' : '');
                     const emptyMsg = isGlobal
-                        ? 'No system-wide workflows. Add workflows to ~/.local/share/openloop/workflows/ to share across all projects.'
+                        ? 'No system-wide workflows. Global workflows are deprecated in favor of <code>w2</code>, which downloads them directly into your project.'
                         : 'No workflows in this instance.';
                     body.innerHTML = workflows.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
@@ -230,7 +230,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const pp = await fetchParentPersonas(parentPath);
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = pp.length + ' item' + (pp.length !== 1 ? 's' : '');
-                    const emptyMsg = isGlobal ? 'No system-wide personas.' : 'No personas in this instance.';
+                    const emptyMsg = isGlobal ? 'No system-wide personas. Global personas are deprecated in favor of <code>w2</code>.' : 'No personas in this instance.';
                     body.innerHTML = pp.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
                         : pp.map(p => `<div class="persona-selector-item" data-persona-id="${escapeHtml(p.id)}">${getAvatarHtml(p.avatar)}<div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">${escapeHtml(p.name)}</span>${p.role ? `<span class="persona-selector-role">${escapeHtml(p.role)}</span>` : ''}</div>${p.about ? `<span class="persona-selector-about">${escapeHtml(p.about)}</span>` : ''}</div></div>`).join('');
@@ -239,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const filtered = ww.filter(w => w.id !== workflowId);
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = filtered.length + ' item' + (filtered.length !== 1 ? 's' : '');
-                    const emptyMsg = isGlobal ? 'No system-wide workflows.' : 'No workflows in this instance.';
+                    const emptyMsg = isGlobal ? 'No system-wide workflows. Global workflows are deprecated in favor of <code>w2</code>.' : 'No workflows in this instance.';
                     body.innerHTML = filtered.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
                         : filtered.map(w => `<div class="persona-selector-item workflow-selector-item" data-workflow-id="${escapeHtml(w.id)}"><span class="workflow-selector-icon">\u25CB</span><div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">${escapeHtml(w.name)}</span></div>${w.desc ? `<span class="persona-selector-about">${escapeHtml(w.desc)}</span>` : ''}</div></div>`).join('');
@@ -373,6 +373,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 manualActive: instanceData.manualActive || 0,
                 manualCompleted: instanceData.manualCompleted || 0,
                 unreadNotifications: instanceData.unreadNotifications || 0,
+                graphMcpAuthMissing: instanceData.graphMcpAuthMissing || 0,
                 depth: depth,
                 rootPath: rootPath,
                 parentPath: parentMap[path] || null,
@@ -544,6 +545,18 @@ document.addEventListener('DOMContentLoaded', function() {
         workflowCountHtml = getWorkflowCountHtml(instance.fullPath, instance.state);
         manualBadgesHtml = getManualWorkflowBadgesHtml(instance.manualActive, instance.manualCompleted);
 
+        // Graph cells whose MCP was configured with a key this computer
+        // doesn't hold (keys live per machine in git-ignored secrets.json5 —
+        // a fresh clone always starts without them). Surfaces HERE so the
+        // user opens the graph already knowing a key is due; the link is
+        // the fix's front door.
+        const mcpMissing = instance.graphMcpAuthMissing || 0;
+        const mcpWarnHtml = mcpMissing
+            ? `<a class="graph-link mcp-warn" href="/graph.html?instance=${encodeURIComponent(instance.fullPath)}" target="_blank" rel="noopener noreferrer"` +
+              ` title="Graph cells use an MCP that needs its authorization key set on this computer — open the graph to set it">` +
+              `mcp key${mcpMissing === 1 ? '' : 's'} × ${mcpMissing}</a>`
+            : '';
+
         let childCountHtml = '';
         if (instance.childCount > 0) {
             const label = instance.childCount === 1 ? '1 child' : `${instance.childCount} children`;
@@ -556,8 +569,8 @@ document.addEventListener('DOMContentLoaded', function() {
             expandedContentHtml = renderExpandedContentHtml(instance.fullPath, personasHtml, workflowsHtml);
         }
 
-        const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml)
-            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${getNotificationsBadgeHtml(instance.fullPath, instance.unreadNotifications)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
+        const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml || mcpWarnHtml)
+            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${mcpWarnHtml}${getNotificationsBadgeHtml(instance.fullPath, instance.unreadNotifications)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
             : '';
 
         const iconSaturation = Math.max(25, 50 - depth * 8);

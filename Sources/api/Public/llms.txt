@@ -44,11 +44,18 @@ Touch ANY route under /api/instances/... → update this file in the same change
 Instances — list & lifecycle
   GET    /api/instances               → { instances:[{ path, parentPath?, state?,
                                   manualActive, manualCompleted, configEnabled?,
-                                  processRunning?, isGlobalShare }] }
+                                  processRunning?, isGlobalShare,
+                                  graphMcpAuthMissing }] }
                                   state = { lastLoopAtUnixMs, activeRunningWorkflows,
                                             inactiveWorkflows }
                                   (configEnabled/processRunning are absent on the
                                   global-share instance.)
+                                  graphMcpAuthMissing = count of graph nodes whose
+                                  MCP was configured with a key this machine's
+                                  secrets store doesn't hold (0 = nothing to say;
+                                  the home page badges the instance cell, and
+                                  /graph.html shows the same fact in its header
+                                  and on the cells)
   POST   /api/instances/:id/launch    → start the worker for a folder   (200)
   POST   /api/instances/:id/stop      → kill the running process        (200)
   POST   /api/instances/:id/disable   → stop auto-loading on boot       (200)
@@ -108,9 +115,19 @@ Graph — node graph per instance (powers /graph.html)
                                                    insert_before?, mcp?, mcp_auth? }
                                                    → { node fields… }   (launches a run)
   PUT    /api/instances/:id/graph/:nid         body: any subset (mcp, mcp_auth,
-                                                   summary, personas, active, name)
+                                                   summary, personas, active, name,
+                                                   agent)
                                                    name = chain label shown in the
                                                    graph UI; empty string clears it
+                                                   agent = runner for this node's
+                                                   next execution (unknown agent →
+                                                   400; must exist in /api/agents)
+  mcp_auth is WRITE-ONLY: set/replace (non-empty string) or clear (empty
+  string). It is never returned. The key is stored per machine in
+  .openloop/secrets.json5 keyed by the node's mcp URL (gitignored, 0600);
+  node files carry only the mcp_requires_auth marker, so the graph travels with
+  the repo while keys stay local. A key without an mcp URL → 400. (No
+  migration path for a plaintext mcp_auth era — it never shipped.)
   DELETE /api/instances/:id/graph/:nid[?chain=true] → { nodes:[GraphNode] }
   POST   /api/instances/:id/graph/:nid/summary body { prompt? }  → regenerate /
                                                    re-run with the edited prompt
@@ -127,16 +144,93 @@ Graph — node graph per instance (powers /graph.html)
   PUT    /api/instances/:id/graph/:nid/runs/:rid  body { summary } → edited
                                                    run summary (enables
                                                    follow-ups on it)
+  DELETE /api/instances/:id/graph/:nid/runs/:rid → { logs:[…] } (fresh list).
+                                                   Delete one run-log row:
+                                                   rows whose parent_run_id
+                                                   pointed at it re-parent to
+                                                   its parent ("next
+                                                   reparents to
+                                                   deleted.parent"; nil →
+                                                   they become thread roots,
+                                                   root_run_id re-derived).
+                                                   Deleting a parent is the
+                                                   feature, not an error. The
+                                                   run's notification kind
+                                                   marker + read rows drop in
+                                                   the same transaction.
+                                                   Terminal runs only: 409
+                                                   while progress/summarizing
+                                                   or live in the registry,
+                                                   404 wrong node anchor or
+                                                   already gone.
+  DELETE /api/instances/:id/graph/:nid/runs/:rid?thread=true
+                                                  → { logs:[…] } (fresh list).
+                                                   The runs-list delete: the
+                                                   root AND every follow-up
+                                                   of its thread cascade in
+                                                   one transaction (the
+                                                   conversation twin of node
+                                                   ?chain=true), with every
+                                                   deleted row's kind marker
+                                                   + read rows. Root ids
+                                                   only — a follow-up :rid is
+                                                   400 "Not a thread root"
+                                                   (its own row has the
+                                                   per-turn splice above).
+                                                   409 while ANY turn of the
+                                                   thread is in flight; the
+                                                   node's thread-count badge
+                                                   drops by one.
   GET    /api/instances/:id/graph/:nid/logs    → { logs:[…] }
            Run : { id, node_id, prompt, status, output?, took?, created_at,
-           completed_at?, parent_run_id?, summary? }
+           completed_at?, parent_run_id?, root_run_id?, summary? }
            status: progress → summarizing → success | failed (answered =
            finished with no summary). Every successful run is summarized
            right after completion, like node creation.
+
+Graph sessions — workflow follow-up conversations (the right panel of
+/workflow-log.html). After a session finishes successfully, its bottom-most
+persona answer can be continued like a node RUN conversation. Turns are
+graph_run_logs rows anchored on the session UUID — node_id is the single
+overloaded anchor column; the notification kind discriminator is a
+notification_kinds marker row written in the same transaction as the insert
+(absence of a marker = node run).
+  GET  /api/instances/:id/graph/sessions/:sid/logs → { logs:[Run…] }
+       (sid = workflow session UUID; run 0 is the seeded original answer)
+  POST /api/instances/:id/graph/sessions/:sid/run   body { prompt, parent_run_id }
+       → Run. Follow-up turn; re-executes the session's bottom-most persona
+       (agent re-resolved from its recorded name: project bin first, then
+       user local bin; unresolvable → 400). Gating mirrors node runs:
+       parent must be the thread tip with a summary (409 already-continued /
+       400 no-summary), thread empty → 409 seed first. Session must have a
+       successful run_ends row (409 otherwise).
+  POST /api/instances/:id/graph/sessions/:sid/seed  → Run. Opt-in run 0:
+       materializes the original answer (prompt = the session's original
+       ask, output = tip persona output) and summarizes it. Empty/failed
+       summarization → status "failed" (never "answered"). Duplicate → 409.
+  POST /api/instances/:id/graph/sessions/:sid/runs/:rid/retry → Run.
+       Failed tips only (400), no children (409), not in flight (409).
+       A failed run that still holds output (seed / interrupted summary)
+       retries the summarization only.
+  DELETE /api/instances/:id/graph/sessions/:sid/runs/:rid → { logs:[…] }
+       One turn splices out with the same semantics as the node-route DELETE
+       above (follow-ups move up to the deleted run's parent; an emptied
+       thread returns to the seed state). Same core, same guards — the only
+       difference is the anchor: 404 when the run's row is not anchored on
+       :sid.
+  Manual summaries: PUT /api/instances/:id/graph/:nid/runs/:rid works for
+       sessions as-is — :nid = the session UUID (no node existence check).
+
   GET    /api/agents                           → { agents:[{ name }] }
   Node : { id, parent_id?, prompt, agent, status, output?, took?, mcp?,
-           mcp_auth?, summary?, personas, active (dormant flag), name?, runnable,
+           mcp_requires_auth, mcp_auth_local, summary?, personas, active
+           (dormant flag), name?, runnable,
            runs:{ total, success, failed, active }, created_at, completed_at? }
+           mcp_requires_auth = the repo-traveling marker "this MCP requires
+           an authorization key"; mcp_auth_local = this machine's
+           secrets store holds the key for the node's URL (what runs will
+           send). mcp_requires_auth && !mcp_auth_local = fresh clone: the UI asks
+           the user to set the key on this computer.
            runs.active = run-log rows currently "progress" (GET /graph sweeps
            orphaned progress rows to failed first; PUT replies skip the sweep
            and heal on the next poll). total = success + failed + active.
@@ -150,13 +244,19 @@ Notifications — per instance, derived from its own logs.db
 (run_ends + terminal graph_run_logs, minus notification_reads markers)
   GET  /api/instances/:id/notifications?limit=100 → { items:[Notification], unread_count }
   POST /api/instances/:id/notifications/:kind/:ref/read → 200 empty body
-       kind ∈ workflow (ref = session) | node_run (ref = graph_run_log id)
+       kind ∈ workflow (ref = session) | node_run (ref = graph_run_log id) |
+              session_run (ref = graph_run_log id of a workflow follow-up)
   POST /api/instances/:id/notifications/read-all   → 200 empty body
   GET  /api/instances → each instance also carries unreadNotifications
   Notification : { id (=ref), kind, instance_path, session?, workflow_id?,
     node_id?, title, prompt?, success, took?, ended_at (unix ms), read }
-  kind=workflow → open /workflow-log.html?instance=<instance_path>&session=<session>
-  kind=node_run → open /graph.html?instance=<instance_path>&node=<node_id>
+  kind=workflow    → open /workflow-log.html?instance=<instance_path>&session=<session>
+  kind=node_run    → open /graph.html?instance=<instance_path>&node=<node_id>&run=<run id>
+                     (&run= opens that run's conversation; root_run_id maps a
+                     follow-up notification to its thread root)
+  kind=session_run → open /workflow-log.html?instance=<instance_path>
+                     &session=<session>&run=<run id> (the follow-up thread;
+                     node_id = session UUID, title = workflow name)
   Read state changes ONLY through the two POSTs above — opening a deep link
   never marks read. No poller, no separate db — everything reads logs.db live.
 

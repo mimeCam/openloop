@@ -1,0 +1,19 @@
+{
+  "id" : "4CF146F6-093E-4A6E-AB75-A43DE41E3742",
+  "parent_id" : "2641D10D-4E45-4947-8100-DB7F2F39D92A",
+  "created_at" : 813059408.329022,
+  "agent" : "cc_docker-z",
+  "took" : 59,
+  "completed_at" : 813059566.679994,
+  "name" : "z.ai's web-search MCP",
+  "summary" : "The web-search-prime MCP server (may be already registered as `api`) is connected and verified working: `web_search_prime` returns 10 fresh results with various parameters.\nIt's tools-only with no MCP resources (normal, same as DevBrain), making it the go-to for general web search.",
+  "prompt" : "ive added new web-search-prime MCP",
+  "status" : "success",
+  "active" : true,
+  "personas" : [
+
+],
+  "mcp" : "https://api.z.ai/api/mcp/web_search_prime/mcp",
+  "mcp_requires_auth" : true,
+  "output" : "Verified — here's the full status:\n\n## ✅ `web-search-prime` is connected and working\n\nThe server (registered as `api`) loaded into this session after the restart, and I confirmed it with a live test call:\n\n- **Test query** (`Model Context Protocol MCP latest news`, recency: `oneMonth`) → returned 10 fresh, relevant results (The Hacker News, Atlassian, Descope, Stacklok, etc.), including results from as recent as 3–23 hours ago\n- **Parameters verified**: `search_query`, `search_recency_filter`, `content_size`, `location`, and `search_domain_filter` are all accepted\n- **Resources**: none exposed — tools-only, same as DevBrain, which is normal\n\nYour research toolkit in this session is now:\n| Server | Tools | Best for |\n|---|---|---|\n| `api` (web-search-prime) | `web_search_prime` | General web search, fresh/recency-filtered results |\n| DevBrain | `retrieve_knowledge`, `read_full_article` | Dev-focused knowledge, full article extraction by URL |\n\n## ⚠️ ctx.md couldn't be updated\n\nThe update failed with **EROFS** — the graph-runs directory is mounted read-only (confirmed via shell test, not just a sandbox block), so the orchestrator injects ctx.md as an immutable input. The stale note (\"web-search-prime not yet visible\") will persist in this run's context.\n\nFor the next run's ctx.md, here's the replacement paragraph for the last section:\n\n> `web-search-prime` (server name: `api`) is connected and verified working: `web_search_prime` returned live results in a test call, with `search_recency_filter`, `content_size`, `location`, and `search_domain_filter` all supported. Tools-only, no MCP resources (normal). Use it as the go-to for general web search; prefer DevBrain for dev-focused knowledge lookups and `read_full_article` for full page content by URL.\n"
+}

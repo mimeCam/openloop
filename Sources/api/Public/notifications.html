@@ -113,10 +113,38 @@
             font-size: 11px; color: var(--text-muted);
             font-family: 'JetBrains Mono', monospace;
         }
+        /* user's ask — wraps up to 3 lines, honoring their line breaks; over-
+           threshold asks clamp with a soft fade + "show more" (grammar cloned
+           from graph.html's .wl-bubble-text.truncated / .wl-expand-btn) */
         .notif-prompt {
             margin-top: 6px;
-            font-size: 12px; color: var(--text-muted);
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            font-size: 12px; line-height: 1.5; color: var(--text-muted);
+            white-space: pre-wrap; word-break: break-word;
+        }
+        .notif-prompt.truncated {
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+            mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+        }
+        .notif-prompt.expanded {
+            -webkit-line-clamp: unset;
+            -webkit-mask-image: none;
+            mask-image: none;
+        }
+        .notif-more {
+            display: inline-block;
+            margin-top: 6px;
+            border: none; background: none; padding: 0;
+            font: inherit; font-size: 11px;
+            color: var(--text-muted); cursor: pointer;
+        }
+        .notif-more:hover { color: var(--text-primary); text-decoration: underline; }
+        .notif-more:focus-visible {
+            outline: 2px solid var(--accent-blue);
+            outline-offset: 2px; border-radius: 4px;
         }
         .notif-open {
             flex-shrink: 0; align-self: center;
@@ -133,6 +161,14 @@
         }
         .notif.unread .mark-read-btn { color: var(--accent-blue); }
         .mark-read-btn:hover { text-decoration: underline; }
+
+        /* 44px touch target for the disclosure verb — same contract as panel.css */
+        @media (max-width: 768px) {
+            .notif-more {
+                display: inline-flex; align-items: center;
+                min-height: 44px; padding: 12px 0;
+            }
+        }
     </style>
 </head>
 <body>

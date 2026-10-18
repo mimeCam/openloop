@@ -18,6 +18,19 @@
     // Panel physics (clamp, drag, mobile sheet) live in panel.js,
     // shared with graph.html via window.OpenLoopPanel.
 
+    // ── Follow-up thread state (the panel's second, exclusive mode) ─────────
+    let instanceParam     = null;   // set in init, threads POST against it
+    let sessionParam      = null;
+    let sessionSuccess    = false;  // every session log row succeeded
+    let threadMode        = false;  // panel shows the follow-up thread
+    let threadAutoOpened  = false;  // auto-open fires once per page load
+    let threadRows        = [];     // graph run logs anchored on the session
+    let threadJson        = '';     // change guard for polling re-renders
+    let threadFooterKey   = null;   // footer re-render guard (draft preserve)
+    let threadPoll        = null;
+    let threadSummaryEditing = false;
+    let pendingThreadFocus = null;  // ?run=<id> — beacon after first render
+
     // ── Entry ────────────────────────────────────────────────────────────────
     function init() {
         const params   = new URLSearchParams(window.location.search);
@@ -28,9 +41,22 @@
         document.getElementById('wl-zoom-in') .addEventListener('click', () => stepZoom(1));
         document.getElementById('wl-zoom-out').addEventListener('click', () => stepZoom(-1));
         document.getElementById('wl-zoom-label').addEventListener('click', () => applyZoom(1.0));
+        document.getElementById('followup-open-btn').addEventListener('click', () => openFollowUpPanel());
         // Shared width memory: localStorage['openloop-panel-w'] is a contract
         // with graph.html — both pages run the identical clamp in panel.js.
         OpenLoopPanel.initPanelResize();
+        // One door listener for both panel modes (persona view + follow-up
+        // thread), bound once — the old per-open handlers stacked.
+        OpenLoopBubble.bindExpand();
+        // Width and webfont arrival change how many lines a text paints —
+        // re-gate the panel once geometry settles (never mid-drag).
+        document.addEventListener('openloop:panel-resized', regatePanelBubbles);
+        if (document.fonts?.ready) document.fonts.ready.then(regatePanelBubbles);
+        let resizeTimer = null; // rotation: the panel is 100vw on mobile
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(regatePanelBubbles, 150);
+        });
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape') { closeDetailPanel(); return; }
             if (!(e.metaKey || e.ctrlKey)) return;
@@ -40,6 +66,9 @@
         });
         if (ISOLATED_RUN) { runSanityChecks(); return; }
         if (!instance || !session) { showError('Missing instance or session parameter in URL.'); return; }
+        instanceParam = instance;
+        sessionParam  = session;
+        pendingThreadFocus = params.get('run'); // session_run deep links
         document.getElementById('wl-session-id').textContent = session;
         loadAndRender(instance, session);
     }
@@ -95,6 +124,14 @@
         if (!data.logs || !data.logs.length) { showEmpty(); return; }
         const logs = data.logs.filter(l => l.personaId != null);
         if (!logs.length) { showEmpty(); return; }
+        // Follow-ups gate on the whole session having succeeded — the
+        // backend enforces the same via the run_ends row.
+        sessionSuccess = data.logs.every(l => l.success);
+        syncFollowupButton();
+        if (sessionSuccess && !threadAutoOpened) {
+            threadAutoOpened = true; // auto-open once, then the button reopens
+            openFollowUpPanel();
+        }
         renderToolbar(data);
         const { tiers, avg } = computeSpeedTiers(logs);
         currentTiers = tiers;
@@ -237,28 +274,30 @@
     }
 
     function openDetailPanel(log) {
+        exitThreadMode(); // the panel's two modes are mutually exclusive
         const panel = document.getElementById('detail-panel');
-        document.getElementById('detail-panel-inner').innerHTML = renderDetailContent(log);
+        const inner = document.getElementById('detail-panel-inner');
+        inner.innerHTML = renderDetailContent(log);
+        OpenLoopBubble.gateBubbles(inner); // same script turn: no flash of unfolded text
         panel.classList.add('open');
         document.getElementById('graph-canvas').classList.add('panel-open');
         panel.querySelector('.detail-panel-close').addEventListener('click', closeDetailPanel);
-        panel.addEventListener('click', function handleExpand(e) {
-            if (!e.target.classList.contains('wl-expand-btn')) return;
-            const content = e.target.previousElementSibling;
-            if (content && content.classList.contains('wl-bubble-text')) {
-                content.classList.remove('truncated');
-                content.classList.add('expanded');
-                e.target.remove();
-            }
-        });
         bindCopyButtons(panel);
         bindAvatarFallbacks(panel);
     }
 
     function closeDetailPanel() {
+        exitThreadMode();
         document.getElementById('detail-panel').classList.remove('open');
         document.getElementById('graph-canvas').classList.remove('panel-open');
         document.querySelectorAll('.node-card.selected').forEach(c => c.classList.remove('selected'));
+    }
+
+    // A wider panel can free a folded text, a narrower one folds a free
+    // one (the panel is the only text surface here — cells render no body).
+    // OPEN stays OPEN: the gate never re-folds an expanded text.
+    function regatePanelBubbles() {
+        OpenLoopBubble.gateBubbles(document.getElementById('detail-panel-inner'));
     }
 
     function renderDetailContent(log) {
@@ -280,18 +319,18 @@
 
     function renderDetailContexts(parents) {
         return (parents || []).map(p =>
-            `<div class="detail-section context-section"><div class="detail-section-label">CONTEXT · ${escHtml(p.id)}</div>${renderBubble('context', '', p.text)}</div>`
+            `<div class="detail-section context-section"><div class="detail-section-label">CONTEXT · ${escHtml(p.id)}</div>${OpenLoopBubble.bubbleHtml('context', p.text)}</div>`
         ).join('');
     }
 
     function renderDetailBubbles(log) {
         const contexts = renderDetailContexts(log.msg.parents);
         const input    = log.msg.input
-            ? `<div class="detail-section input-section"><div class="detail-section-label">INPUT</div>${renderBubble('input', '', log.msg.input)}</div>`
+            ? `<div class="detail-section input-section"><div class="detail-section-label">INPUT</div>${OpenLoopBubble.bubbleHtml('input', log.msg.input)}</div>`
             : '';
         const outCls   = log.success ? 'output' : 'output error';
         const outSect  = log.success ? 'output-section' : 'error-section';
-        const result   = `<div class="detail-section ${outSect}"><div class="detail-section-label">${log.success ? 'RESULT' : 'ERROR'}</div>${renderBubble(outCls, '', log.msg.output || '(empty)')}</div>`;
+        const result   = `<div class="detail-section ${outSect}"><div class="detail-section-label">${log.success ? 'RESULT' : 'ERROR'}</div>${OpenLoopBubble.bubbleHtml(outCls, log.msg.output || '(empty)')}</div>`;
         return contexts + input + result;
     }
 
@@ -502,8 +541,8 @@
         const card = document.querySelector(`.node-card[data-persona-id="${CSS.escape(personaId)}"]`);
         if (!card) return;
         flashDot(personaId);
-        const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        card.scrollIntoView({ behavior: reduced ? 'instant' : 'smooth', block: 'start', inline: 'start' });
+        const reduced = OpenLoopPanel.reducedMotion();
+        card.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start', inline: 'start' });
         requestAnimationFrame(() => glowCard(card));
     }
 
@@ -520,6 +559,491 @@
         const pid = entry.target.dataset.personaId;
         const dot = document.querySelector(`.mm-persona-dot[data-persona-id="${CSS.escape(pid)}"]`);
         if (dot) dot.classList.toggle('active', entry.isIntersecting);
+    }
+
+    // ── Follow-up thread (session RUN conversation) ───────────────────────────
+    // graph_run_logs rows anchored on the session UUID — run 0 is the seeded
+    // original answer, the rest are follow-up turns. The panel's second,
+    // exclusive mode: same shell as persona logs, different body + footer.
+
+    const threadUrl = suffix =>
+        `/api/instances/${encodeURIComponent(instanceParam)}/graph/sessions/${encodeURIComponent(sessionParam)}${suffix || ''}`;
+
+    async function threadFetchJson(url, opts) {
+        const res = await fetch(url, opts);
+        if (!res.ok) {
+            const body = (await res.text()).slice(0, 200);
+            throw new Error(body ? `HTTP ${res.status}: ${body}` : `HTTP ${res.status}`);
+        }
+        return res.json();
+    }
+
+    function syncFollowupButton() {
+        document.getElementById('followup-open-btn')
+            .classList.toggle('visible', sessionSuccess);
+    }
+
+    function openFollowUpPanel() {
+        threadMode = true;
+        document.querySelectorAll('.node-card.selected').forEach(c => c.classList.remove('selected'));
+        const panel = document.getElementById('detail-panel');
+        document.getElementById('detail-panel-inner').innerHTML = threadShellHtml();
+        panel.classList.add('open');
+        document.getElementById('graph-canvas').classList.add('panel-open');
+        panel.querySelector('.detail-panel-close').addEventListener('click', closeDetailPanel);
+        threadJson = '';
+        threadFooterKey = null;
+        startThreadPoll();
+        loadThread(true);
+    }
+
+    // Header → scroll body (messages only) → dock (the pinned footer).
+    // The composer lives in the dock, outside the scroll body: reading a
+    // long thread and writing the next turn are one glance, not a scroll
+    // round trip. #thread-footer inside it is the state machine's slot —
+    // renderThreadFooter rewrites only that inner div, never the dock.
+    function threadShellHtml() {
+        return `<div class="detail-panel-header">` +
+            `<div class="detail-panel-accent"></div>` +
+            `<div class="detail-panel-title">` +
+            `<div class="detail-panel-name">Follow-up conversation</div>` +
+            `<div class="detail-panel-meta" id="thread-meta">loading…</div>` +
+            `</div>` +
+            `<button class="detail-panel-close" aria-label="Close details">✕</button>` +
+            `</div>` +
+            `<div class="detail-panel-body">` +
+            `<div id="thread-messages"><div class="summary-missing">loading…</div></div>` +
+            `</div>` +
+            `<div class="detail-panel-footer" role="region" aria-label="Follow-up composer">` +
+            `<div class="detail-panel-accent"></div>` +
+            `<div id="thread-footer"></div>` +
+            `</div>`;
+    }
+
+    function startThreadPoll() {
+        stopThreadPoll();
+        threadPoll = setInterval(() => loadThread(false), 5000);
+    }
+
+    function stopThreadPoll() {
+        if (threadPoll) { clearInterval(threadPoll); threadPoll = null; }
+    }
+
+    function exitThreadMode() {
+        stopThreadPoll();
+        threadMode = false;
+        threadSummaryEditing = false;
+        threadFooterKey = null;
+    }
+
+    function refreshThread(scrollEnd) {
+        // an explicit action (send/seed/retry/summary save) supersedes any
+        // open summary edit — fresh state must re-render immediately
+        threadSummaryEditing = false;
+        threadJson = '';
+        threadFooterKey = null;
+        loadThread(scrollEnd);
+    }
+
+    async function loadThread(scrollEnd) {
+        if (!threadMode) return;
+        try {
+            const data = await threadFetchJson(threadUrl('/logs'));
+            if (!threadMode) return; // closed while fetching
+            const json = JSON.stringify(data.logs);
+            if (json !== threadJson && !threadSummaryEditing) {
+                threadRows = data.logs || [];
+                threadJson = json;
+                renderThreadMessages();
+                renderThreadFooter();
+            }
+            // An open lands at the tip first — the newest turn is the news —
+            // then a ?run= deep link may retake its own seat (beaconIntoView
+            // centers only what the landing left out of view).
+            if (scrollEnd) scrollToThreadEnd();
+            focusPendingThreadRun();
+        } catch (e) {
+            showError(`Failed to load follow-up thread: ${e.message}`);
+        }
+    }
+
+    function threadTip() {
+        // logs arrive created_at DESC, but compute explicitly (mirrors
+        // graph.js's threadOf(...).pop()): the newest row is the tip
+        if (!threadRows.length) return null;
+        return threadRows.reduce((tip, l) => l.created_at > tip.created_at ? l : tip, threadRows[0]);
+    }
+
+    function renderThreadMessages() {
+        const el = document.getElementById('thread-messages');
+        if (!el) return;
+        const snap = OpenLoopBubble.snapshotExpansion(el); // the 5s poll must not re-fold an open door
+        const rows = [...threadRows].sort((a, b) => a.created_at - b.created_at);
+        el.innerHTML = rows.length
+            ? rows.map(threadEntryHtml).join('')
+            : '<div class="summary-missing">No follow-up turns yet.</div>';
+        OpenLoopBubble.restoreExpansion(el, snap);
+        OpenLoopBubble.gateBubbles(el);
+        bindCopyButtons(el);
+        el.querySelectorAll('.summary-edit-btn').forEach(btn =>
+            btn.addEventListener('click', () => startThreadSummaryEdit(btn.dataset.runId)));
+        bindThreadDelete(el);
+        const meta = document.getElementById('thread-meta');
+        if (meta) meta.textContent = threadHeaderMeta(rows);
+    }
+
+    function threadHeaderMeta(rows) {
+        const tip = threadTip();
+        const turns = `${rows.length} turn${rows.length === 1 ? '' : 's'}`;
+        return tip ? `${turns} · ${threadRunMeta(tip)}` : turns;
+    }
+
+    function threadEntryHtml(l) {
+        return `<div class="run-log" data-run-id="${escHtml(l.id)}">` +
+            `<div class="run-log-meta"><span>${escHtml(l.id.slice(0, 8))} · ${escHtml(threadRunMeta(l))}</span>${threadDelBtn(l)}</div>` +
+            `<div class="detail-section prompt-section"><div class="detail-section-label prompt">PROMPT</div>` +
+            OpenLoopBubble.bubbleHtml('input', l.prompt) +
+            `</div>` +
+            threadResultSection(l) +
+            threadSummarySection(l) +
+            `</div>`;
+    }
+
+    function threadRunMeta(l) {
+        const took = l.took != null ? ` · took ${formatDuration(l.took)}` : '';
+        return `${l.status}${took} · ${ago(l.created_at)}`;
+    }
+
+    function threadResultSection(l) {
+        if (l.status === 'progress') {
+            return `<div><div class="detail-section-label running">RUNNING</div>` +
+                OpenLoopBubble.bubbleHtml('output', 'in progress…') + `</div>`;
+        }
+        const failed = l.status === 'failed';
+        const label = `<div class="detail-section-label result${failed ? ' error' : ''}">${failed ? 'ERROR' : 'RESULT'}</div>`;
+        return `<div>${label}${OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)')}</div>`;
+    }
+
+    function threadSummarySection(l) {
+        if (l.status === 'progress' || l.status === 'summarizing') return '';
+        return `<div class="run-summary-section" data-run-id="${escHtml(l.id)}">${threadSummaryInner(l)}</div>`;
+    }
+
+    function threadSummaryInner(l) {
+        const body = l.summary
+            ? OpenLoopBubble.bubbleHtml('summary', l.summary)
+            : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
+        return `<div class="summary-head">` +
+            `<div class="detail-section-label summary">SUMMARY</div>` +
+            `<span class="summary-actions">` +
+            `<button class="summary-edit-btn" data-run-id="${escHtml(l.id)}">${l.summary ? 'Edit' : 'Add'}</button>` +
+            `</span></div>${body}`;
+    }
+
+    // Mirrors graph.js's runSummaryEditHtml — same 7-line canvas, same
+    // self-describing label — extracted from startThreadSummaryEdit so the
+    // markup is assertable and the two pages stay symmetric.
+    function threadSummaryEditHtml(l) {
+        return `<div class="summary-head">` +
+            `<div class="detail-section-label summary">SUMMARY</div></div>` +
+            `<textarea id="thread-summary-input" rows="7" aria-label="Edit summary" placeholder="Write a summary to allow follow-ups…" spellcheck="false" autocomplete="off">${escHtml(l.summary || '')}</textarea>` +
+            `<button class="regen-submit" id="thread-summary-update" disabled>Update</button>`;
+    }
+
+    function startThreadSummaryEdit(runId) {
+        const l = threadRows.find(x => x.id === runId);
+        const section = document.querySelector(`.run-summary-section[data-run-id="${CSS.escape(runId)}"]`);
+        if (!l || !section) return;
+        threadSummaryEditing = true;
+        section.innerHTML = threadSummaryEditHtml(l);
+        bindThreadSummaryUpdate(l);
+        OpenLoopPanel.focusEditor(document.getElementById('thread-summary-input'), section);
+    }
+
+    function bindThreadSummaryUpdate(l) {
+        const input = document.getElementById('thread-summary-input');
+        const update = document.getElementById('thread-summary-update');
+        const dirty = () => {
+            const v = input.value.trim();
+            update.disabled = !(v && v !== (l.summary || ''));
+        };
+        input.addEventListener('input', dirty);
+        update.addEventListener('click', () => submitThreadSummary(l.id));
+        dirty();
+    }
+
+    async function submitThreadSummary(runId) {
+        const summary = document.getElementById('thread-summary-input').value.trim();
+        if (!summary) return;
+        threadSummaryEditing = false;
+        try {
+            await threadFetchJson(
+                `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(sessionParam)}/runs/${encodeURIComponent(runId)}`,
+                {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ summary })
+                }
+            );
+            refreshThread(false);
+        } catch (e) {
+            showError(`Failed to save summary: ${e.message}`);
+            refreshThread(false);
+        }
+    }
+
+    // Footer variants mirror graph.js's thread footer: empty → seed,
+    // progress/summarizing → wait, failed → retry, success w/o summary →
+    // hint, success + summary → composer.
+    function renderThreadFooter() {
+        const footer = document.getElementById('thread-footer');
+        if (!footer) return;
+        const tip = threadTip();
+        const key = threadFooterKeyOf(tip);
+        if (key === threadFooterKey) return; // preserve the composer draft
+        const draft = footerComposerDraft();
+        threadFooterKey = key;
+        footer.innerHTML = threadFooterHtml(tip);
+        bindThreadFooter();
+        restoreFooterDraft(draft);
+        // the dock is pinned — every state change is already in view; the
+        // old reveal() call died with the scrolling composer
+    }
+
+    function threadFooterKeyOf(tip) {
+        if (!threadRows.length) return 'empty';
+        return tip ? `${tip.id}:${tip.status}:${tip.summary ? 1 : 0}` : 'empty';
+    }
+
+    function threadFooterHtml(tip) {
+        if (!threadRows.length) {
+            return `<div class="run-followup-hint">Seed the original answer to start the follow-up thread.` +
+                `<button class="regen-submit run-seed" id="thread-seed-btn">Seed original answer</button></div>`;
+        }
+        if (!tip) return '';
+        if (tip.status === 'progress') {
+            return `<div class="run-followup-hint">Run in progress — the panel refreshes while it works.</div>`;
+        }
+        if (tip.status === 'summarizing') {
+            return `<div class="run-followup-hint">Summarizing the answer…</div>`;
+        }
+        if (tip.status === 'failed') {
+            return `<div class="run-followup-hint">This run failed — restart it to try again.` +
+                `<button class="regen-submit run-retry" id="thread-retry-btn">Retry</button></div>`;
+        }
+        if (!tip.summary) {
+            return `<div class="run-followup-hint">Write a summary above to continue this conversation.</div>`;
+        }
+        // The composer capsule: field + send circle in one row (the skin
+        // lives in panel.css). rows=3, not the editors' 7 — a pinned dock
+        // must not eat the stream; resize + the 40vh cap bound it.
+        return `<div class="run-composer">` +
+            `<textarea id="thread-followup-text" rows="3" aria-label="Continue conversation" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
+            `<button class="composer-send" id="thread-followup-send" aria-label="Send follow-up (⌘↵)" title="Send follow-up (⌘↵)" aria-keyshortcuts="Meta+Enter Control+Enter" disabled>${sendIcon()}</button>` +
+            `</div>`;
+    }
+
+    function footerComposerDraft() {
+        const el = document.getElementById('thread-followup-text');
+        return el ? el.value : null;
+    }
+
+    function restoreFooterDraft(draft) {
+        if (draft == null) return;
+        const el = document.getElementById('thread-followup-text');
+        if (!el) return;
+        el.value = draft;
+        const send = document.getElementById('thread-followup-send');
+        if (send) send.disabled = !draft.trim();
+    }
+
+    function bindThreadFooter() {
+        const seed = document.getElementById('thread-seed-btn');
+        if (seed) seed.addEventListener('click', submitThreadSeed);
+        const retry = document.getElementById('thread-retry-btn');
+        if (retry) retry.addEventListener('click', submitThreadRetry);
+        const send = document.getElementById('thread-followup-send');
+        const text = document.getElementById('thread-followup-text');
+        if (send && text) {
+            const sync = () => { send.disabled = !text.value.trim(); };
+            text.addEventListener('input', sync);
+            // One grammar with graph.html (panel.js) — the drift between the
+            // two hand-written keydowns is what caused graph's ⌘↵ bug. The
+            // blur is belt-and-braces here (loadThread has no focus gate),
+            // and matches the button path: focus leaves a sent field.
+            OpenLoopPanel.bindCmdEnterSubmit(text, submitFollowupTurn);
+            send.addEventListener('click', submitFollowupTurn);
+        }
+    }
+
+    async function submitThreadSeed() {
+        try {
+            await threadFetchJson(threadUrl('/seed'), { method: 'POST' });
+            refreshThread(true);
+        } catch (e) {
+            showError(`Failed to seed the original answer: ${e.message}`);
+        }
+    }
+
+    async function submitThreadRetry() {
+        const tip = threadTip();
+        if (!tip) return;
+        try {
+            await threadFetchJson(threadUrl(`/runs/${encodeURIComponent(tip.id)}/retry`), { method: 'POST' });
+            refreshThread(true); // a retry acts on the tip — land there (graph.js's retry does)
+        } catch (e) {
+            showError(`Failed to restart the run: ${e.message}`);
+        }
+    }
+
+    // — per-turn delete (the shared RUN contract, session-anchored) —
+    // `next` reparents to `deleted.parent` server-side; an emptied thread
+    // falls to the seed footer for free. Same Danger-zone grammar as the
+    // node page (quiet → armed 3s fuse via panel.js armedButton → splice
+    // beat → refresh). Copy is character-identical to graph.js's
+    // THREAD_DEL_COPY — pinned by both sanity suites.
+    const THREAD_DEL_COPY = {
+        rest: 'Delete this turn. Follow-ups move up to this run’s parent — nothing else changes.',
+        armed: 'Confirm — delete this turn',
+        busy: 'This turn is running — deletion unlocks when it finishes.',
+    };
+
+    function threadDelBtn(l) {
+        const busy = l.status === 'progress' || l.status === 'summarizing';
+        const title = busy ? THREAD_DEL_COPY.busy : THREAD_DEL_COPY.rest;
+        return `<button class="run-del-btn" data-run-id="${escHtml(l.id)}"${busy ? ' disabled' : ''}` +
+            ` aria-label="${escHtml(title)}" title="${escHtml(title)}">${trashIcon()}</button>`;
+    }
+
+    function bindThreadDelete(scope) {
+        scope.querySelectorAll('.run-del-btn:not(:disabled)').forEach(btn =>
+            OpenLoopPanel.armedButton(btn, THREAD_DEL_COPY.rest, THREAD_DEL_COPY.armed, commitThreadDelete));
+    }
+
+    function commitThreadDelete(btn) {
+        const runId = btn.dataset.runId;
+        btn.classList.add('deleting');
+        document.querySelectorAll('.run-del-btn').forEach(b => { b.disabled = true; });
+        delThreadRun(runId, threadFocusIndex(runId));
+    }
+
+    async function delThreadRun(runId, focusIndex) {
+        const beat = threadSpliceBeat(runId);
+        try {
+            const res = await fetch(threadUrl(`/runs/${encodeURIComponent(runId)}`), { method: 'DELETE' });
+            if (res.status !== 404 && !res.ok) throw await threadDeleteError(res);
+            await beat;
+            await refreshThreadNow(false);
+            focusThreadRowAt(focusIndex);
+        } catch (e) {
+            showError(e.message);
+            await refreshThreadNow(false);
+            focusThreadRowAt(focusIndex);
+        }
+    }
+
+    async function threadDeleteError(res) {
+        if (res.status === 409) return new Error('Still running — let the run finish, then delete.');
+        return new Error(`Failed to delete the turn: ${res.status} ${(await res.text()).slice(0, 140)}`);
+    }
+
+    // refreshThread's reset, awaitable — the focus handoff must land AFTER
+    // the re-render, not race it.
+    async function refreshThreadNow(scrollEnd) {
+        threadSummaryEditing = false;
+        threadJson = '';
+        threadFooterKey = null;
+        await loadThread(scrollEnd);
+    }
+
+    function threadSpliceBeat(runId) {
+        const row = document.querySelector(`.run-log[data-run-id="${CSS.escape(runId)}"]`);
+        if (!row || OpenLoopPanel.reducedMotion()) return Promise.resolve();
+        row.classList.add('run-del-dying');
+        return new Promise(done => setTimeout(done, 150));
+    }
+
+    // Keyboard handoff: focus sat ON the deleted button, so the refresh must
+    // not strand it at document top — land on the surviving row at the same
+    // index; an emptied thread lands on the dock's seed CTA instead.
+    function threadFocusIndex(runId) {
+        if (!document.activeElement || !document.activeElement.closest('.run-del-btn')) return -1;
+        const rows = [...document.querySelectorAll('#thread-messages .run-log')];
+        return Math.max(rows.findIndex(r => r.dataset.runId === runId), 0);
+    }
+
+    function focusThreadRowAt(index) {
+        if (index < 0) return;
+        const rows = document.querySelectorAll('#thread-messages .run-log');
+        if (!rows.length) return focusSeedButton();
+        const row = rows[Math.min(index, rows.length - 1)];
+        row.tabIndex = -1;
+        row.focus();
+    }
+
+    function focusSeedButton() {
+        const seed = document.getElementById('thread-seed-btn');
+        if (seed) seed.focus();
+    }
+
+    // Mirrors graph.js's trashIcon — the same 14px glyph the node delete uses.
+    function trashIcon() {
+        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
+            `<path d="M3 6h18"/><path d="M8 6V4h8v2"/>` +
+            `<path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`;
+    }
+
+    async function submitFollowupTurn() {
+        const text = document.getElementById('thread-followup-text');
+        const tip = threadTip();
+        if (!text || !text.value.trim() || !tip) return;
+        const prompt = text.value.trim();
+        try {
+            await threadFetchJson(threadUrl('/run'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt, parent_run_id: tip.id })
+            });
+            refreshThread(true);
+        } catch (e) {
+            showError(`Failed to continue the conversation: ${e.message}`);
+        }
+    }
+
+    // Open and send are the sanctioned scrolls: arriving at a thread glides
+    // the body to the newest turn, and so does sending one (instant under
+    // reduced motion). While merely reading + typing, nothing ever scrolls —
+    // that is the dock's contract. Mirrors graph.js's twin (a deep link may
+    // then retake its own seat — see loadThread's ordering note).
+    function scrollToThreadEnd() {
+        const body = document.querySelector('#detail-panel-inner .detail-panel-body');
+        if (!body) return;
+        const end = body.scrollHeight;
+        // Element.scrollTo is universal in browsers; the offline harness's
+        // jsdom may not ship it — scrollTop reaches the same end, instantly.
+        if (typeof body.scrollTo === 'function') body.scrollTo({ top: end, behavior: OpenLoopPanel.reducedMotion() ? 'auto' : 'smooth' });
+        else body.scrollTop = end;
+    }
+
+    // session_run deep links (?run=<id>): ring + center on first sight — the
+    // shared beacon (panel.js) centers the row only when the open's tip
+    // landing left it out of view. Unknown row (drift) → leave the thread
+    // alone, flag stays for the next poll.
+    function focusPendingThreadRun() {
+        if (!pendingThreadFocus) return;
+        const id = pendingThreadFocus;
+        const row = document.querySelector(`.run-log[data-run-id="${CSS.escape(id)}"]`);
+        if (!row) return; // row not in the thread (drift) — leave the thread alone
+        pendingThreadFocus = null;
+        OpenLoopPanel.beaconIntoView(row, document.querySelector('#detail-panel-inner .detail-panel-body'));
+    }
+
+    function ago(unixMs) {
+        const diff = Math.floor((Date.now() - unixMs) / 1000);
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+        return `${Math.floor(diff / 86400)}d ago`;
     }
 
     // ── Empty / Error states ──────────────────────────────────────────────────
@@ -555,16 +1079,11 @@
         return { tiers, avg };
     }
 
-    function renderBubble(cls, label, text, threshold = 300) {
-        const labelHtml = label ? `<span class="wl-bubble-label">${label}</span>` : '';
-        const content = text.length > threshold
-            ? `<div class="wl-bubble-text truncated">${escHtml(text)}</div><button class="wl-expand-btn">show more</button>`
-            : `<div class="wl-bubble-text">${escHtml(text)}</div>`;
-        return `<div class="wl-bubble ${cls}">` +
-            labelHtml + content +
-            `<button class="wl-bubble-copy">${copyIcon()}</button>` +
-            `</div>`;
-    }
+    // The bubble grammar (markup, the line gate, the door, expansion memory)
+    // lives in bubble.js, shared with graph.html — the char-gated
+    // renderBubble this file used to carry is gone, and with it the two
+    // per-open expand handlers that stacked a listener on #detail-panel
+    // every time the panel opened.
 
     function personIcon() {
         return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round">` +
@@ -611,6 +1130,10 @@
             `</svg>`;
     }
 
+    function sendIcon() {
+        return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
+    }
+
     function escHtml(str) {
         return String(str)
             .replace(/&/g, '&amp;')
@@ -627,6 +1150,12 @@
         checkRenderDetailHeader();
         checkRenderDetailBubbles();
         checkInnerPersonaFilter();
+        checkThreadTip();
+        checkThreadFooterStates();
+        checkThreadEditFields();
+        checkThreadDelete();
+        checkDeepLinkBeacon();
+        checkDockStructure();
         console.log('All sanity checks passed.');
     }
 
@@ -683,6 +1212,170 @@
         console.assert(filtered[0].personaId === 'Alice', 'filter: Alice');
         console.assert(filtered[1].personaId === 'Charlie', 'filter: Charlie');
         console.log('OK: innerPersonaFilter');
+    }
+
+    function checkThreadTip() {
+        const saved = threadRows;
+        threadRows = [
+            { id: 'r2', created_at: 30, status: 'success', summary: null },  // newest first (API order)
+            { id: 'r0', created_at: 10, status: 'success', summary: 's' },
+            { id: 'r1', created_at: 20, status: 'failed', summary: null },
+        ];
+        console.assert(threadTip()?.id === 'r2', 'threadTip: newest row wins regardless of order');
+        console.assert(threadFooterKeyOf(threadTip()) === 'r2:success:0', 'footerKey: id:status:summary shape');
+        threadRows = [];
+        console.assert(threadTip() === null, 'threadTip: empty thread → null');
+        console.assert(threadFooterKeyOf(threadTip()) === 'empty', 'footerKey: empty thread key');
+        threadRows = saved;
+        console.log('OK: threadTip');
+    }
+
+    function checkThreadFooterStates() {
+        const mk = (status, summary) => {
+            const saved = threadRows;
+            threadRows = [{ id: 'r1', created_at: 1, status, summary, output: 'x' }];
+            const html = threadFooterHtml(threadTip());
+            threadRows = saved;
+            return html;
+        };
+        console.assert(mk('progress').includes('Run in progress'), 'footer: progress waits');
+        console.assert(mk('summarizing').includes('Summarizing'), 'footer: summarizing waits');
+        const failed = mk('failed');
+        console.assert(failed.includes('Retry') && failed.includes('failed'), 'footer: failed retries');
+        console.assert(mk('success').includes('Write a summary'), 'footer: success w/o summary hints');
+        console.assert(mk('success', 'sum').includes('thread-followup-text'), 'footer: success + summary composes');
+        const savedRows = threadRows, savedKey = threadFooterKey;
+        threadRows = [];
+        console.assert(threadFooterHtml(null).includes('Seed original answer'), 'footer: empty thread seeds');
+        threadRows = savedRows;
+        threadFooterKey = savedKey;
+        console.log('OK: threadFooterStates');
+    }
+
+    // Text→field conversions open a 7-line canvas — one grammar with
+    // graph.html (see its checkEditFieldGrammar). The dock composer is NOT
+    // one of them: it is a compact rows=3 capsule pinned at the panel bottom
+    // (a 7-row canvas would eat the dock it lives in). The composer branch
+    // needs a non-empty threadRows or threadFooterHtml takes the seed branch.
+    function checkThreadEditFields() {
+        const edit = threadSummaryEditHtml({ id: 'r1', summary: null });
+        console.assert(edit.includes('rows="7"'), 'editFields: thread summary 7 rows');
+        console.assert(edit.includes('aria-label="Edit summary"'), 'editFields: thread summary self-describes');
+        console.assert(edit.includes('Write a summary to allow follow-ups'), 'editFields: empty Add teaches');
+        const saved = threadRows;
+        threadRows = [{ id: 'r1', created_at: 1, status: 'success', summary: 's' }];
+        const composer = threadFooterHtml(threadTip());
+        threadRows = saved;
+        console.assert(composer.includes('rows="3"'), 'editFields: dock composer stays compact rows=3');
+        console.assert(composer.includes('aria-label="Continue conversation"'), 'editFields: composer self-describes');
+        console.assert(composer.includes('composer-send'), 'editFields: composer sends via the icon circle');
+        console.log('OK: thread edit fields (7-row editors, 3-row dock composer)');
+    }
+
+    // Per-turn delete: a quiet icon in every thread row's meta, disabled
+    // while the turn is in flight, copy character-identical to graph.js's
+    // THREAD_DEL_COPY — the cross-page single source this check enforces.
+    // Deleting the last row falls to the seed footer (already pinned by
+    // checkThreadFooterStates).
+    function checkThreadDelete() {
+        const ok = { id: 'sr1', root_run_id: 'sr1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o' };
+        const html = threadEntryHtml(ok);
+        console.assert(html.includes('run-del-btn" data-run-id="sr1"'), 'threadDel: every turn row carries the delete button');
+        console.assert(html.includes(`title="${escHtml(THREAD_DEL_COPY.rest)}"`), 'threadDel: rest title teaches the splice');
+        console.assert(html.indexOf('<span>') < html.indexOf('run-del-btn'), 'threadDel: caption leads, button follows it inline');
+        for (const status of ['progress', 'summarizing']) {
+            const busy = threadEntryHtml({ ...ok, id: 'sr9', status });
+            console.assert(busy.includes('disabled') && busy.includes(`title="${escHtml(THREAD_DEL_COPY.busy)}"`),
+                `threadDel: ${status} renders disabled with the busy title`);
+        }
+        console.assert(THREAD_DEL_COPY.armed === 'Confirm — delete this turn', 'threadDel: armed copy pinned');
+        console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
+            'threadDel: teaching hint pinned');
+        console.log('OK: per-turn delete markup');
+    }
+
+    // ?run= deep link: consumed on first sight, ringed, and centered only
+    // when the view doesn't already show it — the shared helper owns that
+    // geometry (panel.js pins it); this pins the consumption + handoff. The
+    // fold half needs a layout engine — jsdom's zero rects read everything
+    // as in-view, so skip, don't fake (the checkDockStructure convention).
+    function checkDeepLinkBeacon() {
+        const inner = document.getElementById('detail-panel-inner');
+        const savedRows = threadRows;
+        inner.innerHTML = threadShellHtml();
+        threadRows = [{ id: 'r1', created_at: 1, status: 'success', took: 1, prompt: 'p', output: 'o', summary: 's' }];
+        renderThreadMessages();
+        pendingThreadFocus = 'r1';
+        const row = inner.querySelector('.run-log[data-run-id="r1"]');
+        let centered = 0;
+        row.scrollIntoView = () => { centered++; };
+        focusPendingThreadRun();
+        console.assert(pendingThreadFocus === null, 'deepLink: consumed on first sight');
+        console.assert(row.classList.contains('beacon'), 'deepLink: the arriving row rings');
+        if (!OpenLoopBubble.layoutWorks()) {
+            console.log('deepLink: center check skipped — no layout engine (jsdom)');
+        } else {
+            const body = inner.querySelector('.detail-panel-body');
+            const spacer = document.createElement('div');
+            spacer.style.height = '4000px';
+            body.insertBefore(spacer, row); // the row sinks below the fold
+            pendingThreadFocus = 'r1';
+            focusPendingThreadRun();
+            console.assert(centered === 1, 'deepLink: an off-view row centers itself — once');
+            spacer.remove();
+        }
+        threadRows = savedRows;
+        closeDetailPanel();
+        console.log('OK: deep-link beacon');
+    }
+
+    // ── The dock (pinned panel footer) — mirrors graph.js's footer checks ───
+    // Same triad contract: header → scroll body (the only scroller) → dock.
+    // Renders the shell hermetically (no network), then proves structure,
+    // immovability under body scroll, fade suppression and the composer cap.
+    // The footer needs a non-empty threadRows or threadFooterHtml takes the
+    // seed branch instead of the composer (same setup as checkThreadEditFields).
+    function checkDockStructure() {
+        const inner = document.getElementById('detail-panel-inner');
+        inner.innerHTML = threadShellHtml();
+        const savedRows = threadRows;
+        threadRows = [{ id: 'r1', created_at: 1, status: 'success', summary: 's' }];
+        document.getElementById('thread-footer').innerHTML = threadFooterHtml(threadTip());
+        threadRows = savedRows;
+        const footer = inner.querySelector('.detail-panel-footer');
+        const body = inner.querySelector('.detail-panel-body');
+        console.assert(footer, 'dock: the shell renders the footer');
+        console.assert(footer.parentElement === inner, 'dock: direct child of #detail-panel-inner');
+        console.assert(footer.previousElementSibling === body, 'dock: flex sibling AFTER the scroll body');
+        const text = document.getElementById('thread-followup-text');
+        console.assert(text && text.closest('.detail-panel-footer') === footer, 'dock: the composer lives in the dock');
+        const spacer = document.createElement('div');
+        spacer.style.height = '4000px';
+        body.appendChild(spacer); // guarantee the body CAN scroll — else immovability is vacuous
+        const top = footer.getBoundingClientRect().top;
+        body.scrollTop = 60;
+        console.assert(body.scrollTop === 60, 'dock: precondition — the body actually scrolled');
+        console.assert(Math.abs(footer.getBoundingClientRect().top - top) < 0.5, 'dock: footer top invariant under body scroll');
+        body.scrollTop = 0;
+        spacer.remove();
+        // Strict in every browser; engines without pseudo-element computed
+        // styles (jsdom in the offline harness) return the ELEMENT's style —
+        // probe with a sentinel and skip the fade assert rather than fake it.
+        const probe = document.createElement('div');
+        const probeStyle = document.createElement('style');
+        probe.id = 'pseudo-probe';
+        probeStyle.textContent = '#pseudo-probe::after { display: table; }';
+        document.head.appendChild(probeStyle);
+        document.body.appendChild(probe);
+        const pseudoWork = getComputedStyle(probe, '::after').display === 'table';
+        probe.remove();
+        probeStyle.remove();
+        console.assert(!pseudoWork || getComputedStyle(body, '::after').display === 'none',
+            'dock: bottom fade suppressed while the dock exists');
+        const cap = parseFloat(getComputedStyle(text).maxHeight);
+        console.assert(cap > 0 && cap <= window.innerHeight * 0.45, 'dock: composer max-height ≤ 45% of the viewport');
+        closeDetailPanel();
+        console.log('OK: dock structure, immovable, fade suppressed, composer capped');
     }
 
     // ── Boot ──────────────────────────────────────────────────────────────────

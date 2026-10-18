@@ -1,0 +1,21 @@
+{
+  "id" : "802C8652-A81B-4086-A5C4-8FF2EE47C551",
+  "parent_id" : "94BBDC67-FCAF-4D6C-B64E-C6B4AF2B5642",
+  "created_at" : 813405712.882092,
+  "agent" : "cc_docker-z",
+  "took" : 34,
+  "completed_at" : 813405747.000409,
+  "name" : "Web Search MCPs overview",
+  "summary" : "Those are all web-search related MCPs needed to find & read up-to-date information from the web.",
+  "prompt" : "what are popular MCPs for web search & content discovery?",
+  "status" : "success",
+  "active" : true,
+  "personas" : [
+  "isolated_run",
+  "designer",
+  "architect"
+],
+  "mcp" : null,
+  "mcp_requires_auth" : false,
+  "output" : "Here's a rundown of the most popular MCP servers for web search & content discovery, grouped by what they're good at:\n\n## 🔍 General web search\n- **Brave Search MCP** — one of the most widely used; independent index, good for general queries and finding URLs; free tier available\n- **Tavily MCP** — search API built specifically for LLM/agent use; returns clean, LLM-ready results and does basic extraction; popular for RAG-style research\n- **Perplexity (Sonar) MCP** — answer-engine style: search + synthesized answers with citations rather than raw links\n- **You.com MCP** — web search + conversational research orientation\n- **Parallel AI / TinyFish** — newer entrants frequently cited in 2026 agent-search comparisons\n- **Kagi / DuckDuckGo MCPs** — community servers wrapping privacy-focused engines\n\n## 🧠 Semantic / content discovery\n- **Exa MCP** — neural/semantic search; standout for \"find pages *similar* to this URL,\" topic exploration, and research-style discovery rather than keyword matching\n\n## 🌐 Crawling, scraping & reading (fetch side of discovery)\n- **Firecrawl MCP** — very popular for turning entire sites into clean LLM-friendly markdown; crawl, scrape, structured extraction\n- **Fetch MCP (Anthropic reference server)** — simple URL → text/markdown fetch; the baseline most people start with\n- **Reader-style MCPs (e.g., Jina Reader, webReader)** — fetch any URL and convert to model-friendly markdown/text, with caching/image/link options\n\n## 🗂️ Discovery over specific ecosystems\n- **GitHub MCP** — search/discover code and repos\n- **Notion, Linear, Slack MCPs** — content discovery inside your own workspace\n- **DuckDuckGo + searxng community MCPs** — free, self-hostable search options\n\n## ⭐ Typical stack pattern\nMost agent setups pair **two tools**: a *search* MCP (Brave/Tavily/Exa) to find URLs + a *reader/crawler* MCP (Firecrawl/Fetch/Reader) to pull clean content from those URLs.\n\n---\n\n**Relevant to this session** (per your context file): you already have that pattern wired up —\n- **web-search-prime** (`web_search_prime`) → your general web search\n- **web-reader** (`webReader`) → URL → markdown fetching\n- **DevBrain** (`retrieve_knowledge` / `read_full_article`) → dev-focused knowledge lookup + full-article reads\n\nSo for most queries you're already covered; adding something like **Exa** (semantic/similarity search) or **Firecrawl** (site-wide crawling) would be the main upgrade path if you need deeper discovery.\n"
+}

@@ -97,8 +97,27 @@ public struct LogManager {
         );
         """)
 
+        try db.execute(notificationKindsDdl)
+
         try migrateLegacy(on: db)
     }
+
+    /// Persisted kind discriminator for graph run-log rows, written by the
+    /// producer at run-log insert time. `graph_run_logs.node_id` also holds
+    /// workflow session UUIDs (session follow-up threads), and the kind lives
+    /// with the notification domain — not on, or inferred from, the run log.
+    /// Absence of a marker means "node_run": every node run and every
+    /// pre-session-era row stays marker-less.
+    /// GraphStore.createRunLogTables creates this table too (same logs.db),
+    /// so the transactional session insert never races a fresh instance.
+    public static let notificationKindsDdl = """
+    CREATE TABLE IF NOT EXISTS notification_kinds (
+        run_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        session TEXT,
+        workflow_id TEXT
+    );
+    """
 
     private static func migrateLegacy(on db: Connection) throws {
         try? db.run("ALTER TABLE logs ADD COLUMN session TEXT;")
@@ -504,6 +523,31 @@ public struct LogManager {
         }
     }
 
+    /// The single `run_ends` row for a workflow session (INSERT OR REPLACE
+    /// keeps one per session) — the success gate for session follow-ups.
+    public static func fetchRunEnd(session: String, at instancePath: String) throws -> RunEnd? {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let rows = try db.prepare(
+            """
+            SELECT session, workflow_id, success, took, started_at, ended_at
+            FROM run_ends WHERE session = ? LIMIT 1;
+            """,
+            session
+        )
+        return rows.compactMap { row in
+            guard let session = row[0] as? String,
+                  let workflowId = row[1] as? String else { return nil }
+            return RunEnd(
+                session: session,
+                workflowId: workflowId,
+                success: (row[2] as? Int64 ?? 0) != 0,
+                took: Int(row[3] as? Int64 ?? 0),
+                startedAt: row[4] as? Double ?? 0,
+                endedAt: row[5] as? Double ?? 0
+            )
+        }.first
+    }
+
     public static func fetchFirstAsk(session: String, at instancePath: String) throws -> String? {
         let db = try getConnection(try logsDbPath(at: instancePath))
         let rows = try db.prepare(
@@ -537,6 +581,29 @@ public struct LogManager {
         return Set(rows.compactMap { $0[0] as? String })
     }
 
+    /// Every persisted run-kind marker, keyed by run id. Only session rows
+    /// carry markers; callers treat a missing key as "node_run".
+    public static func fetchNotificationKinds(
+        at instancePath: String
+    ) throws -> [String: NotificationKindMarker] {
+        let db = try getConnection(try logsDbPath(at: instancePath))
+        let rows = try db.prepare(
+            "SELECT run_id, kind, session, workflow_id FROM notification_kinds;"
+        )
+        var markers: [String: NotificationKindMarker] = [:]
+        for row in rows {
+            guard let runId = row[0] as? String,
+                  let kind = row[1] as? String else { continue }
+            markers[runId] = NotificationKindMarker(
+                runId: runId,
+                kind: kind,
+                session: row[2] as? String,
+                workflowId: row[3] as? String
+            )
+        }
+        return markers
+    }
+
     public static func markAllNotificationsRead(at instancePath: String) throws {
         let db = try getConnection(try logsDbPath(at: instancePath))
         let now = Date().timeIntervalSinceReferenceDate
@@ -544,10 +611,14 @@ public struct LogManager {
             "INSERT OR REPLACE INTO notification_reads (kind, ref_id, read_at) " +
             "SELECT 'workflow', session, ? FROM run_ends;", now
         )
+        // Every terminal graph run log with its persisted kind marker when
+        // one exists — session follow-ups must read back as 'session_run',
+        // not 'node_run' — while marker-less rows stay 'node_run'.
         try? db.run(
             "INSERT OR REPLACE INTO notification_reads (kind, ref_id, read_at) " +
-            "SELECT 'node_run', id, ? FROM graph_run_logs " +
-            "WHERE completed_at IS NOT NULL AND status IN ('success', 'failed');", now
+            "SELECT COALESCE(k.kind, 'node_run'), g.id, ? " +
+            "FROM graph_run_logs g LEFT JOIN notification_kinds k ON k.run_id = g.id " +
+            "WHERE g.completed_at IS NOT NULL AND g.status IN ('success', 'failed');", now
         )
     }
 

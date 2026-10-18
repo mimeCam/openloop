@@ -1,6 +1,12 @@
 /* panel.css — the detail panel: one object in two rooms.
    Shared skin + physics for graph.html and workflow-log.html.
    Desktop: resizable sidebar docked right. <=768px: full-width sheet.
+   The panel inner is a triad: header (fixed) → body (the ONLY scroll
+   container) → footer, a.k.a. the dock (fixed, optional). The dock is
+   JS-injected by the thread views only (graph.js threadViewHtml /
+   workflow-log.js threadShellHtml) — never static in either page's HTML —
+   and :empty keeps it invisible anywhere it isn't emitted, so node/persona
+   views keep their full-height scroll body and its bottom fade.
    Pages supply: --panel-top (their toolbar/chain offset) and color tokens.
    Link this BEFORE the page's own <style> — equal specificity, page wins. */
 
@@ -119,6 +125,174 @@ body.panel-resizing #graph-canvas { transition: none; }
     pointer-events: none;
 }
 
+/* ── The dock: the panel's bottom chrome, the header's mirrored bookend.
+   A flex sibling AFTER the scroll body — never absolute, never sticky,
+   no geometry math: the body flexes, the dock stays put, so a long thread
+   can be read while the next follow-up is written in the same glance.
+   JS-injected by the thread views only (see the file header).
+   Known v1 limitation: iOS's virtual keyboard can cover a position:fixed
+   panel's dock (visualViewport shrink) — deferred until a device complains. */
+.detail-panel-footer {
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    box-shadow: 0 -8px 24px rgba(0,0,0,0.35); /* the shelf: content slides under the dock's edge */
+    padding: 14px 16px;
+    position: relative; /* anchors the accent bar */
+    transition: border-top-color 0.15s ease;
+}
+.detail-panel-footer:focus-within { border-top-color: rgba(52,199,89,0.25); } /* the listening cue */
+.detail-panel-footer:empty,
+.detail-panel-footer:has(> #thread-footer:empty) { display: none; } /* no conversation, no dock, no gap */
+
+/* The dock is the terminus — suppress the body's bottom fade wherever a
+   footer exists: fade + dock shadow would stack two depth devices, and the
+   fade's solid #16181f end fights workflow-log's lighter --bg-card. */
+#detail-panel-inner:has(.detail-panel-footer) .detail-panel-body::after { display: none; }
+
+/* ── The dock's furniture: follow-up hint + composer capsule.
+   One skin, one home — the per-page copies were deleted from both HTML
+   files when the dock landed. Separation from the stream is the dock's
+   border-top, not the composer's own. */
+.run-followup-hint {
+    font-size: 11px;
+    color: var(--text-muted); /* instructional copy clears 4.5:1 — never --text-faint */
+}
+.run-followup-hint .run-retry,
+.run-followup-hint .run-seed { margin-top: 10px; display: inline-block; }
+
+/* The capsule: field + send circle in one row, one rounded container —
+   the universal chat grammar, so the dock reads as a conversation, not a
+   form. The capsule IS the field: the textarea is transparent and
+   borderless inside it. */
+.run-composer {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 10px;
+    padding: 4px 4px 4px 12px;
+    transition: border-color 0.15s ease;
+}
+.run-composer:focus-within { border-color: rgba(52,199,89,0.5); }
+.run-composer textarea {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 8px 0;
+    resize: vertical;
+    max-height: 40vh; /* the stream always keeps at least half the panel */
+    overflow-y: auto;
+}
+.run-composer textarea:focus { outline: none; }
+
+/* Send: a circular icon button — quiet until there is something to send,
+   then solid green with a dark glyph (≈7.7:1; a white glyph would fail
+   the 3:1 UI floor on this green). */
+.composer-send {
+    flex-shrink: 0;
+    position: relative; /* anchors the mobile inset hit area */
+    width: 36px; height: 36px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.35);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.composer-send:not(:disabled) { background: var(--accent-green); color: #0f1117; }
+.composer-send:not(:disabled):hover { filter: brightness(1.12); }
+.composer-send:disabled { cursor: default; }
+.composer-send:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+
+/* ── The per-turn delete button (thread rows, both pages' thread views).
+   One skin, one home: markup is 6 lines per page, behavior lives in
+   panel.js's armedButton, this is the whole look. Danger is calm until
+   armed — quiet chrome at rest (the same whisper as every meta-row
+   control), red arrives only as intent (hover), then the armed fill for
+   the 3s confirm window. ::before carries the armed fuse bar; ::after
+   stays free for the mobile inset hit area. Red tokens fall back so a
+   page that never defined the trio still renders (deep = white text at
+   4.5:1, matching graph.html's Danger-zone fill). */
+.run-del-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px; height: 24px;
+    /* No margin-left:auto: the bin rides INLINE, right after the caption
+       (the page's flex .run-log-meta + its gap do the spacing). Pinning to
+       the right edge is the post-item focus row's job alone
+       (.run-log-focus-row, flex-end) — headers keep controls next to text. */
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0;
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.run-del-btn:hover:not(:disabled):not(.armed) {
+    background: rgba(255,69,58,0.10);
+    border-color: rgba(255,69,58,0.35);
+    color: var(--accent-red, #ff453a);
+}
+.run-del-btn:focus-visible { outline: 2px solid var(--accent-red, #ff453a); outline-offset: 2px; }
+.run-del-btn:disabled { opacity: 0.35; cursor: default; }
+.run-del-btn.armed {
+    background: var(--accent-red-deep, #d70015);
+    border-color: rgba(255,69,58,0.80);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(255,69,58,0.35), 0 0 0 1px rgba(255,69,58,0.55);
+    animation: run-del-arm 0.5s ease; /* the small-button "are you sure?" — see below */
+}
+/* The arm shake: the node delete swaps its LABEL when armed ("Confirm —
+   delete N nodes"); a 24px bin has no room for words, so the button itself
+   speaks — one short head-shake at arm time says "not yet — tap again to
+   mean it". Runs once, ~0.5s: attention, not alarm; after it settles, the
+   red fill holds the state and the fuse below counts it down. */
+@keyframes run-del-arm {
+    0%, 100% { transform: translateX(0) rotate(0); }
+    15% { transform: translateX(-2px) rotate(-10deg); }
+    30% { transform: translateX(2px) rotate(10deg); }
+    45% { transform: translateX(-1.5px) rotate(-7deg); }
+    60% { transform: translateX(1.5px) rotate(7deg); }
+    75% { transform: translateX(-1px) rotate(-4deg); }
+    90% { transform: translateX(1px) rotate(4deg); }
+}
+/* The fuse: the 3s disarm window shrinking to zero, the same grammar as
+   the node delete's countdown bar. */
+.run-del-btn.armed::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 2px;
+    background: rgba(255,255,255,0.40);
+    transform-origin: left;
+    animation: run-del-fuse 3s linear forwards;
+}
+@keyframes run-del-fuse { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.run-del-btn.deleting { animation: run-del-pulse 1.2s ease-in-out infinite; }
+@keyframes run-del-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* The splice beat: the dying row gets one 150ms exhale (fade + 2px lift)
+   before the re-render lands — the turn reads as lifted off the thread,
+   not snapped. JS drives the class; reduced motion swaps instantly. */
+.run-log.run-del-dying {
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
 .detail-section-label {
     font-size: 9px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.6px;
@@ -152,18 +326,26 @@ body.panel-resizing #graph-canvas { transition: none; }
     display: block; margin-bottom: 6px;
     color: var(--text-muted);
 }
+/* The one fold, spoken once: a text that paints in FREE_LINES (10, bubble.js)
+   lines or fewer is shown in full; one that paints in more folds to
+   CLAMP_LINES (3) here and offers the door below. Keep the clamp count in
+   sync with bubble.js. The mask fades only the tail of the last line —
+   ink sinks, it never vanishes mid-paragraph (78% on a 3-line fold ≈ the
+   final two-thirds of line 3; the old 60% was drawn for an 8-line fold). */
 .wl-bubble-text {
     font-size: 13px; line-height: 1.65;
     color: var(--text-primary);
     white-space: pre-wrap; word-break: break-word;
+    -webkit-transition: -webkit-mask-image 0.15s ease; /* the reveal: the fold's shadow dissolves */
+    transition: mask-image 0.15s ease, -webkit-mask-image 0.15s ease;
 }
 .wl-bubble-text.truncated {
     display: -webkit-box;
-    -webkit-line-clamp: 8;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
-    -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
-    mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%);
 }
 .wl-bubble-text.expanded {
     -webkit-line-clamp: unset;
@@ -185,6 +367,10 @@ body.panel-resizing #graph-canvas { transition: none; }
     color: var(--text-primary);
     text-decoration: underline;
 }
+/* The door ships hidden in free markup (bubble.js) — author display rules
+   must never beat that: the hidden door is NOT a fold. */
+.wl-expand-btn[hidden] { display: none !important; }
+.wl-expand-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
 .wl-bubble-copy {
     position: absolute; top: 8px; right: 8px;
     display: none;
@@ -223,12 +409,32 @@ body.panel-resizing #graph-canvas { transition: none; }
         min-height: 44px; padding: 12px 0;
     }
 
-    /* Safe-area inset in case the page ships as a home-screen PWA */
+    /* Safe-area inset in case the page ships as a home-screen PWA.
+       The body keeps its rule for footer-less views; the dock owns it
+       whenever it exists — the composer sits above the home indicator. */
     .detail-panel-body { padding-bottom: max(32px, env(safe-area-inset-bottom)); }
+    .detail-panel-footer { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+
+    /* Send circle: 40px visual, 44px hit via the inset ::after (the page's
+       inset-hit convention). The composer's 16px font rule stays in each
+       page's own mobile diet — it rides with that page's other inputs. */
+    .composer-send { width: 40px; height: 40px; }
+    .composer-send::after { content: ''; position: absolute; inset: -2px; border-radius: 50%; }
+
+    /* Per-turn delete: 32px visual, 44px hit via the inset ::after — the
+       meta-row inset-hit convention (.run-focus-btn on graph.html). */
+    .run-del-btn { width: 32px; height: 32px; }
+    .run-del-btn::after { content: ''; position: absolute; inset: -6px; }
 }
 
 /* Motion stays in the family — but respect prefers-reduced-motion,
    matching the JS scrollIntoView behavior */
 @media (prefers-reduced-motion: reduce) {
     #detail-panel, #graph-canvas { transition: none; }
+    .detail-panel-footer, .run-composer, .composer-send { transition: none; }
+    .wl-bubble-text { transition: none; } /* the reveal's mask dissolve is instant */
+    .run-del-btn.armed { animation: none; } /* no head-shake: the red fill alone carries "armed" */
+    .run-del-btn.armed::before { animation: none; background: rgba(255,255,255,0.25); } /* armed reads as state, not countdown */
+    .run-del-btn.deleting { animation: none; }
+    .run-log.run-del-dying { transition: none; } /* the splice beat is instant */
 }

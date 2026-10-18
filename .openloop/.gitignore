@@ -1,3 +1,5 @@
 *.log
 logs*
 state.json5
+*.tmp
+secrets.json5

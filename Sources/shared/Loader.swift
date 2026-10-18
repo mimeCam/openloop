@@ -153,7 +153,9 @@ private func loadAtPath<T: Decodable>(_ fp: FilePath) async throws -> T {
     }
 }
 
-private let dec: JSONDecoder = {
+// Internal (module-wide) so NodeStore reuses the exact same codecs as
+// workflows/personas/state — one json5 dialect everywhere.
+let dec: JSONDecoder = {
     let dec = JSONDecoder()
 
     dec.keyDecodingStrategy = .convertFromSnakeCase
@@ -162,7 +164,7 @@ private let dec: JSONDecoder = {
     return dec
 }()
 
-private let enc: JSONEncoder = {
+let enc: JSONEncoder = {
     let enc = JSONEncoder()
     enc.keyEncodingStrategy = .convertToSnakeCase
     enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]

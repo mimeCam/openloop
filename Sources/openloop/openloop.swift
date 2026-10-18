@@ -68,6 +68,8 @@ private let dotGitignoreContent = """
 *.log
 logs*
 state.json5
+*.tmp
+secrets.json5
 """
 
 private func prepareFolders() {
@@ -89,6 +91,12 @@ private func prepareFolders() {
             contents: Data(dotGitignoreContent.utf8)
         )
         assert(createdGitignore)
+    } else {
+        // Older instances: patch in `*.tmp` (node-store atomic-write debris)
+        // and `secrets.json5` (per-machine MCP auth keys — must never be
+        // committed) without touching user-added lines.
+        ensureGitignoreLine("*.tmp", at: gitignorePath)
+        ensureGitignoreLine("secrets.json5", at: gitignorePath)
     }
 
     let created11 = PathIO.createDirectoryIfNotExists(
@@ -107,6 +115,10 @@ private func prepareFolders() {
         atPath: curDirOpenloop.appending("bin").string
     )
     assert(created14)
+    let created15 = PathIO.createDirectoryIfNotExists(
+        atPath: curDirOpenloop.appending("nodes").string
+    )
+    assert(created15)
 
     // Global (Paths.share) data folder support disabled — re-enable by uncommenting.
     // let shareOpenloop = Paths.share.appending("openloop")
@@ -129,6 +141,15 @@ private func prepareFolders() {
 }
 
 private let loopIntervalSecs: UInt64 = 60
+
+/// Append `line` to an existing `.openloop/.gitignore` if it is not there
+/// yet. Read-check-append — never rewrites content the user added.
+private func ensureGitignoreLine(_ line: String, at path: FilePath) {
+    guard let text = try? String(contentsOfFile: path.string, encoding: .utf8) else { return }
+    guard !text.split(separator: "\n").map(String.init).contains(line) else { return }
+    let patched = text.hasSuffix("\n") ? text + line + "\n" : text + "\n" + line + "\n"
+    try? patched.write(toFile: path.string, atomically: true, encoding: .utf8)
+}
 
 private func detectDuplicateInstance() async throws -> Bool {
     guard let existing = try await FileLoader.loadInstanceState(at: Paths.curDir.string) else {

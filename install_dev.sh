@@ -172,11 +172,13 @@ fi
 
 
 echo ""
-echo "Checking oc_docker:"
-openloop_oc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
+# echo "Checking oc_docker:"
+# openloop_oc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
 if [ -d "$HOME/.claude" ]; then
     echo "Checking cc_docker (subscription):"
     openloop_cc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
+else
+    echo "Not checking cc_docker because ~/.claude not found"
 fi
 #
 # vibe disabled - it does not have a convinient way to specify system_prompt + grant permissions to use all installed mcp tools.

@@ -9,6 +9,8 @@ import SQLite
 /// One notification derived from an instance's own logs.db:
 /// kind "workflow" → refId is the run session (run_ends row)
 /// kind "node_run" → refId is the graph_run_logs row id
+/// kind "session_run" → refId is the graph_run_logs row id of a workflow
+/// follow-up turn; nodeId holds the workflow session UUID
 public struct NotificationItem: Sendable, Equatable {
 
     public let kind: String
@@ -34,6 +36,26 @@ public struct NotificationItem: Sendable, Equatable {
         self.took = took
         self.endedAt = endedAt
         self.read = read
+    }
+}
+
+/// Persisted kind discriminator for a graph run-log row (notification_kinds
+/// table in logs.db), written transactionally by the producer at run-log
+/// insert time — GraphStore.insertSessionRunLog. `graph_run_logs.node_id` is
+/// a single overloaded anchor column (node id or workflow session UUID), so
+/// the kind cannot be inferred from the id later; the marker is the source of
+/// truth. Absence of a marker means "node_run".
+public struct NotificationKindMarker: Sendable, Equatable {
+    public let runId: String
+    public let kind: String
+    public let session: String?
+    public let workflowId: String?
+
+    public init(runId: String, kind: String, session: String?, workflowId: String?) {
+        self.runId = runId
+        self.kind = kind
+        self.session = session
+        self.workflowId = workflowId
     }
 }
 
@@ -84,7 +106,8 @@ public enum Notifications {
     static func readSets(at instancePath: String) -> [String: Set<String>] {
         [
             "workflow": (try? LogManager.fetchReadNotificationRefs(kind: "workflow", at: instancePath)) ?? [],
-            "node_run": (try? LogManager.fetchReadNotificationRefs(kind: "node_run", at: instancePath)) ?? []
+            "node_run": (try? LogManager.fetchReadNotificationRefs(kind: "node_run", at: instancePath)) ?? [],
+            "session_run": (try? LogManager.fetchReadNotificationRefs(kind: "session_run", at: instancePath)) ?? []
         ]
     }
 
@@ -115,9 +138,16 @@ public enum Notifications {
 
     static func nodeRunItems(at instancePath: String) throws -> [NotificationItem] {
         let logs = try? GraphStore.fetchTerminalRunLogs(since: 0, at: instancePath)
+        guard (logs ?? []).notEmpty else { return [] }
+        // Kind lives with the notification, not the run log: session-anchored
+        // rows (workflow follow-ups) carry a persisted marker written at
+        // insert time; marker-less rows are node runs.
+        let markers = (try? LogManager.fetchNotificationKinds(at: instancePath)) ?? [:]
         return (logs ?? []).map { log in
-            NotificationItem(
-                kind: "node_run", refId: log.id, workflowId: nil,
+            let marker = markers[log.id]
+            return NotificationItem(
+                kind: marker?.kind ?? "node_run", refId: log.id,
+                workflowId: marker?.workflowId,
                 nodeId: log.nodeId, prompt: log.prompt,
                 success: log.status == "success", took: log.took,
                 endedAt: log.completedAt ?? log.createdAt, read: false

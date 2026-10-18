@@ -17,6 +17,8 @@
     let focusedRunId = null;
     let footerKey = null;
     let pendingRowFocus = null;
+    let pendingRunFocus = null; // run to open once logs land — a ?run= deep link OR a freshly scheduled run; consumed in loadLogs
+    let staleDeepRun = false;   // a pending run id that no longer exists → one-line notice
     let runSummaryEditing = false;
     let countdownInterval = null;
     let countdownValue = 5;
@@ -156,6 +158,18 @@
         openPanel(n);
     }
 
+    // A wider panel can free a folded text; a narrower one folds a free
+    // one; a late webfont (or a rotation) can re-wrap either way. Re-gate
+    // every bubble surface once geometry settles. OPEN stays OPEN — the
+    // gate never re-folds an expanded text, and a freed text's door simply
+    // dissolves, no announcement.
+    function regateBubbles() {
+        if (viewMode === 'birds') return;
+        OpenLoopBubble.gateBubbles($('detail-panel-inner'));
+        OpenLoopBubble.gateBubbles($('graph-grid'));
+        drawEdges(); // a fold↔free flip changes card heights
+    }
+
     function updateCountdown() {
         const el = $('refreshCountdown');
         if (!el) return;
@@ -248,7 +262,21 @@
     function render() {
         const out = viewMode === 'birds' ? renderBirdsEye() : renderGrid();
         syncAddRootAttract();
+        syncMcpAuthWarn();
         return out;
+    }
+
+    // Header warning: how many cells wait on an MCP key this computer
+    // doesn't hold. Hidden at zero; the count is the answer to "which cells
+    // need auth?" before any cell is tapped. Static toolbar DOM — updated
+    // in place, never re-created, so the once-bound click listener survives
+    // every 5s poll.
+    function syncMcpAuthWarn() {
+        const btn = $('mcp-auth-warn');
+        if (!btn) return;
+        const count = nodes.filter(mcpAuthMissing).length;
+        btn.hidden = !count;
+        btn.querySelector('.gt-warn-count').textContent = count;
     }
 
     // The pinned + is the empty state's front door: pulse when the canvas
@@ -261,12 +289,15 @@
 
     function renderGrid() {
         const grid = $('graph-grid');
+        const snap = OpenLoopBubble.snapshotExpansion(grid); // the 5s rebuild must not re-fold an opened cell
         const cols = buildColumns();
         const hint = nodes.length ? '' : `<span id="empty-hint">${emptyHint()}</span>`;
         grid.innerHTML = `<svg id="edge-layer"></svg>` + hint +
             cols.map(col => `<div class="depth-col">${col.map(nodeCell).join('')}</div>`).join('');
         bindGraph(grid);
-        drawEdges();
+        OpenLoopBubble.restoreExpansion(grid, snap);
+        OpenLoopBubble.gateBubbles(grid);
+        drawEdges(); // after the gate: edges follow the folded card heights
         syncBirdsToggle();
     }
 
@@ -330,7 +361,8 @@
 
     function dotHtml(n) {
         const label = dotLabel(n);
-        return `<button class="node-status-dot be-dot ${esc(n.status)}" data-id="${esc(n.id)}"` +
+        const cls = `node-status-dot be-dot ${esc(n.status)}${mcpAuthMissing(n) ? ' mcp-missing' : ''}`;
+        return `<button class="${cls}" data-id="${esc(n.id)}"` +
             ` title="${esc(label)}" aria-label="${esc(label)}"></button>`;
     }
 
@@ -481,31 +513,71 @@
         return a ? ` <span class="live">· Running: <b>${a}</b></span>` : '';
     }
 
+    // The chain gate, shared verbatim by every Run affordance — the cell's
+    // Run button and the panel's New run buttons. Never re-derived client
+    // -side: the server owns readiness (isChainReady, GraphHandler.swift).
+    // One string = a disabled Run says the same thing everywhere.
+    function runDisabledAttr(n) {
+        return n.runnable ? '' : ' disabled title="chain not ready — parents need summaries"';
+    }
+
     function runButton(n) {
-        const disabled = n.runnable ? '' : ' disabled title="chain not ready — parents need summaries"';
         const counts = n.runs && n.runs.total > 0
             ? `<span class="run-counts">${n.runs.total} | <b class="ok">${n.runs.success}</b> | <b class="bad">${n.runs.failed}</b>${runningTag(n)}</span>`
             : '';
-        return `<button class="node-run-btn" data-id="${esc(n.id)}"${disabled}>` +
+        return `<button class="node-run-btn" data-id="${esc(n.id)}"${runDisabledAttr(n)}>` +
             `<span class="run-label">Run</span>${counts}</button>`;
     }
 
     function nodeCard(n) {
-        return `<div class="node-card" data-id="${esc(n.id)}" data-status="${esc(n.status)}">` +
+        const missingAuth = mcpAuthMissing(n) ? ' data-mcp-auth="missing"' : '';
+        return `<div class="node-card" data-id="${esc(n.id)}" data-status="${esc(n.status)}"${missingAuth}>` +
             `<div class="node-main">` +
             cardHeader(n) + cardBody(n) +
             `</div>` +
-            `<button class="node-add-child" title="Add child">+</button>` +
+            addChildButton(n) +
             `</div>`;
     }
 
+    // The right-side + is a ready cell's privilege: children fork off a node's
+    // settled run, so loading (progress/summarizing) and errored (failed) cells
+    // render no + — no more children can be created off them until they land.
+    // answered keeps its + (run done, summary pending): the fork is allowed,
+    // while its own Run stays gated by the chain rule ("parents need summaries").
+    function addChildButton(n) {
+        return isChildReady(n) ? `<button class="node-add-child" title="Add child">+</button>` : '';
+    }
+
+    function isChildReady(n) {
+        return n.status === 'success' || n.status === 'answered';
+    }
+
     function cardHeader(n) {
-        const badge = n.mcp ? '<span class="mcp-badge">mcp</span>' : '';
+        const badge = n.mcp ? mcpBadge(n) : '';
         return `<div class="node-card-header">` +
             `<span class="node-dur">${esc(headerDur(n))}</span>` +
             badge +
             `<span class="node-status-dot ${esc(n.status)}"></span>` +
             `</div>`;
+    }
+
+    // The fresh-clone state, defined once: the repo says this endpoint
+    // requires a key (mcp_requires_auth travels with the node file) and
+    // this computer's secrets store doesn't hold it (mcp_auth_local). Every
+    // surface that announces it — the badge, the card header tint, the
+    // bird's-eye halo, the header warning count — reads this one predicate.
+    function mcpAuthMissing(n) {
+        return !!n.mcp_requires_auth && !n.mcp_auth_local;
+    }
+
+    // The header is machine facts — the badge itself reports whether this
+    // machine can actually authenticate: hollow dashed = the repo says the
+    // endpoint needs a key this computer doesn't hold yet (fresh clone).
+    function mcpBadge(n) {
+        const missing = mcpAuthMissing(n);
+        const cls = missing ? 'mcp-badge missing' : 'mcp-badge';
+        const title = missing ? 'MCP authorization key not set on this computer' : 'Remote MCP configured';
+        return `<span class="${cls}" title="${esc(title)}">mcp</span>`;
     }
 
     function headerDur(n) {
@@ -516,25 +588,24 @@
         return '–';
     }
 
+    // Cells speak the shared bubble grammar (bubble.js): free to 10 painted
+    // lines, folded to 3 + an in-place door beyond — gated + snapshotted in
+    // renderGrid like every other bubble surface. The old always-clamped,
+    // door-less markup is gone.
     function cardBody(n) {
         if (n.summary) return `<div class="node-card-body">${summaryCard(n)}</div>`;
-        const prompt = `<div class="wl-bubble input">` +
-            `<div class="wl-bubble-text truncated">${esc(n.prompt)}</div></div>`;
+        const prompt = OpenLoopBubble.bubbleHtml('input', n.prompt);
         return `<div class="node-card-body">${prompt}${snippetBubble(n)}</div>`;
     }
 
     function summaryCard(n) {
-        return `<div class="wl-bubble summary">` +
-            `<div class="wl-bubble-text truncated summary-text">${esc(n.summary)}</div>` +
-            `<button class="wl-bubble-copy">${copyIcon()}</button></div>`;
+        return OpenLoopBubble.bubbleHtml('summary', n.summary, 'summary-text');
     }
 
     function snippetBubble(n) {
         if (n.status === 'progress' || !n.output) return '';
         const cls = n.status === 'failed' ? 'output error' : 'output';
-        return `<div class="wl-bubble ${cls}">` +
-            `<div class="wl-bubble-text truncated result-snippet">${esc(n.output)}</div>` +
-            `<button class="wl-bubble-copy">${copyIcon()}</button></div>`;
+        return OpenLoopBubble.bubbleHtml(cls, n.output, 'result-snippet');
     }
 
     function bindGraph(grid) {
@@ -549,7 +620,8 @@
     function bindCards(grid) {
         grid.querySelectorAll('.node-card').forEach(card => {
             card.addEventListener('click', () => selectNode(card.dataset.id));
-            card.querySelector('.node-add-child').addEventListener('click', e => {
+            // the + is absent on non-ready cells (addChildButton) — bind only if rendered
+            card.querySelector('.node-add-child')?.addEventListener('click', e => {
                 e.stopPropagation();
                 openComposer(card.dataset.id);
             });
@@ -672,7 +744,8 @@
                 .join('');
         }
         const agent = runTargetAgent();
-        return `<button class="agent-btn" data-agent="${esc(agent)}" disabled>Run · ${esc(agent)}</button>`;
+        // run mode owns exactly one action — the button says ⌘↵ is its twin
+        return `<button class="agent-btn" data-agent="${esc(agent)}" aria-label="Run · ${esc(agent)} (⌘↵)" title="Run · ${esc(agent)} (⌘↵)" aria-keyshortcuts="Meta+Enter Control+Enter" disabled>Run · ${esc(agent)}</button>`;
     }
 
     function runTargetAgent() {
@@ -695,13 +768,31 @@
     async function submit(agent) {
         const prompt = $('composer-text').value.trim();
         if (!prompt) return;
-        try {
-            await (composerMode === 'run' ? postRun(prompt) : postNode(prompt, agent));
-            closeComposer();
-            await load();
-        } catch (e) {
-            showError(`Failed to start run: ${e.message}`);
-        }
+        const nodeId = composerRefId; // closeComposer nulls it — capture first
+        try { await submitPrompt(prompt, agent, nodeId); }
+        catch (e) { showError(`Failed to start run: ${e.message}`); }
+    }
+
+    // The modal's keyboard door: run mode owns exactly one action, so ⌘↵
+    // submits it — the Run button's twin. Choice modes need a runner
+    // picked first; ⌘↵ stays a no-op there rather than firing some
+    // default agent the UI never showed (the hint copy teaches the pick).
+    // composerMode is null while the modal is closed — the same guard
+    // covers a stray keydown from a closed #composer.
+    function composerCmdEnter() {
+        if (composerMode !== 'run') return;
+        submit(runTargetAgent()); // submit captures composerRefId before closeComposer nulls it
+    }
+
+    // A run you start is a place you go: capture the response id (node modes
+    // return undefined — the natural guard), then hand the arrival to
+    // scheduleRunFocus once the reload has settled. Composer stays open
+    // through the POST — failure keeps the user's words.
+    async function submitPrompt(prompt, agent, nodeId) {
+        const res = await (composerMode === 'run' ? postRun(prompt) : postNode(prompt, agent));
+        closeComposer();
+        await load();
+        if (res?.id) scheduleRunFocus(nodeId, res.id);
     }
 
     async function postRun(prompt, parentId) {
@@ -742,9 +833,11 @@
         summaryEditing = false;
         panelStatus = n.status;
         panelJson = JSON.stringify(n);
-        const snap = expansionSnapshot($('detail-panel-inner'));
-        $('detail-panel-inner').innerHTML = panelHtml(n);
-        restoreExpansion($('detail-panel-inner'), snap);
+        const inner = $('detail-panel-inner');
+        const snap = OpenLoopBubble.snapshotExpansion(inner);
+        inner.innerHTML = panelHtml(n);
+        OpenLoopBubble.restoreExpansion(inner, snap);
+        OpenLoopBubble.gateBubbles(inner);
         $('detail-panel').classList.add('open');
         $('graph-canvas').classList.add('panel-open');
         bindPanelControls(n);
@@ -756,8 +849,10 @@
         bindActiveToggle(n);
         bindMcpField(n.id);
         bindPersonaPicks(n);
+        bindAgentPicks(n);
         bindSummaryButton(n);
         bindRetryButton(n);
+        bindNewRunButtons(n);
         bindDeleteButtons();
         bindCopyButtons($('detail-panel-inner'));
         bindAvatarFallbacks($('detail-panel-inner'));
@@ -783,6 +878,25 @@
         });
     }
 
+    function bindAgentPicks(n) {
+        $('detail-panel-inner').querySelectorAll('.agent-btn[data-agent]').forEach(btn => {
+            btn.addEventListener('click', () => changeAgent(n.id, btn.dataset.agent));
+        });
+    }
+
+    async function changeAgent(nodeId, agent) {
+        const n = nodes.find(x => x.id === nodeId);
+        if (!n || n.agent === agent) return;
+        try {
+            await putNode(nodeId, { agent });
+            await load();
+            const fresh = nodes.find(x => x.id === selectedId);
+            if (fresh) openPanel(fresh); // re-render so the title meta + pills swap too
+        } catch (e) {
+            showError(`Failed to save agent: ${e.message}`);
+        }
+    }
+
     async function togglePersona(nodeId, personaId) {
         const n = nodes.find(x => x.id === nodeId);
         if (!n) return;
@@ -804,9 +918,12 @@
 
     function bindMcpField(nodeId) {
         mcpOriginal = $('mcp-input').value.trim();
-        mcpAuthOriginal = $('mcp-auth-input').value.trim();
+        const authInput = $('mcp-auth-input');
+        mcpAuthOriginal = authInput ? authInput.value.trim() : ''; // always '' — write-only field, never echoes
         bindFieldPair('mcp', () => saveMcp(nodeId), syncMcpButton);
-        bindFieldPair('mcp-auth', () => saveMcpAuth(nodeId), syncMcpAuthButton);
+        if (authInput) bindFieldPair('mcp-auth', () => saveMcpAuth(nodeId), syncMcpAuthButton);
+        const clear = $('mcp-auth-clear');
+        if (clear) clear.addEventListener('click', () => clearMcpAuth(nodeId));
     }
 
     // The NAME section renders on every node; autosize keeps a long
@@ -869,6 +986,8 @@
             mcpOriginal = mcp;
             syncMcpButton();
             await load();
+            const fresh = nodes.find(x => x.id === selectedId);
+            if (fresh) openPanel(fresh); // re-render: the auth row follows the URL (state line, placeholder, Clear)
         } catch (e) {
             showError(`Failed to save mcp: ${e.message}`);
         }
@@ -876,13 +995,26 @@
 
     async function saveMcpAuth(nodeId) {
         const auth = $('mcp-auth-input').value.trim();
+        const n = nodes.find(x => x.id === nodeId);
+        if (!auth && n && n.mcp_auth_local) return; // clearing has its own button — an empty Save never wipes a stored key
         try {
             await putNode(nodeId, { mcp_auth: auth });
-            mcpAuthOriginal = auth;
-            syncMcpAuthButton();
             await load();
+            const fresh = nodes.find(x => x.id === selectedId);
+            if (fresh) openPanel(fresh); // re-render: the state line + Clear button changed; the field itself stays empty
         } catch (e) {
             showError(`Failed to save authorization: ${e.message}`);
+        }
+    }
+
+    async function clearMcpAuth(nodeId) {
+        try {
+            await putNode(nodeId, { mcp_auth: '' }); // empty string clears — server normalizes to nil
+            await load();
+            const fresh = nodes.find(x => x.id === selectedId);
+            if (fresh) openPanel(fresh);
+        } catch (e) {
+            showError(`Failed to clear authorization: ${e.message}`);
         }
     }
 
@@ -918,6 +1050,8 @@
         logsJson = '';
         runsCache = [];
         pendingRowFocus = null;
+        pendingRunFocus = null;
+        staleDeepRun = false;
         focusedRunId = null;
         runSummaryEditing = false;
         promptEditing = false;
@@ -962,7 +1096,7 @@
 
     function panelBody(n) {
         return nameSection(n) + activeSection(n) + summarySection(n) + promptSection(n) + resultSection(n) +
-            personasSection(n) + mcpSection(n) + runsSection() + deleteSection(n);
+            personasSection(n) + mcpSection(n) + runsSection(n) + agentSection(n) + deleteSection(n);
     }
 
     // NAME on every node: names are usually descriptions, so the field is a
@@ -997,12 +1131,12 @@
 
     function promptSection(n) {
         return `<div id="prompt-section"><div class="detail-section-label prompt">PROMPT</div>` +
-            renderBubble('input', '', n.prompt) + `</div>`;
+            OpenLoopBubble.bubbleHtml('input', n.prompt) + `</div>`;
     }
 
     function editPromptHtml(n) {
         return `<div class="detail-section-label prompt">PROMPT</div>` +
-            `<textarea id="regen-prompt" spellcheck="false">${esc(n.prompt)}</textarea>` +
+            `<textarea id="regen-prompt" rows="7" aria-label="Edit prompt" spellcheck="false">${esc(n.prompt)}</textarea>` +
             `<button class="regen-submit" id="regen-submit">Regenerate</button>`;
     }
 
@@ -1035,9 +1169,76 @@
             `<span class="persona-pick-name">${esc(p.name)}</span></div>`;
     }
 
-    function runsSection() {
-        return `<div><div class="detail-section-label runs">Runs</div>` +
-            `<div id="runs-list"><div class="summary-missing">loading…</div></div></div>`;
+    // The Runs section is self-sufficient — it can start a run, not just
+    // list them: bookended by New run buttons, a compact pill in the label
+    // row (the scanner's door) and a full-width one after the list (the
+    // finisher's door — and the empty state's call to action). Both live in
+    // the section wrapper, OUTSIDE #runs-list: the list is rewritten by
+    // renderLogs every 5s, and the buttons must not flicker or lose hover.
+    function runsSection(n) {
+        return `<div>` +
+            `<div class="summary-head">` +
+            `<div class="detail-section-label runs">Runs</div>` +
+            newRunBtnHtml(n, false) + `</div>` +
+            `<div id="runs-list"><div class="summary-missing">loading…</div></div>` +
+            newRunBtnHtml(n, true) + `</div>`;
+    }
+
+    // One generator, two sizes — same words, same icon, same gate: the pill
+    // is a shortcut, the wide one a destination; nobody learns two controls.
+    function newRunBtnHtml(n, wide) {
+        const cls = wide ? 'new-run-btn wide' : 'new-run-btn';
+        const title = n.runnable ? ' title="Schedule a new run on this node"' : '';
+        return `<button class="${cls}" data-id="${esc(n.id)}"${runDisabledAttr(n)}${title}>` +
+            `${plusIcon(wide ? 14 : 12)}New run</button>`;
+    }
+
+    function plusIcon(size) {
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>`;
+    }
+
+    // Bound once per openPanel — the section wrapper is rebuilt only then.
+    // Deliberately NOT inside #runs-list: renderLogs rewrites it every cycle,
+    // and a per-render binding there would stack one listener per 5s tick.
+    function bindNewRunButtons(n) {
+        $('detail-panel-inner').querySelectorAll('.new-run-btn').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                openRunComposer(n.id);
+            });
+        });
+    }
+
+    // — agent picker —
+    // The composer's pills, reprised at the panel bottom (just above the
+    // danger zone): one per known agent, the node's current one selected and
+    // inert, a click on any other PUTs the switch. Locked while the node runs
+    // (the delete grammar): the in-flight run already holds its script, and a
+    // mid-run switch would read as a no-op. An agent gone from the server
+    // still renders — the current fact stays visible and switchable-away-from.
+    function agentSection(n) {
+        return `<div><div class="detail-section-label">AGENT</div>${agentPills(n)}</div>`;
+    }
+
+    function agentPills(n) {
+        if (!agents.length) return '<div class="summary-missing">No agents available on this server.</div>';
+        const running = RUNNING_STATUSES.includes(n.status);
+        const list = agents.includes(n.agent) ? agents : [n.agent, ...agents];
+        return `<div class="agent-row">` +
+            list.map(a => agentPillHtml(a, a === n.agent, running)).join('') +
+            `</div>` +
+            `<div class="mcp-hint">${esc(agentHint(running))}</div>`;
+    }
+
+    function agentPillHtml(agent, current, running) {
+        const cls = 'agent-btn' + (current ? ' selected' : '');
+        const dis = current || running ? ' disabled' : '';
+        return `<button class="${cls}" data-agent="${esc(agent)}" aria-pressed="${current}"${dis}>${esc(agent)}</button>`;
+    }
+
+    function agentHint(running) {
+        if (running) return 'This node is running — the agent unlocks when the run finishes.';
+        return 'Used by this node’s next run — re-runs, retries, follow-ups & summary regeneration.';
     }
 
     async function loadLogs(nodeId) {
@@ -1046,6 +1247,11 @@
             const data = await fetchJson(url);
             if (selectedId !== nodeId) return;
             runsCache = data.logs;
+            // runsCache has exactly one producer (here) — consume pendingRunFocus
+            // only at this point; openPanel nulls focusedRunId, so consuming
+            // earlier would be wiped. A failed fetch keeps the flag: the 5s
+            // refreshPanel retry re-enters here and opens the run then.
+            if (consumePendingRunFocus()) return;
             if (blockedByTyping()) return;
             const json = JSON.stringify(data.logs);
             if (json === logsJson) return;
@@ -1084,49 +1290,48 @@
         return logs.filter(l => l.root_run_id === rootId).sort((a, b) => a.created_at - b.created_at);
     }
 
+    // A notification's run may be a follow-up: its thread opens at the root
+    // (focusRun is root-only). Unknown id → null → silent node view.
+    function rootRunOf(runId, logs) {
+        const run = logs.find(l => l.id === runId);
+        if (!run) return null;
+        if (!run.parent_run_id) return run.id;
+        return logs.some(l => l.id === run.root_run_id && !l.parent_run_id) ? run.root_run_id : null;
+    }
+
     function renderLogs(logs) {
         const el = $('runs-list');
         if (!el) return;
-        const snap = expansionSnapshot(el);
+        const snap = OpenLoopBubble.snapshotExpansion(el);
         const roots = rootRuns(logs);
-        el.innerHTML = roots.length
+        // stale deep-link run: drift, not error — one muted line above the list
+        const notice = staleDeepRun
+            ? '<div class="summary-missing">That run isn\'t on this node anymore — showing the node instead.</div>'
+            : '';
+        el.innerHTML = notice + (roots.length
             ? roots.map(l => runLogHtml(l, logs)).join('')
-            : '<div class="summary-missing">no runs yet</div>';
+            : '<div class="summary-missing">no runs yet</div>');
         bindCopyButtons(el);
         bindRunFocusButtons(el);
-        restoreExpansion(el, snap);
+        bindRunThreadDelete(el);
+        OpenLoopBubble.restoreExpansion(el, snap);
+        OpenLoopBubble.gateBubbles(el);
         focusPendingRow();
     }
 
-    function expansionSnapshot(container) {
-        const open = new Map();
-        container.querySelectorAll('.wl-bubble-text').forEach(t => {
-            if (!t.classList.contains('truncated')) open.set(expansionKey(t), true);
-        });
-        return open;
-    }
-
-    function restoreExpansion(container, snap) {
-        container.querySelectorAll('.wl-bubble-text').forEach(t => {
-            if (!snap.get(expansionKey(t))) return;
-            t.classList.remove('truncated');
-            t.classList.add('expanded');
-            const btn = t.parentElement.querySelector('.wl-expand-btn');
-            if (btn) btn.remove();
-        });
-    }
-
-    function expansionKey(t) {
-        return t.textContent.slice(0, 200);
-    }
-
+    // The list row's chrome: the header's caption, bin, arrow ride INLINE —
+    // right after the text, never pinned to the row's right edge. Only the
+    // post-item focus row owns that edge (its own flex-end); bin before
+    // arrow in both places (the arrow stays the right-most control: it
+    // opens, everything left of it removes).
     function runLogHtml(l, logs) {
         const cls = l.status === 'failed' ? 'output error' : 'output';
+        const del = runThreadDelBtn(l, logs);
         return `<div class="run-log" data-run-id="${esc(l.id)}">` +
-            `<div class="run-log-meta">${runFocusBtn()}<span>${rootMeta(l, logs)}</span></div>` +
-            renderBubble('input', '', l.prompt) +
-            renderBubble(cls, '', l.output || (l.status === 'progress' ? 'in progress…' : '(empty)')) +
-            `<div class="run-log-focus-row">${runFocusBtn()}</div>` +
+            `<div class="run-log-meta"><span>${rootMeta(l, logs)}</span>${del}${runFocusBtn()}</div>` +
+            OpenLoopBubble.bubbleHtml('input', l.prompt) +
+            OpenLoopBubble.bubbleHtml(cls, l.output || (l.status === 'progress' ? 'in progress…' : '(empty)')) +
+            `<div class="run-log-focus-row">${del}${runFocusBtn()}</div>` +
             `</div>`;
     }
 
@@ -1154,12 +1359,46 @@
         });
     }
 
+    // — full-RUN delete (runs list) —
+    // A list item IS the whole conversation, so its bin cascades: root +
+    // every follow-up, server-side (?thread=true — the twin of the node
+    // delete's ?chain=true). Skin and armed-confirm machine are the
+    // thread rows' (.run-del-btn + panel.js armedButton); the copy is the
+    // list's own — "run", not "turn" (one word per concept, per surface).
+    // Any in-flight turn in the thread holds the delete: disabled + the
+    // unlock sentence, the meta-row grammar.
+
+    const RUN_DEL_COPY = {
+        armed: 'Confirm — delete this run',
+        busy: 'A run in this conversation is in progress — deletion unlocks when it finishes.',
+    };
+
+    function runThreadDelTitle(l, logs) {
+        const n = threadOf(l.id, logs).length - 1;
+        return n
+            ? `Delete this run and its ${n} follow-up${n > 1 ? 's' : ''} — the whole conversation goes.`
+            : 'Delete this run — prompt, result and summary.';
+    }
+
+    function runThreadDelBtn(l, logs) {
+        const busy = threadOf(l.id, logs).some(r => RUNNING_STATUSES.includes(r.status));
+        const title = busy ? RUN_DEL_COPY.busy : runThreadDelTitle(l, logs);
+        return `<button class="run-del-btn" data-run-id="${esc(l.id)}"${busy ? ' disabled' : ''}` +
+            ` aria-label="${esc(title)}" title="${esc(title)}">${trashIcon()}</button>`;
+    }
+
+    function bindRunThreadDelete(el) {
+        el.querySelectorAll('.run-del-btn:not(:disabled)').forEach(btn =>
+            OpenLoopPanel.armedButton(btn, btn.title, RUN_DEL_COPY.armed, commitRunThreadDelete));
+    }
+
     function focusRun(runId) {
         const root = runsCache.find(l => l.id === runId && !l.parent_run_id);
         if (!root) return;
         focusedRunId = runId;
         renderRunView(root, true);
         $('detail-panel-inner').querySelector('.run-back-btn').focus();
+        scrollToThreadEnd(); // a conversation's news is at its end — arrive there
     }
 
     function refreshRunView(logs) {
@@ -1186,6 +1425,60 @@
         if (row) { row.tabIndex = -1; row.focus(); }
     }
 
+    // ── pending run arrival (?run= deep link, or a freshly scheduled run) ──
+    // The ONLY consumer of pendingRunFocus: resolve it against the freshly
+    // filled runsCache, open the thread at its root (focusRun is root-only),
+    // then point at the arriving entry. Ghost id → node view + one-line notice.
+    function consumePendingRunFocus() {
+        const wanted = pendingRunFocus;
+        if (!wanted) return false;
+        pendingRunFocus = null;
+        const root = rootRunOf(wanted, runsCache);
+        if (!root) { staleDeepRun = true; return false; }
+        gateThreadEnter(() => {
+            focusRun(root);
+            beaconThreadRun(wanted);
+        });
+        return true;
+    }
+
+    // Sequence gate: a fast local API can land the logs before the panel's
+    // 300ms slide ends — swapping views mid-slide reads as flicker. Wait for
+    // the slide (transitionend on #detail-panel, 350ms ceiling so a missed
+    // event never deadlocks). Reduced motion or a closed panel → open now.
+    function gateThreadEnter(open) {
+        const panel = $('detail-panel');
+        if (reducedMotion() || !panel || !panel.classList.contains('open')) return open();
+        let opened = false;
+        const finish = () => {
+            if (opened) return;
+            opened = true;
+            panel.removeEventListener('transitionend', onEnd);
+            clearTimeout(ceiling);
+            open();
+        };
+        const onEnd = e => {
+            if (e.target === panel && e.propertyName === 'transform') finish();
+        };
+        const ceiling = setTimeout(finish, 350);
+        panel.addEventListener('transitionend', onEnd);
+    }
+
+    // "This one, specifically": ring the tapped run's entry and center it —
+    // the card beacon grammar, root and follow-up alike. The centering is
+    // conditional now: an open that landed at the thread's end has already
+    // seated the tip, and a second scroll would fight that glide (the
+    // geometry lives in panel.js, shared with workflow-log.js's deep link).
+    function beaconThreadRun(runId) {
+        const row = document.querySelector(`.run-log[data-run-id="${CSS.escape(runId)}"]`);
+        if (!row) return;
+        OpenLoopPanel.beaconIntoView(row, $('detail-panel-inner').querySelector('.detail-panel-body'));
+    }
+
+    function reducedMotion() {
+        return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+
     function leanBackIn() {
         const body = $('detail-panel-inner').querySelector('.detail-panel-body');
         if (body) body.classList.add('run-back');
@@ -1203,22 +1496,38 @@
         const thread = threadOf(root.id, runsCache);
         footerKey = footerKeyOf(thread[thread.length - 1]);
         inner.innerHTML = threadViewHtml(root, thread);
+        OpenLoopBubble.gateBubbles(inner);
         inner.querySelector('.detail-panel-body').classList.add('run-enter');
+        bindThreadMessages($('thread-messages')); // rows are interactive from the first paint — copy/edit/delete must not wait for the next poll
         bindRunViewControls();
     }
 
     function refreshThreadMessages(thread) {
         const el = $('thread-messages');
         if (!el) return;
-        const snap = expansionSnapshot(el);
+        const snap = OpenLoopBubble.snapshotExpansion(el);
         el.innerHTML = thread.map(threadEntryHtml).join('');
-        restoreExpansion(el, snap);
+        refreshThreadHeaderMeta(thread);
+        OpenLoopBubble.restoreExpansion(el, snap);
+        OpenLoopBubble.gateBubbles(el);
         bindThreadMessages(el);
     }
 
+    // Header meta follows the thread, not just the first paint: the count and
+    // tip status change on every splice, so the same refresh that rewrites
+    // the rows rewrites this line too (fixes the stale "N runs" after
+    // follow-ups, required after deletes).
+    function refreshThreadHeaderMeta(thread) {
+        if (!thread.length) return;
+        const meta = $('detail-panel-inner').querySelector('.detail-panel-title .detail-panel-meta');
+        if (meta) meta.textContent = runViewHeaderMeta(thread[0], thread);
+    }
+
     function bindThreadMessages(el) {
+        if (!el) return;
         bindCopyButtons(el);
         bindSummaryEdit(el);
+        bindRunDelete(el);
     }
 
     function bindSummaryEdit(scope) {
@@ -1233,9 +1542,16 @@
         bindRunComposer();
     }
 
+    // The thread is a triad: header → scroll body (messages only) → dock
+    // (the pinned footer). The composer lives in the dock, outside the
+    // scroll body: reading a long thread and writing the next turn are one
+    // glance, not a scroll round trip. #thread-footer inside it is the
+    // state machine's slot — reconcileFooter rewrites only that inner div.
     function threadViewHtml(root, thread) {
         return runViewHeader(root, thread) +
-            `<div class="detail-panel-body">${messagesHtml(thread)}${threadFooterHtml(thread)}</div>`;
+            `<div class="detail-panel-body">${messagesHtml(thread)}</div>` +
+            `<div class="detail-panel-footer" role="region" aria-label="Follow-up composer">` +
+            `<div class="detail-panel-accent"></div>${threadFooterHtml(thread)}</div>`;
     }
 
     function messagesHtml(thread) {
@@ -1248,8 +1564,8 @@
 
     function threadEntryHtml(l) {
         return `<div class="run-log" data-run-id="${esc(l.id)}">` +
-            `<div class="run-log-meta"><span>${runMeta(l)}</span></div>` +
-            renderBubble('input', '', l.prompt) +
+            `<div class="run-log-meta"><span>${runMeta(l)}</span>${runDelBtn(l)}</div>` +
+            OpenLoopBubble.bubbleHtml('input', l.prompt) +
             runResultSection(l) +
             runSummarySection(l) +
             `</div>`;
@@ -1261,16 +1577,20 @@
     }
 
     function runViewHeader(root, thread) {
-        const n = thread.length;
         return `<div class="detail-panel-header">` +
             `<div class="detail-panel-accent"></div>` +
             runBackBtn() +
             `<div class="detail-panel-title">` +
             `<div class="detail-panel-name">Conversation · ${fmtTime(root.created_at)}</div>` +
-            `<div class="detail-panel-meta">${n} run${n > 1 ? 's' : ''} · ${runMeta(thread[n - 1])}</div>` +
+            `<div class="detail-panel-meta">${runViewHeaderMeta(root, thread)}</div>` +
             `</div>` +
             `<button class="detail-panel-close" title="Close panel" aria-label="Close panel">✕</button>` +
             `</div>`;
+    }
+
+    function runViewHeaderMeta(root, thread) {
+        const n = thread.length;
+        return `${n} run${n > 1 ? 's' : ''} · ${runMeta(thread[n - 1])}`;
     }
 
     function runSummarySection(l) {
@@ -1280,7 +1600,7 @@
 
     function summarySectionInner(l) {
         const body = l.summary
-            ? renderBubble('summary', '', l.summary)
+            ? OpenLoopBubble.bubbleHtml('summary', l.summary)
             : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
         return `<div class="summary-head">` +
             `<div class="detail-section-label summary">SUMMARY</div>` +
@@ -1290,7 +1610,7 @@
     function runSummaryEditHtml(l) {
         return `<div class="summary-head">` +
             `<div class="detail-section-label summary">SUMMARY</div></div>` +
-            `<textarea id="run-summary-input" spellcheck="false">${esc(l.summary || '')}</textarea>` +
+            `<textarea id="run-summary-input" rows="7" aria-label="Edit summary" placeholder="Write a summary to allow follow-ups…" spellcheck="false">${esc(l.summary || '')}</textarea>` +
             `<button class="regen-submit" id="run-summary-update" disabled>Update</button>`;
     }
 
@@ -1301,7 +1621,7 @@
         runSummaryEditing = true;
         section.innerHTML = runSummaryEditHtml(l);
         bindRunSummaryUpdate(l);
-        $('run-summary-input').focus();
+        OpenLoopPanel.focusEditor($('run-summary-input'), section);
     }
 
     function bindRunSummaryUpdate(l) {
@@ -1330,12 +1650,15 @@
     function applyRunSummary(updated) {
         runsCache = runsCache.map(l => (l.id === updated.id ? updated : l));
         const section = document.querySelector(`.run-summary-section[data-run-id="${CSS.escape(updated.id)}"]`);
-        if (section) { section.innerHTML = summarySectionInner(updated); bindSummaryEdit(section); }
+        if (section) {
+            section.innerHTML = summarySectionInner(updated);
+            OpenLoopBubble.gateBubbles(section); // the swapped-in bubble needs its gate
+            bindSummaryEdit(section);
+        }
     }
 
     async function putRunSummary(runId, summary) {
-        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(selectedId)}/runs/${encodeURIComponent(runId)}`;
-        return await fetchJson(url, {
+        return await fetchJson(runThreadUrl(runId), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ summary })
@@ -1344,8 +1667,11 @@
 
     function runFollowupSection(tip) {
         if (!tip) return '';
-        if (tip.status === 'progress') return runHint('Run in progress…');
-        if (tip.status === 'summarizing') return runHint('Summarizing…');
+        // Copy matches workflow-log.html character-for-character: the fuller
+        // sentence answers "should I reload?" where the question occurs —
+        // the terse variant saved four words and spent the user's trust.
+        if (tip.status === 'progress') return runHint('Run in progress — the panel refreshes while it works.');
+        if (tip.status === 'summarizing') return runHint('Summarizing the answer…');
         if (tip.status === 'failed') return failedFooterHtml();
         if (!tip.summary) return runHint('Write a summary above to continue this conversation.');
         return followupComposerHtml();
@@ -1356,11 +1682,19 @@
             `<button class="regen-submit run-retry" id="run-retry-btn">Retry</button></div>`;
     }
 
+    // The composer capsule: field + send circle in one row (the skin lives
+    // in panel.css). rows=3, not the editors' 7 — a pinned dock must not
+    // eat the stream; resize + the 40vh cap bound it. Send is an icon
+    // button — quiet until there is something to send.
     function followupComposerHtml() {
         return `<div class="run-composer">` +
-            `<textarea id="run-followup-text" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
-            `<button class="regen-submit" id="run-followup-send" disabled>Send</button>` +
+            `<textarea id="run-followup-text" rows="3" aria-label="Continue conversation" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
+            `<button class="composer-send" id="run-followup-send" aria-label="Send follow-up (⌘↵)" title="Send follow-up (⌘↵)" aria-keyshortcuts="Meta+Enter Control+Enter" disabled>${sendIcon()}</button>` +
             `</div>`;
+    }
+
+    function sendIcon() {
+        return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
     }
 
     function runHint(text) {
@@ -1377,6 +1711,8 @@
         footer.innerHTML = runFollowupSection(tip);
         bindRunComposer();
         restoreFooterDraft(draft);
+        // the dock is pinned — every state change is already in view; the
+        // old reveal() call died with the scrolling composer
     }
 
     function footerKeyOf(tip) {
@@ -1405,9 +1741,14 @@
         const text = $('run-followup-text');
         const sync = () => { send.disabled = !text.value.trim(); };
         text.addEventListener('input', sync);
-        text.addEventListener('keydown', e => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitFollowup();
-        });
+        // One submit grammar, shared with workflow-log.html (panel.js): the
+        // shortcut prevents its default AND hands the caret back before the
+        // submit — a focused empty field still trips blockedByTyping, and
+        // both this submit's loadLogs and the 5s poll would stall silently
+        // behind the gate (the ⌘↵-never-updates bug). Per-render bind: the
+        // footer rewrite at reconcileFooter recreates the DOM, fresh
+        // listeners — the same pattern as today.
+        OpenLoopPanel.bindCmdEnterSubmit(text, submitFollowup);
         send.addEventListener('click', () => submitFollowup());
     }
 
@@ -1431,8 +1772,7 @@
     }
 
     function postRetry(runId) {
-        const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(selectedId)}/runs/${encodeURIComponent(runId)}/retry`;
-        return fetchJson(url, { method: 'POST' });
+        return fetchJson(runThreadUrl(runId) + '/retry', { method: 'POST' });
     }
 
     async function submitFollowup() {
@@ -1457,9 +1797,19 @@
         if (text) { text.value = ''; text.dispatchEvent(new Event('input')); }
     }
 
+    // Open and send are the sanctioned scrolls: arriving at a thread glides
+    // the body to the newest turn, and so does sending one (instant under
+    // reduced motion). While merely reading + typing, nothing ever scrolls —
+    // that is the dock's contract. A deep link may then retake its own seat:
+    // beaconThreadRun centers its row only when this landing left it hidden.
     function scrollToThreadEnd() {
         const body = $('detail-panel-inner').querySelector('.detail-panel-body');
-        if (body) body.scrollTop = body.scrollHeight;
+        if (!body) return;
+        const end = body.scrollHeight;
+        // Element.scrollTo is universal in browsers; the offline harness's
+        // jsdom may not ship it — scrollTop reaches the same end, instantly.
+        if (typeof body.scrollTo === 'function') body.scrollTo({ top: end, behavior: reducedMotion() ? 'auto' : 'smooth' });
+        else body.scrollTop = end;
     }
 
     function runResultSection(l) {
@@ -1468,8 +1818,8 @@
         const cls = failed ? 'detail-section-label result error' : 'detail-section-label result';
         const label = progress ? '<div class="detail-section-label running">RUNNING</div>' : `<div class="${cls}">${failed ? 'ERROR' : 'RESULT'}</div>`;
         const bubble = progress
-            ? renderBubble('output', '', 'in progress…')
-            : renderBubble(failed ? 'output error' : 'output', '', l.output || '(empty)');
+            ? OpenLoopBubble.bubbleHtml('output', 'in progress…')
+            : OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)');
         return `<div>${label}${bubble}</div>`;
     }
 
@@ -1610,6 +1960,148 @@
         });
     }
 
+    // — per-turn delete (thread rows) —
+    // The node grammar scaled to a 24px row icon: quiet at rest, armed
+    // confirm (3s fuse, panel.js armedButton — fresh DOM disarms for free),
+    // one splice beat, then the same reload as a submitted follow-up. The
+    // server splices (`next` reparents to `deleted.parent`); deleting the
+    // focused root needs no special case — refreshRunView finds the root
+    // gone and lands in backToNode. Copy is character-identical to
+    // workflow-log.js's THREAD_DEL_COPY (pinned by both sanity suites).
+
+    const THREAD_DEL_COPY = {
+        rest: 'Delete this turn. Follow-ups move up to this run’s parent — nothing else changes.',
+        armed: 'Confirm — delete this turn',
+        busy: 'This turn is running — deletion unlocks when it finishes.',
+    };
+
+    function runDelBtn(l) {
+        const busy = RUNNING_STATUSES.includes(l.status);
+        const title = busy ? THREAD_DEL_COPY.busy : THREAD_DEL_COPY.rest;
+        return `<button class="run-del-btn" data-run-id="${esc(l.id)}"${busy ? ' disabled' : ''}` +
+            ` aria-label="${esc(title)}" title="${esc(title)}">${trashIcon()}</button>`;
+    }
+
+    function bindRunDelete(scope) {
+        scope.querySelectorAll('.run-del-btn:not(:disabled)').forEach(btn =>
+            OpenLoopPanel.armedButton(btn, THREAD_DEL_COPY.rest, THREAD_DEL_COPY.armed, commitRunDelete));
+    }
+
+    function commitRunDelete(btn) {
+        const runId = btn.dataset.runId;
+        btn.classList.add('deleting');
+        markRunDeleting();
+        delRunLog(runId, threadFocusIndex(runId));
+    }
+
+    function markRunDeleting() {
+        $('detail-panel-inner').querySelectorAll('.run-del-btn').forEach(b => { b.disabled = true; });
+    }
+
+    async function delRunLog(runId, focusIndex) {
+        const beat = spliceBeat(runId);
+        try {
+            const res = await fetch(runThreadUrl(runId), { method: 'DELETE' });
+            if (res.status !== 404 && !res.ok) throw await runDeleteError(res);
+            await beat;
+            await load();
+            logsJson = '';
+            await loadLogs(selectedId);
+            focusThreadRowAt(focusIndex);
+        } catch (e) {
+            showError(e.message);
+            logsJson = '';
+            await loadLogs(selectedId);
+            focusThreadRowAt(focusIndex);
+        }
+    }
+
+    async function runDeleteError(res) {
+        if (res.status === 409) return new Error('Still running — let the run finish, then delete.');
+        return new Error(`Failed to delete the turn: ${res.status} ${(await res.text()).slice(0, 140)}`);
+    }
+
+    function runThreadUrl(runId) {
+        return `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(selectedId)}/runs/${encodeURIComponent(runId)}`;
+    }
+
+    // The splice beat: the dying row exhales (fade + 2px lift) while the
+    // DELETE is in flight — 150ms, instant under reduced motion.
+    function spliceBeat(runId) {
+        const row = document.querySelector(`.run-log[data-run-id="${CSS.escape(runId)}"]`);
+        if (!row || reducedMotion()) return Promise.resolve();
+        row.classList.add('run-del-dying');
+        return new Promise(done => setTimeout(done, 150));
+    }
+
+    // Keyboard handoff: focus sat ON the deleted button, so the refresh must
+    // not strand it at document top — land on the surviving row at the same
+    // index. Mouse users pass -1 and skip this.
+    function threadFocusIndex(runId) {
+        if (!document.activeElement || !document.activeElement.closest('.run-del-btn')) return -1;
+        const rows = [...document.querySelectorAll('#thread-messages .run-log')];
+        return Math.max(rows.findIndex(r => r.dataset.runId === runId), 0);
+    }
+
+    function focusThreadRowAt(index) {
+        const rows = document.querySelectorAll('#thread-messages .run-log');
+        if (index < 0 || !rows.length) return; // root deleted → backToNode owns focus
+        const row = rows[Math.min(index, rows.length - 1)];
+        row.tabIndex = -1;
+        row.focus();
+    }
+
+    // Full-RUN delete commit — the splice beat, then the same reload ladder
+    // as a submitted follow-up: load() recounts the node's run badge (it
+    // tracks thread roots), loadLogs() re-renders the list. 404 is silent
+    // success (already gone), mirroring delNode/delRunLog.
+    function commitRunThreadDelete(btn) {
+        btn.classList.add('deleting');
+        markRunDeleting();
+        delRunThread(btn.dataset.runId, listFocusIndex());
+    }
+
+    async function delRunThread(runId, focusIndex) {
+        const beat = spliceBeat(runId);
+        try {
+            const res = await fetch(runThreadUrl(runId) + '?thread=true', { method: 'DELETE' });
+            if (res.status !== 404 && !res.ok) throw await runThreadDeleteError(res);
+            await beat;
+            await load();
+            logsJson = '';
+            await loadLogs(selectedId);
+            focusListRowAt(focusIndex);
+        } catch (e) {
+            showError(e.message);
+            logsJson = '';
+            await loadLogs(selectedId);
+            focusListRowAt(focusIndex);
+        }
+    }
+
+    async function runThreadDeleteError(res) {
+        if (res.status === 409) return new Error('Still running — let the run finish, then delete.');
+        return new Error(`Failed to delete the run: ${res.status} ${(await res.text()).slice(0, 140)}`);
+    }
+
+    // Keyboard handoff, list edition: focus sat on the dying row's bin, so
+    // the refreshed list lands it on the surviving row at the same index
+    // (mouse users pass -1 and skip this). An emptied list has no row —
+    // the wide New run finisher below it is the landing.
+    function listFocusIndex() {
+        if (!document.activeElement || !document.activeElement.closest('.run-del-btn')) return -1;
+        return [...document.querySelectorAll('#runs-list .run-log')]
+            .findIndex(r => r.contains(document.activeElement));
+    }
+
+    function focusListRowAt(index) {
+        const rows = document.querySelectorAll('#runs-list .run-log');
+        if (index < 0 || !rows.length) return;
+        const row = rows[Math.min(index, rows.length - 1)];
+        row.tabIndex = -1;
+        row.focus();
+    }
+
     function graphNodeUrl(nodeId) {
         return `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(nodeId)}`;
     }
@@ -1653,7 +2145,7 @@
         return `<div id="summary-section"><div class="summary-head">` +
             `<div class="detail-section-label summary">SUMMARY</div>` +
             `<span class="summary-actions">${regenButton(n)}${editSummaryButton(n)}</span></div>` +
-            `${n.summary ? renderBubble('summary', '', n.summary) : summaryPlaceholder(n)}` +
+            `${n.summary ? OpenLoopBubble.bubbleHtml('summary', n.summary) : summaryPlaceholder(n)}` +
             `</div>`;
     }
 
@@ -1664,7 +2156,7 @@
     function summaryEditHtml(n) {
         return `<div class="summary-head">` +
             `<div class="detail-section-label summary">SUMMARY</div></div>` +
-            `<textarea id="summary-input" spellcheck="false">${esc(n.summary)}</textarea>` +
+            `<textarea id="summary-input" rows="7" aria-label="Edit summary" placeholder="Write a summary to allow follow-ups…" spellcheck="false">${esc(n.summary)}</textarea>` +
             `<button class="regen-submit" id="summary-update" disabled>Update</button>`;
     }
 
@@ -1694,7 +2186,7 @@
         summaryEditing = true;
         section.innerHTML = summaryEditHtml(n);
         bindSummaryUpdate(n);
-        $('summary-input').focus();
+        OpenLoopPanel.focusEditor($('summary-input'), section);
     }
 
     function bindSummaryUpdate(n) {
@@ -1728,9 +2220,8 @@
         const btn = $('detail-panel-inner').querySelector('.summary-regen');
         if (btn) btn.style.display = 'none';
         section.innerHTML = editPromptHtml(n);
-        section.scrollIntoView({ behavior: 'smooth', block: 'center' });
         $('regen-submit').addEventListener('click', () => submitRegen(n.id));
-        $('regen-prompt').focus();
+        OpenLoopPanel.focusEditor($('regen-prompt'), section);
     }
 
     async function postSummary(nodeId, prompt) {
@@ -1776,37 +2267,54 @@
             `<input id="mcp-input" type="text" value="${esc(n.mcp || '')}" placeholder="https://example.com/mcp" spellcheck="false" autocomplete="off">` +
             `<button id="mcp-save">Save</button>` +
             `</div>` +
+            mcpAuthSection(n) +
+            `<div class="mcp-hint">Remote HTTP MCP endpoint for this cell; optional Authorization header value (full value, prefix included). The key is stored per computer in .openloop/secrets.json5 (git-ignored) — it never travels with the repo, which only records that one is configured.</div>` +
+            `</div>`;
+    }
+
+    // The key is write-only: the input starts empty and the server never
+    // echoes a stored value. What the panel shows is state — set here (calm
+    // line + Clear), configured-but-missing (warn — the fresh-clone case:
+    // the repo says this MCP needs a key, this machine doesn't have one), or
+    // silence (no key configured; many MCPs need none).
+    function mcpAuthSection(n) {
+        if (!n.mcp) return '';
+        const set = !!n.mcp_auth_local;
+        const missing = !set && !!n.mcp_requires_auth;
+        const placeholder = set
+            ? 'Authorization is set — type a new value to replace it'
+            : missing
+                ? 'Authorization key missing on this computer — set it'
+                : 'Authorization header value (optional), e.g. Bearer sk-…';
+        const state = set
+            ? `<div class="mcp-auth-state ok">Authorization is set on this computer.</div>`
+            : missing
+                ? `<div class="mcp-auth-state warn">This MCP was configured with an authorization key, but it is not set on this computer — runs from here will call it without auth. Set it below.</div>`
+                : '';
+        return state +
             `<div class="mcp-row">` +
-            `<input id="mcp-auth-input" type="text" value="${esc(n.mcp_auth || '')}" placeholder="Authorization header value, e.g. Bearer sk-…" spellcheck="false" autocomplete="off">` +
+            `<input id="mcp-auth-input" type="text" value="" placeholder="${esc(placeholder)}" spellcheck="false" autocomplete="off">` +
             `<button id="mcp-auth-save">Save</button>` +
-            `</div>` +
-            `<div class="mcp-hint">Remote HTTP MCP endpoint and optional Authorization header value (full value, prefix included) for this cell. Config file is generated automatically.</div>` +
+            (set ? `<button id="mcp-auth-clear">Clear</button>` : '') +
             `</div>`;
     }
 
     function resultSection(n) {
         if (n.status === 'progress') {
             return `<div><div class="detail-section-label running">RUNNING</div>` +
-                renderBubble('output', '', 'in progress…') + `</div>`;
+                OpenLoopBubble.bubbleHtml('output', 'in progress…') + `</div>`;
         }
         const failed = n.status === 'failed';
         const cls = failed ? 'detail-section-label result error' : 'detail-section-label result';
         const label = failed ? 'ERROR' : 'RESULT';
         const again = failed ? '<button class="summary-regen" id="retry-btn">retry</button>' : '';
         return `<div><div class="${cls}">${label}</div>` +
-            renderBubble(failed ? 'output error' : 'output', '', n.output || '(empty)') + again + `</div>`;
+            OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', n.output || '(empty)') + again + `</div>`;
     }
 
-    function renderBubble(cls, label, text, threshold = 300) {
-        const labelHtml = label ? `<span class="wl-bubble-label">${esc(label)}</span>` : '';
-        const content = text.length > threshold
-            ? `<div class="wl-bubble-text truncated">${esc(text)}</div><button class="wl-expand-btn">show more</button>`
-            : `<div class="wl-bubble-text">${esc(text)}</div>`;
-        return `<div class="wl-bubble ${cls}">` +
-            labelHtml + content +
-            `<button class="wl-bubble-copy">${copyIcon()}</button>` +
-            `</div>`;
-    }
+    // The bubble grammar (markup, the line gate, the door, expansion memory)
+    // lives in bubble.js, shared with workflow-log.html — the char-gated
+    // renderBubble this file used to carry is gone.
 
     function bindCopyButtons(container) {
         container.querySelectorAll('.wl-bubble-copy').forEach(btn => {
@@ -1846,18 +2354,6 @@
         return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
     }
 
-    function bindExpandButtons(panel) {
-        panel.addEventListener('click', e => {
-            if (!e.target.classList.contains('wl-expand-btn')) return;
-            const content = e.target.previousElementSibling;
-            if (content && content.classList.contains('wl-bubble-text')) {
-                content.classList.remove('truncated');
-                content.classList.add('expanded');
-                e.target.remove();
-            }
-        });
-    }
-
     function copyIcon() {
         return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
             `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
@@ -1889,10 +2385,27 @@
         checkAddRootPinned();
         checkRunLogHtml();
         checkRunLogEmpty();
+        checkListDelete();
+        checkRunsSectionButtons();
+        checkRunDisabledAttr();
         checkRunViewHtml();
+        checkThreadDelete();
+        checkThreadHeaderMeta();
+        checkRootRunOf();
+        checkConsumePendingRunFocus();
+        checkThreadOpensAtTip();
+        checkFooterStructure();
+        checkFooterImmovable();
+        checkFooterFadeSuppressed();
+        checkComposerCapped();
+        checkCmdEnterDockEscape();
+        checkComposerCmdEnterModes();
+        checkScheduleRunFocus();
+        checkFooterAbsentInNodeView();
         checkNodeTitleEveryCard();
         checkNeighborTitlesClear();
         checkInsertBtnStillCentered();
+        checkAddChildReadiness();
         checkEdgesStillDrawn();
         checkBeCaptionCascade();
         checkBeCaptionColors();
@@ -1900,6 +2413,11 @@
         checkBeNoNamesUnchanged();
         checkDotTooltipNames();
         checkNameInputEveryNode();
+        checkEditFieldGrammar();
+        checkEditFieldExclusions();
+        checkMcpAuthSection();
+        checkMcpAuthCellIndication();
+        checkAgentSectionEveryNode();
         checkClampGrammar();
         console.log('All sanity checks passed.');
     }
@@ -1917,8 +2435,10 @@
         console.assert(html.includes('data-run-id="r1"'), 'runLog: run id attr');
         console.assert((html.match(/run-focus-btn/g) || []).length === 2, 'runLog: two focus arrows');
         console.assert(html.includes('convo-count">+1'), 'runLog: follow-up count badge');
-        console.assert(html.includes('run-log-meta"><button'), 'runLog: header arrow first (left)');
-        console.log('OK: runLogHtml arrows');
+        console.assert(html.includes('run-log-meta"><span>'), 'runLog: caption leads the header');
+        console.assert(html.indexOf('run-del-btn') < html.indexOf('run-focus-btn'), 'runLog: header bin before the arrow');
+        console.assert(html.lastIndexOf('run-del-btn') < html.lastIndexOf('run-focus-btn'), 'runLog: footer bin before the arrow');
+        console.log('OK: runLogHtml chrome order');
     }
 
     function checkRunLogEmpty() {
@@ -1927,6 +2447,54 @@
         console.assert(html.includes('(empty)') && !html.includes('in progress'), 'runLog: failed + empty → (empty)');
         console.assert(!html.includes('convo-count'), 'runLog: no badge on single-run convo');
         console.log('OK: runLogHtml empty output');
+    }
+
+    // Full-RUN delete: a bin in the header AND the footer of every list
+    // item, caption before both, arrow last; an in-flight turn anywhere in
+    // the thread disables both bins with the unlock sentence. Copy is the
+    // list's own ("run", never "turn") — pinned here.
+    function checkListDelete() {
+        const now = Date.now();
+        const root = { id: 'r1', root_run_id: 'r1', status: 'success', took: 2, created_at: now, prompt: 'p', output: 'o' };
+        const done = { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', created_at: now + 1, prompt: 'p2' };
+        const ok = runLogHtml(root, [root, done]);
+        console.assert((ok.match(/class="run-del-btn/g) || []).length === 2, 'listDel: a bin in the header AND the footer');
+        console.assert(ok.includes('Delete this run and its 1 follow-up'), 'listDel: title teaches the cascade');
+        console.assert(ok.indexOf('<span>') < ok.indexOf('run-del-btn'), 'listDel: caption before the buttons');
+        const busy = runLogHtml(root, [root, { ...done, status: 'progress' }]);
+        console.assert((busy.match(/ disabled/g) || []).length === 2 && busy.includes(`title="${RUN_DEL_COPY.busy}"`),
+            'listDel: an in-flight follow-up disables both bins with the unlock sentence');
+        console.assert(RUN_DEL_COPY.armed === 'Confirm — delete this run', 'listDel: armed copy pinned');
+        console.log('OK: runs-list delete markup');
+    }
+
+    // Runs section bookends: exactly two New run buttons, both OUTSIDE
+    // #runs-list (they must survive the 5s renderLogs rewrite), both gated
+    // by the chain rule with the one-sentence reason.
+    function checkRunsSectionButtons() {
+        const ready = runsSection({ id: 'n1', runnable: true });
+        console.assert((ready.match(/class="new-run-btn/g) || []).length === 2,
+            'runsBtns: two — the pill in the label row, the wide one after the list');
+        const list = ready.indexOf('id="runs-list"');
+        console.assert(ready.indexOf('new-run-btn') < list && ready.lastIndexOf('new-run-btn') > list,
+            'runsBtns: bookends live outside #runs-list — no rebind flicker on the 5s rewrite');
+        console.assert(!ready.includes('disabled'), 'runsBtns: a runnable node renders both enabled');
+        const gated = runsSection({ id: 'n1', runnable: false });
+        const attr = ' disabled title="chain not ready — parents need summaries"';
+        console.assert(gated.split(attr).length - 1 === 2, 'runsBtns: an unready chain gates BOTH, same sentence');
+        console.log('OK: runs section buttons');
+    }
+
+    // One gate string, three buttons: the cell's Run and both panel New runs
+    // render the identical disabled attribute — single source (runDisabledAttr).
+    function checkRunDisabledAttr() {
+        const n = { id: 'n1', runs: { total: 3, success: 1, failed: 2, active: 0 } };
+        const attr = ' disabled title="chain not ready — parents need summaries"';
+        console.assert(runButton({ ...n, runnable: false }).includes(attr), 'gate: the cell Run carries the attr');
+        console.assert(!runButton({ ...n, runnable: true }).includes('disabled'), 'gate: runnable → clean attribute');
+        console.assert(runsSection({ ...n, runnable: false }).split(attr).length - 1 === 2,
+            'gate: both panel buttons render the identical attr');
+        console.log('OK: run disabled gate (single source)');
     }
 
     function checkRunViewHtml() {
@@ -1948,6 +2516,273 @@
         console.log('OK: runViewHtml');
     }
 
+    // Per-turn delete: a quiet icon in EVERY thread row's meta, disabled
+    // while the turn is in flight, copy character-identical to
+    // workflow-log.js's THREAD_DEL_COPY — the cross-page single source this
+    // check is here to enforce.
+    function checkThreadDelete() {
+        const ok = { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o' };
+        const html = threadEntryHtml(ok);
+        console.assert(html.includes('run-del-btn" data-run-id="r1"'), 'threadDel: every turn row carries the delete button');
+        console.assert(html.includes(`title="${THREAD_DEL_COPY.rest}"`), 'threadDel: rest title teaches the splice');
+        console.assert(html.indexOf('<span>') < html.indexOf('run-del-btn'), 'threadDel: caption leads, button follows it inline');
+        for (const status of ['progress', 'summarizing']) {
+            const busy = threadEntryHtml({ ...ok, id: 'r9', status });
+            console.assert(busy.includes('disabled') && busy.includes(`title="${THREAD_DEL_COPY.busy}"`),
+                `threadDel: ${status} renders disabled with the busy title`);
+        }
+        console.assert(THREAD_DEL_COPY.armed === 'Confirm — delete this turn', 'threadDel: armed copy pinned');
+        console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
+            'threadDel: teaching hint pinned');
+        console.log('OK: per-turn delete markup');
+    }
+
+    // The header count follows the splice, not the first paint — the stale
+    // "N runs" after a follow-up (or a delete) is what runViewHeaderMeta +
+    // refreshThreadHeaderMeta are here to fix.
+    function checkThreadHeaderMeta() {
+        const now = Date.now();
+        const thread = [
+            { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: now, prompt: 'p', output: 'o' },
+            { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', took: 1, created_at: now + 1, prompt: 'p2', output: 'o2' },
+            { id: 'r3', root_run_id: 'r1', parent_run_id: 'r2', status: 'success', took: 1, created_at: now + 2, prompt: 'p3', output: 'o3' }
+        ];
+        console.assert(runViewHeaderMeta(thread[0], thread).startsWith('3 runs · '), 'threadMeta: counts the whole thread');
+        const spliced = [thread[0], thread[2]]; // r2 deleted — r3 reparented to r1
+        console.assert(runViewHeaderMeta(spliced[0], spliced).startsWith('2 runs · '), 'threadMeta: recounts after the splice');
+        console.log('OK: thread header meta recount');
+    }
+
+    // rootRunOf: root → itself, follow-up → its root_run_id, unknown/dangling
+    // → null (silent node view). Pure, zero DOM.
+    function checkRootRunOf() {
+        const root = { id: 'r1', root_run_id: 'r1', created_at: 1 };
+        const tip = { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', created_at: 2 };
+        const logs = [root, tip];
+        console.assert(rootRunOf('r1', logs) === 'r1', 'rootRunOf: root maps to itself');
+        console.assert(rootRunOf('r2', logs) === 'r1', 'rootRunOf: follow-up maps to its root_run_id');
+        console.assert(rootRunOf('nope', logs) === null, 'rootRunOf: unknown id → null');
+        console.assert(rootRunOf('r1', []) === null, 'rootRunOf: empty logs → null');
+        console.assert(rootRunOf('r2', [tip]) === null, 'rootRunOf: dangling root_run_id → null');
+        console.log('OK: rootRunOf');
+    }
+
+    // Pending-run arrival, hermetic: seeds runsCache + the panel stub (no
+    // fetch — loadLogs' network path is exactly what ISOLATED_RUN must not
+    // need). Follow-up → thread at its ROOT + beacon on the tapped entry;
+    // ghost id → node view + the one-line stale notice; closePanel clears it.
+    function checkConsumePendingRunFocus() {
+        const root = { id: 'r1', root_run_id: 'r1', status: 'failed', created_at: 1, prompt: 'p', output: 'boom' };
+        const tip = { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', created_at: 2, prompt: 'p2', output: 'o', summary: 's' };
+        runsCache = [root, tip];
+        selectedId = 'n1';
+        pendingRunFocus = 'r2';
+        $('detail-panel-inner').innerHTML = runsSection({ id: 'n1', runnable: true }); // hermetic #runs-list
+        console.assert(consumePendingRunFocus() === true, 'runFocus: follow-up consumed');
+        console.assert(pendingRunFocus === null, 'runFocus: flag nulled on first use');
+        console.assert(focusedRunId === 'r1', 'runFocus: thread opened at the ROOT run');
+        console.assert($('detail-panel-inner').querySelector('.run-back-btn'), 'runFocus: thread view rendered');
+        const row = document.querySelector('.run-log[data-run-id="r2"]');
+        console.assert(row && row.classList.contains('beacon'), 'runFocus: tapped follow-up entry beacons');
+        pendingRunFocus = 'ghost';
+        console.assert(consumePendingRunFocus() === false, 'runFocus: ghost id not consumed');
+        console.assert(staleDeepRun === true, 'runFocus: ghost id raises the stale notice');
+        $('detail-panel-inner').innerHTML = runsSection({ id: 'n1', runnable: true }); // thread view replaced the stub — restub
+        renderLogs(runsCache);
+        console.assert($('runs-list').innerHTML.includes("isn't on this node anymore"), 'runFocus: stale notice renders above the runs list');
+        console.assert($('runs-list').querySelectorAll('.run-log').length === 1, 'runFocus: runs list itself renders normally');
+        closePanel();
+        console.assert(staleDeepRun === false && pendingRunFocus === null && focusedRunId === null,
+            'runFocus: closePanel clears the pending-run state');
+        console.log('OK: consumePendingRunFocus');
+    }
+
+    // Opening a thread lands at its tip: focusRun must send the body to the
+    // NEWEST turn — a conversation opens at its news, not its first message
+    // — while the back button keeps focus. Pinned through a scrollTo spy:
+    // the TARGET is the contract, not the glide (smooth scrolling is async
+    // by design, and the suite must not depend on its timing). The spy also
+    // shields engines without Element.scrollTo (the offline harness's jsdom).
+    function checkThreadOpensAtTip() {
+        const root = { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' };
+        const tip = { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', took: 1, created_at: 2, prompt: 'p2', output: 'o2', summary: 's2' };
+        runsCache = [root, tip];
+        const proto = Element.prototype;
+        const real = proto.scrollTo;
+        let target = null;
+        proto.scrollTo = function (opts) { // swallow the call: no glide, no side effects
+            if (this.classList && this.classList.contains('detail-panel-body')) target = opts;
+        };
+        try { focusRun('r1'); }
+        finally { if (real) proto.scrollTo = real; else delete proto.scrollTo; }
+        const inner = $('detail-panel-inner');
+        const body = inner.querySelector('.detail-panel-body');
+        console.assert(focusedRunId === 'r1' && body, 'openTip: the thread view rendered');
+        console.assert(target && target.top >= body.scrollHeight - 1, 'openTip: the body is sent to the newest turn');
+        console.assert(document.activeElement === inner.querySelector('.run-back-btn'),
+            'openTip: the back button keeps focus through the landing');
+        closePanel();
+        console.log('OK: opening a thread lands at its tip');
+    }
+
+    // scheduleRunFocus names its own ordering invariant: selectNode FIRST
+    // (openPanel wipes focus state — the flag must survive it), flag AFTER.
+    // A node deleted mid-flight opens nothing and sets nothing.
+    function checkScheduleRunFocus() {
+        nodes = [{ id: 'n1', parent_id: null, agent: 'a', prompt: 'p', status: 'success',
+            took: 2, created_at: 1, summary: 's', mcp: '', mcp_requires_auth: false, mcp_auth_local: false, personas: [],
+            active: true, name: 'x', runnable: true, runs: { total: 1, success: 1, failed: 0, active: 0 } }];
+        closePanel(); // a known floor, independent of the checks before this one
+        scheduleRunFocus('nope', 'r9');
+        console.assert(selectedId === null && pendingRunFocus === null,
+            'schedFocus: unknown node → no panel, no flag');
+        scheduleRunFocus('n1', 'r9');
+        console.assert(selectedId === 'n1', 'schedFocus: the node\'s panel opens (selectNode)');
+        console.assert(pendingRunFocus === 'r9', 'schedFocus: the flag survives openPanel — set after');
+        closePanel();
+        console.assert(pendingRunFocus === null, 'schedFocus: closePanel clears a pending focus');
+        console.log('OK: scheduleRunFocus');
+    }
+
+    // ── The dock (pinned panel footer) ──────────────────────────────────────
+    // In thread mode the panel is a triad: header → scroll body → dock. The
+    // composer lives in the dock — a flex sibling AFTER the body, inside
+    // #detail-panel-inner (so blockedByTyping still guards it) but outside
+    // the scroll body (so the 5s poll never rewrites it and reading never
+    // moves it). checkFooterStructure renders its own hermetic thread (a
+    // summarised tip → composer state); the three checks after it reuse it,
+    // and checkFooterAbsentInNodeView reuses checkScheduleRunFocus's node panel.
+    function checkFooterStructure() {
+        const root = { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o' };
+        const tip = { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', took: 1, created_at: 2, prompt: 'p2', output: 'o2', summary: 's' };
+        runsCache = [root, tip];
+        focusedRunId = 'r1';
+        enterThread(root);
+        const inner = $('detail-panel-inner');
+        const footer = inner.querySelector('.detail-panel-footer');
+        const body = inner.querySelector('.detail-panel-body');
+        console.assert(footer, 'dock: thread view renders the footer');
+        console.assert(footer.parentElement === inner, 'dock: direct child of #detail-panel-inner (inside blockedByTyping\'s scope)');
+        console.assert(footer.previousElementSibling === body, 'dock: flex sibling AFTER the scroll body');
+        console.assert(body && body.contains($('thread-messages')), 'dock: the thread stays in the scroll body');
+        const text = $('run-followup-text');
+        console.assert(text && text.closest('.detail-panel-footer') === footer, 'dock: the composer lives in the dock');
+        console.log('OK: dock structure (header → body → dock)');
+    }
+
+    // Pinned by layout, not by scroll math: scrolling the body must not move
+    // the dock by a sub-pixel. The spacer guarantees the body CAN scroll, so
+    // the assert cannot pass vacuously on a short thread.
+    function checkFooterImmovable() {
+        const inner = $('detail-panel-inner');
+        const footer = inner.querySelector('.detail-panel-footer');
+        const body = inner.querySelector('.detail-panel-body');
+        const spacer = document.createElement('div');
+        spacer.style.height = '4000px';
+        body.appendChild(spacer);
+        const top = footer.getBoundingClientRect().top;
+        body.scrollTop = 60;
+        console.assert(body.scrollTop === 60, 'dock: precondition — the body actually scrolled');
+        console.assert(Math.abs(footer.getBoundingClientRect().top - top) < 0.5, 'dock: footer top invariant under body scroll');
+        body.scrollTop = 0;
+        spacer.remove();
+        console.log('OK: dock immovable under body scroll');
+    }
+
+    // The dock is the terminus: the body's bottom fade must be suppressed
+    // while it exists (fade + dock shadow would stack two depth devices,
+    // and the fade's solid #16181f end fights workflow-log's lighter card).
+    // fadeDisplay/pseudoStylesWork: strict in every browser — but engines
+    // without pseudo-element computed styles (jsdom in the offline harness)
+    // silently return the ELEMENT's style instead. The sentinel probe tells
+    // the two apart, so the fade asserts skip rather than lie.
+    function pseudoStylesWork() {
+        const probe = document.createElement('div');
+        const style = document.createElement('style');
+        probe.id = 'pseudo-probe';
+        style.textContent = '#pseudo-probe::after { display: table; }';
+        document.head.appendChild(style);
+        document.body.appendChild(probe);
+        const ok = getComputedStyle(probe, '::after').display === 'table';
+        probe.remove();
+        style.remove();
+        return ok;
+    }
+
+    function fadeDisplay(body) {
+        return getComputedStyle(body, '::after').display;
+    }
+
+    function checkFooterFadeSuppressed() {
+        const inner = $('detail-panel-inner');
+        console.assert(inner.querySelector('.detail-panel-footer'), 'fade: precondition — the dock exists');
+        console.assert(!pseudoStylesWork() || fadeDisplay(inner.querySelector('.detail-panel-body')) === 'none',
+            'fade: suppressed while the dock exists');
+        console.log('OK: bottom fade suppressed under the dock');
+    }
+
+    // The stream always keeps at least half the panel: the composer's
+    // max-height cap holds (40vh in panel.css).
+    function checkComposerCapped() {
+        const cap = parseFloat(getComputedStyle($('run-followup-text')).maxHeight);
+        console.assert(cap > 0 && cap <= window.innerHeight * 0.45, 'cap: composer max-height ≤ 45% of the viewport');
+        console.log('OK: dock composer height capped');
+    }
+
+    // The exact regression this change fixes, pinned: ⌘↵ on the dock must
+    // hand the caret back even when the submit self-guards on empty — an
+    // empty-but-FOCUSED field still trips fieldHasTyping, so both the
+    // submit's own loadLogs and the 5s poll would stall silently behind
+    // blockedByTyping and only a reload would show the truth. Empty field
+    // ⇒ submitFollowup returns before any POST: side-effect-free. The
+    // grammar itself (default prevented, one submit, plain Enter inert)
+    // is pinned by panel.js's own check of the shared helper.
+    function checkCmdEnterDockEscape() {
+        const root = { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' };
+        runsCache = [root];
+        focusedRunId = 'r1';
+        enterThread(root); // hermetic thread — the composer + its bindings render with it
+        const text = $('run-followup-text');
+        text.focus();
+        text.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true }));
+        console.assert(document.activeElement !== text, 'cmdDock: focus leaves the field on ⌘↵ — the blur is the fix');
+        console.assert(fieldHasTyping(text) === false, 'cmdDock: a submitted empty field escapes the typing gate');
+        console.assert(!$('error-banner').classList.contains('show'), 'cmdDock: empty submit self-guards — no error banner');
+        closePanel();
+        console.log('OK: ⌘↵ dock escape (blur before submit)');
+    }
+
+    // The modal's ⌘↵ is run-mode only: run + empty text self-guards (the
+    // modal stays open, no run), insert/child modes no-op (a runner must
+    // be picked — the hint teaches it; firing a hidden default would be).
+    // The binding lives at module scope next to #composer-text's input
+    // listener, so it can only ever be singular. Empty field ⇒ no POST.
+    function checkComposerCmdEnterModes() {
+        nodes = [{ id: 'n1', parent_id: null, agent: 'codex', prompt: 'p', status: 'success', created_at: 1 }];
+        openRunComposer('n1');
+        $('composer-text').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true }));
+        console.assert($('composer').classList.contains('open') && composerMode === 'run',
+            'cmdModal: run mode + empty text self-guards — modal stays, no run');
+        openInsert('n1');
+        $('composer-text').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, cancelable: true }));
+        console.assert(composerMode === 'insert' && $('composer').classList.contains('open'),
+            'cmdModal: choice modes no-op — a runner must be picked first');
+        closeComposer();
+        closePanel();
+        console.log('OK: modal ⌘↵ (run submits, choice modes wait)');
+    }
+
+    // Node view: no dock at all — no gap, no second hairline — and the
+    // body's fade returns. Runs on the node panel checkScheduleRunFocus left
+    // behind (closePanel closes it but leaves its DOM in place).
+    function checkFooterAbsentInNodeView() {
+        const inner = $('detail-panel-inner');
+        console.assert(!inner.querySelector('.detail-panel-footer'), 'nodeView: no dock rendered');
+        console.assert(!pseudoStylesWork() || fadeDisplay(inner.querySelector('.detail-panel-body')) !== 'none',
+            'nodeView: bottom fade back');
+        console.log('OK: node view has no dock');
+    }
+
     function checkClampPanelWidth() {
         const clamp = OpenLoopPanel.clampPanelWidth;
         console.assert(clamp(9999, 375)  <= 375,  'clamp: 375px phone must never overflow');
@@ -1956,12 +2791,34 @@
         console.log('OK: clampPanelWidth (shared panel.js)');
     }
 
+    // The line gate, measured through the shared module (the char threshold
+    // is gone): explicit \n breaks make the painted line count deterministic
+    // at any probe width. ≤ 10 free, ≥ 11 folded at 3 + the door offered.
+    // jsdom has no layout engine — skip, don't fake (fadeDisplay convention).
     function checkRenderBubbleTruncation() {
-        const short = renderBubble('output', '', 'hi');
-        const long  = renderBubble('output', '', 'x'.repeat(301));
-        console.assert(!short.includes('wl-expand-btn'), 'bubble: short text has no expand button');
-        console.assert(long.includes('wl-expand-btn'),   'bubble: long text truncates with expand button');
-        console.log('OK: renderBubble truncation');
+        if (!OpenLoopBubble.layoutWorks()) {
+            console.log('OK: bubble line gate (skipped — no layout engine)');
+            return;
+        }
+        const host = document.createElement('div');
+        host.style.cssText = 'width:360px;position:fixed;top:0;left:0';
+        document.body.appendChild(host);
+        [[2, false], [10, false], [11, true], [40, true]].forEach(([n, fold]) => {
+            host.innerHTML = OpenLoopBubble.bubbleHtml('output', probeLines(n));
+            OpenLoopBubble.gateBubbles(host);
+            const text = host.querySelector('.wl-bubble-text');
+            const door = host.querySelector('.wl-expand-btn');
+            console.assert(text.classList.contains('truncated') === fold,
+                'bubble: ' + n + ' lines → ' + (fold ? 'folded' : 'free'));
+            console.assert(door && door.hidden === !fold,
+                'bubble: ' + n + ' lines → door ' + (fold ? 'shown' : 'hidden'));
+        });
+        host.remove();
+        console.log('OK: bubble line gate (≤10 free · >10 folds at 3)');
+    }
+
+    function probeLines(n) {
+        return Array.from({ length: n }, (_, i) => 'line ' + (i + 1)).join('\n');
     }
 
     function checkAddRootPinned() {
@@ -2026,6 +2883,23 @@
         // offsetTop ignores the translateY(-50%), so the visual center sits AT it
         console.assert(Math.abs(btn.offsetTop - slot.offsetHeight / 2) < 1, 'insertBtn: the + stays dead-center despite the title above');
         console.log('OK: insert button centered');
+    }
+
+    // The right-side + exists only where a child may fork: loading
+    // (progress/summarizing) and errored (failed) cells render none; answered
+    // and success cells do, and their + still opens the composer.
+    function checkAddChildReadiness() {
+        const base = { agent: 'a', prompt: 'p', created_at: 1 };
+        nodes = ['progress', 'summarizing', 'failed', 'answered', 'success'].map((s, i) => ({
+            ...base, id: 'f' + i, parent_id: null, status: s }));
+        renderGrid();
+        const plus = id => document.querySelector(`.node-card[data-id="${id}"] .node-add-child`);
+        console.assert(['f0', 'f1', 'f2'].every(id => !plus(id)), 'addChild: no + on loading/errored cells');
+        console.assert(plus('f3') && plus('f4'), 'addChild: + renders on answered and success cells');
+        plus('f4').click();
+        console.assert($('composer').classList.contains('open'), 'addChild: a ready + still opens the composer');
+        closeComposer();
+        console.log('OK: add-child gated by readiness');
     }
 
     function checkEdgesStillDrawn() {
@@ -2144,6 +3018,121 @@
         console.log('OK: name input on every node');
     }
 
+    // Text→field conversions open a 7-line canvas: rows="7" breathes with the
+    // mobile 16px font (a fixed px height would not) and outruns the CSS
+    // min-height floors, which stay as inert guards. The field self-describes
+    // via aria-label — the section label is a styled div, invisible to
+    // assistive tech. One grammar across the editor sites on both pages; the
+    // dock composer is deliberately NOT one of them (checkEditFieldExclusions).
+    function checkEditFieldGrammar() {
+        const n = { id: 'n1', prompt: 'p', summary: 's' };
+        [editPromptHtml(n), summaryEditHtml(n), runSummaryEditHtml(n)]
+            .forEach(h => console.assert(h.includes('rows="7"'), 'editFields: 7 rows'));
+        console.assert(editPromptHtml(n).includes('aria-label="Edit prompt"'), 'editFields: prompt self-describes');
+        [summaryEditHtml(n), runSummaryEditHtml(n)]
+            .forEach(h => console.assert(h.includes('aria-label="Edit summary"'), 'editFields: summary self-describes'));
+        console.assert(followupComposerHtml().includes('aria-label="Continue conversation"'), 'editFields: composer self-describes');
+        console.assert(runSummaryEditHtml({ summary: null }).includes('Write a summary to allow follow-ups'),
+            'editFields: the empty Add state teaches, in the hint copy\'s own words');
+        console.log('OK: edit fields default to 7 rows');
+    }
+
+    // Deliberate exclusions, pinned so nobody "fixes" them later: the name
+    // field is an auto-growing rows=1 (a different creature), the modal
+    // composer has its own centered pose, .mcp-row inputs are single-line,
+    // and the dock composer is a compact rows=3 capsule — a 7-row canvas
+    // would eat the pinned dock it lives in.
+    function checkEditFieldExclusions() {
+        console.assert(nameSection({ name: 'x' }).includes('rows="1"'),
+            'exclusions: name field stays autosize rows=1');
+        console.assert($('composer-text').rows === 2,
+            'exclusions: modal composer untouched (default rows)');
+        const dock = followupComposerHtml();
+        console.assert(dock.includes('rows="3"'), 'exclusions: dock composer stays compact rows=3');
+        console.assert(dock.includes('composer-send'), 'exclusions: dock composer sends via the icon circle');
+        console.log('OK: edit field exclusions untouched');
+    }
+
+    // MCP auth is write-only: the panel never echoes a stored key, it shows
+    // state. Three truths: set here (ok line + Clear), configured-but-
+    // missing (warn — the fresh-clone case), nothing (silence — many MCPs
+    // need no auth). No URL, no auth row at all.
+    function checkMcpAuthSection() {
+        const url = { mcp: 'https://mcp.example' };
+        const set = mcpAuthSection({ ...url, mcp_auth_local: true, mcp_requires_auth: true });
+        console.assert(set.includes('set on this computer'), 'mcpAuth: local key → calm ok line');
+        console.assert(set.includes('mcp-auth-clear'), 'mcpAuth: Clear appears only when a key is stored');
+        console.assert(set.includes('value=""'), 'mcpAuth: the field never carries a stored key');
+        const missing = mcpAuthSection({ ...url, mcp_auth_local: false, mcp_requires_auth: true });
+        console.assert(missing.includes('mcp-auth-state warn'), 'mcpAuth: fresh clone warns');
+        console.assert(missing.includes('missing on this computer'), 'mcpAuth: the warning says which computer');
+        console.assert(!missing.includes('mcp-auth-clear'), 'mcpAuth: nothing to Clear when no key is stored here');
+        const none = mcpAuthSection({ ...url, mcp_auth_local: false, mcp_requires_auth: false });
+        console.assert(!none.includes('mcp-auth-state'), 'mcpAuth: no state line when no key is configured');
+        console.assert(!mcpSection({ mcp: '', mcp_auth_local: false, mcp_requires_auth: false }).includes('mcp-auth-input'),
+            'mcpAuth: no auth row without an MCP URL');
+        console.log('OK: mcp auth section states');
+    }
+
+    // The cell itself announces a missing key — no tapping required to find
+    // out: the card carries data-mcp-auth="missing" (amber header tint via
+    // CSS), the bird's-eye dot wears the dashed halo, and the header warning
+    // counts exactly the missing cells (hidden at zero). A set key and an
+    // unconfigured MCP both leave the card unmarked.
+    function checkMcpAuthCellIndication() {
+        const base = { parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1 };
+        nodes = [
+            { ...base, id: 'set', mcp: 'https://one', mcp_requires_auth: true, mcp_auth_local: true },
+            { ...base, id: 'gone', mcp: 'https://two', mcp_requires_auth: true, mcp_auth_local: false },
+            { ...base, id: 'none', mcp: 'https://three', mcp_requires_auth: false, mcp_auth_local: false }];
+        render();
+        console.assert(document.querySelector('.node-card[data-id="gone"][data-mcp-auth="missing"]'),
+            'mcpCell: the missing cell carries the marker');
+        console.assert(!document.querySelector('.node-card[data-id="set"][data-mcp-auth]'),
+            'mcpCell: a set key leaves the card unmarked');
+        console.assert(!document.querySelector('.node-card[data-id="none"][data-mcp-auth]'),
+            'mcpCell: an unconfigured MCP leaves the card unmarked');
+        const warn = $('mcp-auth-warn');
+        console.assert(warn && !warn.hidden && warn.querySelector('.gt-warn-count').textContent === '1',
+            'mcpCell: the header warning counts exactly the missing cells');
+        document.body.classList.add('birds-eye');
+        renderBirdsEye();
+        console.assert(document.querySelector('.be-dot.mcp-missing'), 'mcpCell: the bird\'s-eye dot wears the dashed halo');
+        document.body.classList.remove('birds-eye');
+        nodes = [];
+        render();
+        console.assert($('mcp-auth-warn').hidden, 'mcpCell: zero missing → warning hidden');
+        console.log('OK: mcp auth cell indication');
+    }
+
+    // AGENT section on every node: composer pill grammar at the panel bottom —
+    // the current agent selected + inert, the others clickable, the whole
+    // picker locked while the node runs, and an agent gone from the server
+    // still rendered so the current fact stays visible.
+    function checkAgentSectionEveryNode() {
+        const saved = agents;
+        agents = ['codex', 'cc_docker', 'mistral-vibe'];
+        const base = { id: 'n2', parent_id: 'n1', prompt: 'p', created_at: 2 };
+        const html = agentSection({ ...base, agent: 'codex', status: 'success' });
+        console.assert(html.includes('>AGENT<'), 'agentSection: label reads AGENT');
+        console.assert(html.includes('class="agent-btn selected" data-agent="codex" aria-pressed="true" disabled'),
+            'agentSection: current agent selected, pressed and inert');
+        console.assert(html.includes('class="agent-btn" data-agent="cc_docker" aria-pressed="false">'),
+            'agentSection: other agents offered, clickable');
+        console.assert(html.includes('next run'), 'agentSection: hint names what the switch affects');
+        const running = agentSection({ ...base, agent: 'codex', status: 'progress' });
+        console.assert(running.includes('data-agent="mistral-vibe" aria-pressed="false" disabled'),
+            'agentSection: a running node locks the whole picker');
+        console.assert(running.includes('unlocks when the run finishes'), 'agentSection: locked hint explains itself');
+        const gone = agentSection({ ...base, agent: 'legacy', status: 'success' });
+        console.assert(gone.includes('data-agent="legacy"'), 'agentSection: an agent gone from the server still renders');
+        agents = [];
+        console.assert(agentSection({ ...base, agent: 'codex', status: 'success' }).includes('summary-missing'),
+            'agentSection: no agents on the server → muted line, not a broken picker');
+        agents = saved;
+        console.log('OK: agent section on every node');
+    }
+
     function checkClampGrammar() {
         const probe = document.createElement('div');
         probe.className = 'clamp-10';
@@ -2158,8 +3147,16 @@
 
     $('composer-text').addEventListener('input', e => {
         const ready = e.target.value.trim().length > 0;
-        document.querySelectorAll('.agent-btn').forEach(b => { b.disabled = !ready; });
+        // scoped to the composer: the panel's AGENT pills share .agent-btn and
+        // own their disabled state (current agent / running lock)
+        $('composer-agents').querySelectorAll('.agent-btn').forEach(b => { b.disabled = !ready; });
     });
+
+    // ⌘↵ on the modal, bound EXACTLY ONCE at module scope — #composer-text
+    // is static body-level DOM (graph.html) and a per-showComposer bind
+    // would stack one listener per open (the add-root comment two blocks
+    // down is the same rule). composerCmdEnter self-guards on mode.
+    OpenLoopPanel.bindCmdEnterSubmit($('composer-text'), composerCmdEnter);
 
     $('composer-cancel').addEventListener('click', closeComposer);
     $('composer-mcp-toggle').addEventListener('click', () => {
@@ -2178,6 +3175,13 @@
         openComposer(null);
     });
 
+    // toolbar warning → the first cell still waiting on its key: same
+    // arrival as a bird's-eye tap (mode reset, panel open, scroll, beacon)
+    $('mcp-auth-warn').addEventListener('click', () => {
+        const first = nodes.find(mcpAuthMissing);
+        if (first) focusFromBirds(first.id);
+    });
+
     document.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
         if ($('composer').classList.contains('open')) return closeComposer();
@@ -2191,27 +3195,53 @@
     } else {
         (async () => {
             if (ISOLATED_RUN) { runSanityChecks(); return; }
-            bindExpandButtons($('detail-panel-inner'));
+            // One door listener for panel + cells + threads (capture-phase
+            // delegation — see bubble.js: a cell's door must open the fold,
+            // not the panel).
+            OpenLoopBubble.bindExpand();
             bindCanvasDismiss();
             // Panel physics (clamp, drag, mobile sheet) live in panel.js,
             // shared with workflow-log.html. Shared width memory:
             // localStorage['openloop-panel-w'] is a contract with that page —
             // both pages run the identical clamp.
             OpenLoopPanel.initPanelResize();
+            // Width and webfont arrival both change how many lines a text
+            // paints — re-gate once geometry settles (never mid-drag).
+            document.addEventListener('openloop:panel-resized', regateBubbles);
+            if (document.fonts?.ready) document.fonts.ready.then(regateBubbles);
+            let resizeTimer = null; // rotation: panel is 100vw on mobile
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(regateBubbles, 150);
+            });
             if (localStorage.getItem('openloop-birds-eye') === 'birds') setMode('birds');
             await loadAgents();
             await loadInstances();
             await load();
-            focusFromDeepLink(new URLSearchParams(location.search).get('node'));
+            const params = new URLSearchParams(location.search);
+            focusFromDeepLink(params.get('node'), params.get('run'));
             setInterval(load, 5000);
             startCountdown();
         })();
     }
 
-    // Deep link from notifications.html (?node=<id>): focus the node's cell
-    // and open its right panel. Silent fallback if the node no longer exists.
-    function focusFromDeepLink(id) {
+    // Open the node's panel and focus runId's thread once its logs land — the
+    // same arrival path as the notifications deep link. Flag goes AFTER
+    // selectNode: openPanel wipes focus state, and closePanel clears the flag.
+    function scheduleRunFocus(nodeId, runId) {
+        if (!nodes.some(n => n.id === nodeId)) return; // deleted mid-flight: no panel, no flag
+        selectNode(nodeId);
+        pendingRunFocus = runId; // consumed in loadLogs → consumePendingRunFocus
+    }
+
+    // Deep link from notifications.html (?node=<id>&run=<run id>): focus the
+    // node's cell, open its right panel and — when &run= is present — open
+    // that run's conversation once its logs arrive (consumePendingRunFocus in
+    // loadLogs). Silent fallback if the node (or the run) no longer exists;
+    // a run without a valid node is ignored — runs are reached via their node.
+    function focusFromDeepLink(id, runId) {
         if (!id || !nodes.some(n => n.id === id)) return;
+        pendingRunFocus = runId || null;
         focusFromBirds(id);
     }
 })();

@@ -17,6 +17,9 @@
             --accent-green-border: rgba(52,199,89,0.30);
             --accent-blue-dim:     rgba(10,132,255,0.12);
             --accent-blue-border:  rgba(10,132,255,0.28);
+            --accent-red:          #ff453a;
+            --accent-red-deep:     #d70015; /* armed delete fill — white text passes 4.5:1 */
+            --accent-red-soft:     #ff6961;
             --edge-color:          rgba(52,199,89,0.35);
             --edge-color-hover:    rgba(52,199,89,0.80);
             --text-primary:        #f0f0f5;
@@ -340,20 +343,31 @@
         .detail-panel-body .detail-section.output-section .detail-section-label { color: #22c55e; }
         .detail-panel-body .detail-section.error-section .detail-section-label { color: #ef4444; }
 
-        /* ── Mini-map ── */
-        #minimap {
+        /* ── Mini-map (+ follow-up reopen button stacked under it) ── */
+        #minimap-stack {
             position: fixed;
             top: calc(var(--toolbar-height) + 8px);
             left: 8px;
             bottom: unset;
             right: unset;
-            width: 210px; max-height: calc(100vh - var(--toolbar-height) - 16px);
+            z-index: 300;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: calc(100vh - var(--toolbar-height) - 16px);
+        }
+        #minimap {
+            position: relative;
+            top: auto;
+            left: auto;
+            bottom: unset;
+            right: unset;
+            width: 210px; max-height: calc(100vh - var(--toolbar-height) - 72px);
             background: var(--minimap-bg);
             border: 1px solid var(--minimap-border);
             border-radius: 16px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(52,199,89,0.08);
             padding: 12px 14px;
-            z-index: 300;
             overflow-x: hidden;
             overflow-y: auto;
             box-sizing: border-box;
@@ -362,6 +376,27 @@
                         border-radius 0.18s cubic-bezier(0.4,0,0.2,1),
                         padding 0.18s cubic-bezier(0.4,0,0.2,1);
         }
+        /* The session's follow-up thread: reopen button under the minimap
+           (hidden until JS confirms a successful session). */
+        #followup-open-btn {
+            display: none; /* JS reveals it once the session ran successfully */
+            width: 210px;
+            box-sizing: border-box;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: var(--minimap-bg);
+            border: 1px solid var(--minimap-border);
+            border-radius: 12px;
+            color: var(--accent-green);
+            font: inherit; font-size: 12px; font-weight: 600;
+            padding: 8px 12px;
+            cursor: pointer;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(52,199,89,0.08);
+        }
+        #followup-open-btn.visible { display: flex; }
+        #followup-open-btn:hover { background: rgba(52,199,89,0.12); }
+        #followup-open-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
         #minimap::-webkit-scrollbar { width: 4px; }
         #minimap::-webkit-scrollbar-track { background: transparent; }
         #minimap::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 2px; }
@@ -480,6 +515,95 @@
            Structure, mobile sheet pose, and reduced-motion contract live in
            panel.css (shared with graph.html). Page-specific bits below only. */
 
+        /* ── Follow-up thread (the panel's second, exclusive mode) ──
+           Same grammar as graph.html's node RUN conversation. */
+        .run-log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+        .run-log:last-child { margin-bottom: 0; }
+        /* Flex row: caption leads, the shared per-turn delete button follows
+           it inline (no right-edge pinning) — same pose as graph.html's
+           meta row. */
+        .run-log-meta {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 8px;
+            font-family: "SF Mono", ui-monospace, monospace;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+        /* .run-log bubbles speak the shared fold in panel.css (was a local
+           clamp-3 override — identical pose, one home now) */
+        .run-log .wl-bubble.summary { background: rgba(52,199,89,0.06); }
+        @keyframes wl-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+        .detail-section-label.running { color: #f59e0b; animation: wl-breathe 2.5s ease-in-out infinite; }
+        .detail-section-label.prompt { color: #3b82f6; }
+        .detail-section-label.result { color: #22c55e; }
+        .detail-section-label.result.error { color: #ef4444; }
+        .detail-section-label.summary { color: #22c55e; }
+        .summary-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .summary-head .detail-section-label { margin-bottom: 0; }
+        .summary-actions { display: flex; align-items: center; gap: 6px; }
+        .summary-edit-btn {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-size: 11px;
+            font-weight: 600;
+            font-family: inherit;
+            padding: 4px 12px;
+            cursor: pointer;
+        }
+        .summary-edit-btn:hover { color: var(--text-primary); border-color: rgba(255,255,255,0.25); }
+        .run-summary-section textarea {
+            width: 100%;
+            box-sizing: border-box;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12px;
+            line-height: 1.5;
+            padding: 8px 10px;
+            resize: vertical;
+            min-height: 80px;
+        }
+        .run-summary-section textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
+        /* .run-composer / .run-followup-hint live in panel.css — the dock's
+           shared furniture (one skin, one home; the page copy was deleted
+           when the pinned footer landed). */
+        .regen-submit {
+            margin-top: 8px;
+            background: rgba(52,199,89,0.14);
+            border: 1px solid rgba(52,199,89,0.40);
+            border-radius: 8px;
+            color: #34c759;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: inherit;
+            padding: 5px 14px;
+            cursor: pointer;
+        }
+        .regen-submit:hover { background: rgba(52,199,89,0.22); }
+        .regen-submit:disabled { opacity: 0.55; cursor: default; }
+        /* deep-link arrival: the tapped follow-up turn wears the arrival ring
+           (same grammar as graph.html's beacons) */
+        .run-log.beacon { border-radius: 8px; animation: beacon 0.9s ease-out 1; }
+        @keyframes beacon {
+            0% { box-shadow: 0 0 0 0 rgba(52,199,89,0.45); }
+            100% { box-shadow: 0 0 0 14px rgba(52,199,89,0); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .run-log.beacon { animation: none; }
+            .detail-section-label.running { animation: none; }
+        }
+
         /* ── Mobile: page-specific diet (panel sheet rules live in panel.css) ── */
         @media (max-width: 768px) {
             :root {
@@ -495,6 +619,9 @@
             /* Mini-map starts as its 88px pill (JS collapses it on load);
                expanded it must still fit the screen */
             #minimap:not(.collapsed) { width: min(210px, calc(100vw - 24px)); }
+            #followup-open-btn { width: min(210px, calc(100vw - 24px)); }
+            /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px */
+            .run-summary-section textarea, .run-composer textarea { font-size: 16px; }
 
             /* Canvas breathing room: no sticky level labels → no 240px gutter */
             #graph-grid { padding: 24px 16px 60px; }
@@ -524,8 +651,16 @@
         <div id="graph-grid"></div>
     </div>
 
-    <!-- Mini-map overlay -->
-    <div id="minimap"></div>
+    <!-- Mini-map overlay + follow-up reopen button under it -->
+    <div id="minimap-stack">
+        <div id="minimap"></div>
+        <button id="followup-open-btn" title="Follow-up conversation" aria-label="Open follow-up conversation">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 11.5a8.38 8.38 0 0 1-9 8.4 8.5 8.5 0 0 1-3.4-.7L3 21l1.8-5.6a8.38 8.38 0 0 1-.8-3.9 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5z"/>
+            </svg>
+            Follow-up
+        </button>
+    </div>
 
     <!-- Zoom cluster -->
     <div id="zoom-cluster">
@@ -571,6 +706,7 @@
     </div>
 
     <script src="/panel.js"></script>
+    <script src="/bubble.js"></script>
     <script src="/workflow-log.js"></script>
 </body>
 </html>

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# load-env-file - shared .env loader, provider-agnostic. Source me, do not
+# execute. Loads <sourcing-script>.env (gitignored, see README.md) next to
+# that script and exports whatever variables are set in it (e.g. API_KEY,
+# API_ENDPOINT and optional model overrides).
+#
+# Inside this file BASH_SOURCE[0] is load-env-file itself; BASH_SOURCE[1] is
+# the sourcing script, so <sourcing-script>.env resolution works both when a
+# script is executed directly and when a sourced script sources load-env-file
+# in turn (e.g. y-z sourced by yz/ywz/yz-*).
+
+_caller="${BASH_SOURCE[1]:-}"
+if [ -z "$_caller" ]; then
+    echo "Error: load-env-file must be sourced, not executed." >&2
+    exit 1
+fi
+
+_env="$(cd "$(dirname "$_caller")" && pwd)/$(basename "$_caller").env"
+if [ ! -f "$_env" ]; then
+    echo "Error: $_env not found." >&2
+    exit 1
+fi
+
+unset API_KEY API_ENDPOINT
+set -a
+. "$_env"
+set +a
+
+unset _env _caller

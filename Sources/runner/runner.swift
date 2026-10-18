@@ -545,7 +545,7 @@ private func isRealPersona(_ id: String) -> Bool {
 private func collectContext(personaId: String, runDir: FilePath) -> ([FilePath], Set<GraphMcpEndpoint>) {
     var mcps = Set<GraphMcpEndpoint>()
     let files = Paths.dirsToHome()
-        .filter { PathIO.isFileExistent(atPath: GraphStore.dbPath(at: $0.string)) }
+        .filter { PathIO.isDirectoryExistent(atPath: NodeStore.nodesDir(at: $0.string).string) }
         .flatMap { dir -> [String] in
             let ctx = (try? GraphStore.personaContext(personaId: personaId, at: dir.string)) ?? .empty
             mcps.formUnion(ctx.mcps)

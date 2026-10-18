@@ -46,7 +46,8 @@ struct InstanceHandler: Sendable {
                 manualCompleted: manualCompleted,
                 unreadNotifications: Notifications.unreadCount(at: path),
                 configEnabled: svcStatus.configEnabled,
-                processRunning: svcStatus.processRunning
+                processRunning: svcStatus.processRunning,
+                graphMcpAuthMissing: GraphStore.mcpAuthMissingCount(at: path)
             ))
         }
 
@@ -155,6 +156,10 @@ extension InstanceHandler {
         var isGlobalShare: Bool = false
         var configEnabled: Bool?
         var processRunning: Bool?
+        /// Graph nodes whose MCP was configured with a key this machine's
+        /// secrets store doesn't hold — the home page badges the cell so the
+        /// user opens the graph knowing a key is due (0 = nothing to say).
+        var graphMcpAuthMissing: Int = 0
     }
 
     struct InstanceListResponse: Content, Sendable {

@@ -114,6 +114,40 @@
         .countdown.warning { color: var(--accent-amber); }
         .countdown.paused { opacity: 0.5; }
 
+        /* — MCP key warning, toolbar: the graph's answer to "which cells
+           need auth?" before any cell is tapped. Amber + dashed = the
+           page-wide "configured, missing on this computer" voice; the count
+           is the answer, the tap is the fix (jumps to the first cell's
+           panel, where the key input lives). [hidden] must win over the
+           flex display or an empty graph would carry a ghost chip. */
+        #mcp-auth-warn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255,159,10,0.10);
+            border: 1px dashed rgba(255,159,10,0.45);
+            border-radius: 6px;
+            color: #ffb340;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-family: inherit;
+            flex-shrink: 0;
+            transition: background 0.15s ease;
+        }
+        #mcp-auth-warn[hidden] { display: none; }
+        #mcp-auth-warn:hover { background: rgba(255,159,10,0.20); }
+        #mcp-auth-warn:focus-visible { outline: 2px solid var(--accent-amber); outline-offset: 2px; }
+        #mcp-auth-warn .gt-warn-count {
+            font-family: "SF Mono", ui-monospace, monospace;
+            background: rgba(255,159,10,0.18);
+            border-radius: 4px;
+            padding: 0 5px;
+        }
+
         .lang-switcher { display: flex; gap: 4px; }
         .lang-btn {
             background: transparent;
@@ -433,6 +467,29 @@
             padding: 1px 5px;
             flex-shrink: 0;
         }
+        /* repo says this endpoint needs a key; this machine doesn't hold it
+           (fresh clone) — the badge keeps its shape, swaps to hollow amber:
+           same fact, quieter voice than the panel's warn line */
+        .mcp-badge.missing {
+            background: transparent;
+            border-style: dashed;
+        }
+        /* …and the CELL says it too, scannable at canvas distance without a
+           tap: the header strip (machine facts — where the mcp badge lives)
+           wears the amber at badge-grammar volume. The card's box-shadow
+           ring stays status-only (dot/ring/edge never lie); dormant cells
+           keep their grayscale filter, so the tint recedes with the cell. */
+        .node-card[data-mcp-auth="missing"] .node-card-header {
+            background: rgba(255,159,10,0.12);
+            border-bottom-color: rgba(255,159,10,0.35);
+        }
+        /* bird's-eye twin: the dot keeps its status fill, a dashed halo adds
+           the auth fact — dashed = "configured, missing here", the same
+           voice as the badge above */
+        .be-dot.mcp-missing {
+            outline: 1.5px dashed rgba(255,159,10,0.75);
+            outline-offset: 2px;
+        }
 
         .mcp-row { display: flex; gap: 8px; }
         .mcp-row input {
@@ -471,6 +528,15 @@
             color: var(--text-faint);
             margin-top: 6px;
         }
+        /* Auth state line: the key never echoes — this line IS the display.
+           ok = green ink (calm confirmation); warn = error-tinted, the one
+           state that asks for action (set the key on this computer). */
+        .mcp-auth-state {
+            font-size: 11px;
+            margin-top: 6px;
+        }
+        .mcp-auth-state.ok { color: var(--accent-green); }
+        .mcp-auth-state.warn { color: var(--accent-red); }
 
         /* NAME row: mcp-row geometry, neutral/green skin — amber is the mcp
            domain; the name is a human word, so Inter, not mono. A one-row
@@ -564,11 +630,10 @@
             transition: background 0.15s ease;
         }
         .node-add-child:hover { filter: brightness(1.18); }
-        .node-card[data-status="progress"] .node-add-child { background: var(--accent-amber); }
-        .node-card[data-status="summarizing"] .node-add-child { background: var(--accent-blue); }
+        /* the + renders only on ready cells (addChildButton, graph.js) — loading
+           and errored cards carry no right rail to tint; success wears the base
+           green, so only answered re-tints it */
         .node-card[data-status="answered"] .node-add-child { background: #ff9f0a; }
-        .node-card[data-status="failed"] .node-add-child { background: var(--accent-red); }
-        .node-card[data-status="success"] .node-add-child { background: var(--accent-green); }
 
         /* Bubble skeleton (layout, truncation, copy button, mobile touch
            targets) lives in panel.css; this page's color variants below. */
@@ -592,15 +657,15 @@
             border: 1px solid rgba(52,199,89,0.18);
         }
 
-        /* page-specific: cards clamp tighter than the panel's default 8 lines */
-        .node-card .wl-bubble-text.truncated { -webkit-line-clamp: 3; }
+        /* page-specific: cell typography only. The fold itself is the one
+           shared pose in panel.css (≤10 painted lines free, then clamp 3 +
+           "show more" — FREE_LINES/CLAMP_LINES in bubble.js); the cells'
+           old 3/5/5 clamp overrides dissolved into it. */
         .node-card .wl-bubble-text.result-snippet {
-            -webkit-line-clamp: 5;
             font-size: 11px;
             color: var(--text-muted);
         }
         .node-card .wl-bubble-text.summary-text {
-            -webkit-line-clamp: 5;
             font-size: 11px;
             color: var(--text-muted);
         }
@@ -657,6 +722,20 @@
             background: rgba(52,199,89,0.10);
         }
         .agent-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        /* — panel AGENT picker: composer pill grammar + a "current" state.
+           Selected = the node's agent — green, inert (no re-click, no hover
+           tint: the hover rule above excludes :disabled). :disabled dims at
+           0.35, so selected restores full strength: it is the fact, not an
+           unavailable choice. A running node disables every pill. */
+        .agent-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .agent-btn.selected {
+            border-color: var(--accent-green);
+            background: rgba(52,199,89,0.12);
+            color: var(--accent-green);
+            cursor: default;
+        }
+        .agent-btn:disabled.selected { opacity: 1; }
+        .agent-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
         #composer-hint { font-size: 11px; color: var(--text-faint); }
         #composer-mcp-toggle {
             align-self: flex-start;
@@ -740,6 +819,50 @@
 
         /* page-specific section-label tints (base lives in panel.css) */
         .detail-section-label.runs { color: var(--accent-blue); text-transform: none; }
+        /* — new run bookends: the Runs section can start things, not just
+           list them. One generator (newRunBtnHtml, graph.js), two sizes: the
+           compact pill rides the label row (.summary-head grammar — the
+           scanner's door), the wide one follows the list (the finisher's
+           door, and the empty state's call to action). Neutral at rest —
+           green arrives only as intent (hover), amber never: the label keeps
+           blue, and amber stays "time passing". Flat chrome: shadows belong
+           to floating objects. */
+        .new-run-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-size: 11px;
+            font-weight: 600;
+            font-family: inherit;
+            padding: 4px 12px;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }
+        .new-run-btn:hover:not(:disabled) {
+            background: rgba(52,199,89,0.10);
+            border-color: rgba(52,199,89,0.30);
+            color: var(--accent-green);
+        }
+        .new-run-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        .new-run-btn:disabled { opacity: 0.35; cursor: default; }
+        .new-run-btn.wide {
+            width: 100%;
+            box-sizing: border-box;
+            justify-content: center;
+            gap: 8px;
+            min-height: 40px;
+            margin-top: 14px; /* the .run-log row rhythm after the last entry */
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.04);
+            border-color: rgba(255,255,255,0.10);
+            color: var(--text-primary);
+            font-size: 12px;
+        }
         .run-log { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
         .run-log:last-child { margin-bottom: 0; }
         .run-log:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 4px; border-radius: 8px; }
@@ -749,12 +872,24 @@
             color: var(--text-muted);
             display: flex;
             align-items: center;
-            justify-content: flex-start; /* arrow leads the caption: disclosure, not toolbar */
+            justify-content: flex-start; /* caption leads, its buttons follow inline — right after the text, never pinned right */
             gap: 8px;
         }
-        .run-log .wl-bubble-text.truncated { -webkit-line-clamp: 3; }
+        /* .run-log bubbles speak the shared fold in panel.css (was a local
+           clamp-3 override — identical pose, one home now) */
         .convo-count { color: var(--accent-green); font-weight: 600; }
-        .run-log-focus-row { display: flex; justify-content: flex-end; }
+        /* the ONLY right-aligned controls on a run item: this post-item pair
+           owns the right edge via its own flex-end; the header's bin+arrow
+           ride inline after the caption (.run-log-meta above).
+           The pair's moat: the arrow opens (safe), the bin deletes
+           (destructive) — they never sit shoulder-to-shoulder, so a tap aimed
+           at the arrow can't drift onto the bin. Both are 2-tap anyway; the
+           moat keeps even the accidental ARM from happening. */
+        .run-log-focus-row { display: flex; justify-content: flex-end; gap: 20px; }
+        /* header edition of the same moat: the caption↔bin rhythm stays 8px
+           (controls hug their text), only bin↔arrow earns the gap — 8 + 12
+           totals the focus row's 20px */
+        .run-log-meta .run-del-btn + .run-focus-btn { margin-left: 12px; }
         .run-focus-btn {
             display: inline-flex;
             align-items: center;
@@ -839,36 +974,9 @@
             min-height: 80px;
         }
         #prompt-section textarea:focus, #summary-section textarea:focus, .run-summary-section textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
-        .run-composer {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            border-top: 1px solid rgba(255,255,255,0.06);
-            padding-top: 14px;
-        }
-        .run-composer textarea {
-            width: 100%;
-            box-sizing: border-box;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.10);
-            border-radius: 8px;
-            color: var(--text-primary);
-            font-family: inherit;
-            font-size: 12px;
-            line-height: 1.5;
-            padding: 8px 10px;
-            resize: vertical;
-            min-height: 60px;
-        }
-        .run-composer textarea:focus { outline: none; border-color: rgba(52,199,89,0.5); }
-        .run-composer .regen-submit { align-self: flex-end; }
-        .run-followup-hint {
-            font-size: 11px;
-            color: var(--text-muted);
-            border-top: 1px solid rgba(255,255,255,0.06);
-            padding-top: 14px;
-        }
-        .run-followup-hint .run-retry { margin-top: 10px; display: block; }
+        /* .run-composer / .run-followup-hint live in panel.css — the dock's
+           shared furniture (one skin, one home; the page copy was deleted
+           when the pinned footer landed). */
         .summary-actions { display: flex; align-items: center; gap: 6px; }
         .summary-edit-btn {
             background: rgba(255,255,255,0.05);
@@ -1153,6 +1261,9 @@
             0% { box-shadow: 0 0 0 0 rgba(52,199,89,0.45), 0 4px 24px rgba(52,199,89,0.25); }
             100% { box-shadow: 0 0 0 14px rgba(52,199,89,0), 0 4px 24px rgba(52,199,89,0.25); }
         }
+        /* deep-link arrival: the tapped run's thread entry wears the same ring —
+           row geometry: 8px corners, matching the .run-log:focus-visible ring */
+        .run-log.beacon { border-radius: 8px; animation: beacon 0.9s ease-out 1; }
 
         @media (max-width: 768px) {
             .be-slot { width: 40px; }
@@ -1171,16 +1282,30 @@
 
         @media (max-width: 768px) {
             .gt-subtitle, .gt-version { display: none; }
+            #mcp-auth-warn .gt-warn-label { display: none; } /* the count + tooltip carry it on a phone */
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */
             #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .mcp-row input, .name-row textarea { font-size: 16px; }
+            /* agent pills (composer + panel picker): the page's 44px touch target */
+            .agent-btn { min-height: 44px; }
+            .new-run-btn { min-height: 44px; } /* both bookends — the page's touch convention */
             .run-back-btn { width: 44px; height: 44px; }
             .run-focus-btn { width: 32px; height: 32px; }
-            /* under-log arrow owns its row: full 44px, no cost */
-            .run-log-focus-row .run-focus-btn { width: 44px; height: 44px; }
-            /* header arrow shares the caption line: 32px visual, 44px hit via ::after */
+            /* under-log pair owns its row: both full 44px, no inset games —
+               an overlapping hit (the inset ::after would paint above the
+               unpositioned arrow) must never land on the destructive button */
+            .run-log-focus-row .run-focus-btn,
+            .run-log-focus-row .run-del-btn { width: 44px; height: 44px; }
+            .run-log-focus-row .run-del-btn::after { content: none; }
+            /* header pair shares the caption line: 32px visual, 44px hit via ::after */
             .run-log-meta .run-focus-btn { position: relative; }
             .run-log-meta .run-focus-btn::after { content: ''; position: absolute; inset: -6px; }
+            /* thumb edition of the moat: both header controls carry -6px hit
+               insets, which would swallow 12px of the desktop 20px — 24px
+               total (16px margin) leaves 12px of true daylight between the
+               two hit areas. The focus row needs no bump: its 44px targets
+               have no insets, so its 20px gap is a full 20px. */
+            .run-log-meta .run-del-btn + .run-focus-btn { margin-left: 16px; }
         }
 
         /* — delete actions: danger zone at the panel bottom, calm until armed — */
@@ -1251,6 +1376,7 @@
             .detail-section-label.running { animation: none; }
             .detail-panel-body.run-enter { animation: none; }
             .detail-panel-body.run-back { animation: none; }
+            .run-log.beacon { animation: none; }
         }
     </style>
 </head>
@@ -1267,6 +1393,11 @@
             <span class="gt-title">openloop graph</span>
             <span class="gt-version">version 1.0</span>
         </div>
+        <button id="mcp-auth-warn" hidden aria-live="polite"
+                title="Some cells use an MCP that needs its authorization key set on this computer — tap to open the first one">
+            <span class="gt-warn-label">mcp key missing</span>
+            <span class="gt-warn-count">0</span>
+        </button>
         <div class="gt-right">
             <button id="birds-eye-toggle" class="be-toggle" aria-pressed="false" title="Bird's-eye view" aria-label="Bird's-eye view">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1312,9 +1443,9 @@
                 <input id="composer-mcp-url" type="text" placeholder="https://example.com/mcp" spellcheck="false" autocomplete="off">
             </div>
             <div class="mcp-row">
-                <input id="composer-mcp-auth" type="text" placeholder="Authorization header value, e.g. Bearer sk-…" spellcheck="false" autocomplete="off">
+                <input id="composer-mcp-auth" type="text" placeholder="Authorization header value (optional), e.g. Bearer sk-…" spellcheck="false" autocomplete="off">
             </div>
-            <div class="mcp-hint">Remote MCP for the new cell (optional). Config file is generated automatically.</div>
+            <div class="mcp-hint">Remote MCP for the new cell (optional). Config file is generated automatically; the authorization key is stored per computer in .openloop/secrets.json5 (git-ignored), never in the repo.</div>
         </div>
         <div id="composer-agents"></div>
         <div id="composer-hint">Pick an agent to run. Runs with the _bottom_ persona.</div>
@@ -1329,6 +1460,7 @@
 
     <script src="lang.js"></script>
     <script src="panel.js"></script>
+    <script src="bubble.js"></script>
     <script src="graph.js"></script>
     <script>
         initLangSwitcher();

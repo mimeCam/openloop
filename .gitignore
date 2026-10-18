@@ -8,3 +8,4 @@
 .swiftpm/
 
 .stfolder
+*.env

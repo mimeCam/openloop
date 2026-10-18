@@ -1,0 +1,19 @@
+{
+  "id" : "8DB4292D-5373-4D52-9694-A8BF4BF7E361",
+  "parent_id" : "3D97D3E0-9678-40DA-B8D0-872D4A712686",
+  "created_at" : 813865543.595028,
+  "agent" : "cc_docker-swift-z",
+  "took" : 30,
+  "completed_at" : 813865574.311859,
+  "name" : "on `api` module",
+  "summary" : "openloop's `api` is a Vapor-based web service, serving a static web UI and a REST API for controlling and monitoring workflows.\n\nWeb UI has few web surfaces, most significant: \n- home page allowing to inspect, manage & run worflows\n- graph.html - essentially an \"attachable\" knowledge & MCP configuration surface\n- notifications.html - a pure user surface to stay on top of all things & be in-the-know",
+  "prompt" : "openloop's `api` is a web service that offers web UI + API for controlling & monitoring workflows & operations.",
+  "status" : "success",
+  "active" : true,
+  "personas" : [
+
+],
+  "mcp" : null,
+  "mcp_requires_auth" : false,
+  "output" : "I've read the context and explored the repo. Here's my understanding:\n\n**openloop** — a Swift-based AI agent orchestrator (SwiftPM monorepo, macOS 14+ / iOS 16+) with these targets in `Package.swift`:\n\n| Target | Role |\n|---|---|\n| `openloop` | CLI executable |\n| `runner` | Workflow execution engine (uses `llm-graph` for agent graphs) |\n| `api` | **Vapor web service** — web UI + REST API for controlling/monitoring workflows & operations |\n| `w2` | Utility executable |\n| `shared` | Shared library (DB via SQLite.swift, model, launcher, notifications, workflow validation, etc.) |\n\n**The `api` service** specifically:\n- Auto-registers itself as a launchd background service (`openloop-api` on port **54321**) so it survives reboots\n- Serves a static web UI from `Sources/api/Public/` (`index.html`, `graph.html`, `workflow-log.html`, `notifications.html`, panel CSS/JS, plus `llms.txt`/docs for agent consumption)\n- Exposes a REST API under `/api/instances/...` with handlers for:\n  - **Instances** — launch/stop/disable/unload/delete\n  - **Workflows** — CRUD + runs listing\n  - **Personas** — CRUD (the \"AI teammate\" role definitions)\n  - Plus **Logs**, **Graphs**, **Knowledge**, **Manual workflows**, **Notifications** handlers\n- Agents it orchestrates: `claude-code`, `opencode`, `mistral-vibe` (opencode has OOM issues on Linux per the README)\n\nWhat would you like me to do — investigate something in `api`, add a feature, fix a bug, review code, or something else?\n"
+}

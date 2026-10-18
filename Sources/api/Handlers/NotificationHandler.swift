@@ -26,7 +26,7 @@ struct NotificationHandler: Sendable {
         let instancePath = try rawInstancePath(req)
         guard let kind = req.parameters.get("kind"),
               let ref = req.parameters.get("ref"),
-              ["workflow", "node_run"].contains(kind) else {
+              ["workflow", "node_run", "session_run"].contains(kind) else {
             throw Abort(.badRequest)
         }
         try Notifications.markRead(kind: kind, refId: ref, at: instancePath)
@@ -48,7 +48,10 @@ struct NotificationHandler: Sendable {
             id: n.refId,
             kind: n.kind,
             instance_path: instancePath,
-            session: n.kind == "workflow" ? n.refId : nil,
+            // The session the deep link targets: the run session itself
+            // (workflow kind) or the workflow session a follow-up turn
+            // belongs to (session_run rows anchor node_id on it).
+            session: sessionRef(of: n),
             workflow_id: n.workflowId,
             node_id: n.nodeId,
             title: await title(of: n, at: instancePath),
@@ -60,10 +63,20 @@ struct NotificationHandler: Sendable {
         )
     }
 
+    func sessionRef(of n: NotificationItem) -> String? {
+        switch n.kind {
+        case "workflow": return n.refId
+        case "session_run": return n.nodeId
+        default: return nil
+        }
+    }
+
     func title(of n: NotificationItem, at instancePath: String) async -> String {
-        n.kind == "workflow"
-            ? await workflowName(n.workflowId, at: instancePath) ?? n.workflowId ?? "workflow"
-            : nodeAgent(n.nodeId, at: instancePath) ?? "node"
+        if n.kind == "node_run" {
+            return nodeAgent(n.nodeId, at: instancePath) ?? "node"
+        }
+        // workflow and session_run are both titled by their workflow name.
+        return await workflowName(n.workflowId, at: instancePath) ?? n.workflowId ?? "workflow"
     }
 
     func nodeAgent(_ nodeId: String?, at instancePath: String) -> String? {

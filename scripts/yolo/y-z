@@ -27,14 +27,13 @@ Be pragmatic and concise.'
 
 IMAGE="${IMAGE:-yolo_devcontainer}"
 
-unset API_KEY API_ENDPOINT
-export API_KEY="🔥🔥🔥"
-export API_ENDPOINT="https://api.z.ai/api/anthropic"
+# y-z reads its config (API_KEY, API_ENDPOINT, model overrides) from y-z.env
+# next to this file via load-env-file. NOTE: this file is sourced (by yz,
+# ywz, ...) — inside it BASH_SOURCE[0] is y-z itself, and inside
+# load-env-file BASH_SOURCE[1] is then y-z, so y-z.env resolution works
+# either way.
 
-export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3
-export ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7
-export CLAUDE_CODE_SUBAGENT_MODEL=glm-5.3
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/load-env-file"
 
 SUFFIX="-z"
 

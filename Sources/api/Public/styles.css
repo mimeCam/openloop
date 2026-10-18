@@ -641,6 +641,21 @@ body {
     border-color: rgba(124, 92, 255, 0.35);
 }
 
+/* MCP auth warning, instance cell: this graph uses endpoints whose keys
+   this machine doesn't hold (per-computer secrets.json5 never travels with
+   the repo). Amber = attention; same pill geometry as the Graph link, and
+   it IS a Graph link — the badge's action lands you where the key is set. */
+.graph-link.mcp-warn {
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.10);
+    border-color: rgba(245, 158, 11, 0.35);
+}
+
+.graph-link.mcp-warn:hover {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.50);
+}
+
 .manual-count-active {
     font-size: 13px;
     color: #0891b2;

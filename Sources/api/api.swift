@@ -178,11 +178,33 @@ func configure(_ app: Application) async throws {
     instances.grouped(":id", "graph", ":nid").post("runs", ":rid", "retry") { req async throws in
         try await GraphHandler().retryRun(req: req)
     }
+    instances.grouped(":id", "graph", ":nid").delete("runs", ":rid") { req async throws in
+        try await GraphHandler().deleteRun(req: req)
+    }
     instances.grouped(":id", "graph", ":nid").get("logs") { req async throws in
         try await GraphHandler().logs(req: req)
     }
     instances.grouped(":id", "graph", ":nid").delete { req async throws in
         try await GraphHandler().delete(req: req)
+    }
+
+    // Workflow session follow-up endpoints — runs live in graph_run_logs
+    // anchored on the session UUID (node_id), so they hang off the graph
+    // namespace, NOT the node one (":nid" routes 404 on session UUIDs).
+    instances.grouped(":id", "graph", "sessions", ":sid").get("logs") { req async throws in
+        try await GraphHandler().sessionLogs(req: req)
+    }
+    instances.grouped(":id", "graph", "sessions", ":sid").post("run") { req async throws in
+        try await GraphHandler().sessionRun(req: req)
+    }
+    instances.grouped(":id", "graph", "sessions", ":sid").post("seed") { req async throws in
+        try await GraphHandler().sessionSeed(req: req)
+    }
+    instances.grouped(":id", "graph", "sessions", ":sid").post("runs", ":rid", "retry") { req async throws in
+        try await GraphHandler().sessionRetryRun(req: req)
+    }
+    instances.grouped(":id", "graph", "sessions", ":sid").delete("runs", ":rid") { req async throws in
+        try await GraphHandler().sessionDeleteRun(req: req)
     }
 
     // Manual workflows endpoints
