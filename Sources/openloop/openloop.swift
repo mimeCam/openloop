@@ -120,24 +120,24 @@ private func prepareFolders() {
     )
     assert(created15)
 
-    // Global (Paths.share) data folder support disabled — re-enable by uncommenting.
-    // let shareOpenloop = Paths.share.appending("openloop")
-    // let created20 = PathIO.createDirectoryIfNotExists(
-    //     atPath: shareOpenloop.string
-    // )
-    // assert(created20)
-    // let created21 = PathIO.createDirectoryIfNotExists(
-    //     atPath: shareOpenloop.appending("workflows").string
-    // )
-    // assert(created21)
-    // let created22 = PathIO.createDirectoryIfNotExists(
-    //     atPath: shareOpenloop.appending("personas").string
-    // )
-    // assert(created22)
-    // let created23 = PathIO.createDirectoryIfNotExists(
-    //     atPath: shareOpenloop.appending("knowledge").string
-    // )
-    // assert(created23)
+    // Ensure the user-global (system-wide) objects root exists — read-only last-resort lookup layer, never a run target.
+    let shareOpenloop = Paths.globalOpenloop
+    let created20 = PathIO.createDirectoryIfNotExists(
+        atPath: shareOpenloop.string
+    )
+    assert(created20)
+    let created21 = PathIO.createDirectoryIfNotExists(
+        atPath: shareOpenloop.appending("workflows").string
+    )
+    assert(created21)
+    let created22 = PathIO.createDirectoryIfNotExists(
+        atPath: shareOpenloop.appending("personas").string
+    )
+    assert(created22)
+    let created23 = PathIO.createDirectoryIfNotExists(
+        atPath: shareOpenloop.appending("knowledge").string
+    )
+    assert(created23)
 }
 
 private let loopIntervalSecs: UInt64 = 60

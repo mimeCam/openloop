@@ -130,10 +130,9 @@ public struct WorkflowValidator {
             let path = root.appending(Paths.dataFolderName).appending("knowledge").appending(id)
             if PathIO.isDirectoryExistent(atPath: path.string) { return true }
         }
-        // Global knowledge support (Paths.share) disabled — re-enable by uncommenting.
-        // let share = Paths.share.appending("openloop").appending("knowledge").appending(id)
-        // return PathIO.isDirectoryExistent(atPath: share.string)
-        return false
+        // Last-resort lookup: user-global (system-wide) knowledge.
+        let share = Paths.globalOpenloop.appending("knowledge").appending(id)
+        return PathIO.isDirectoryExistent(atPath: share.string)
     }
 
     private static func loadWorkflow(_ id: String, in roots: [FilePath]) async throws -> Workflow? {
@@ -144,11 +143,11 @@ public struct WorkflowValidator {
                 return try await FileLoader.loadWorkflowAtPath(fp)
             }
         }
-        // Global workflow support (Paths.share) disabled — re-enable by uncommenting.
-        // let fp = Paths.share.appending("openloop").appending("workflows").appending(fileName)
-        // if PathIO.isFileExistent(atPath: fp.string) {
-        //     return try await FileLoader.loadWorkflowAtPath(fp)
-        // }
+        // Last-resort lookup: user-global (system-wide) workflows.
+        let gfp = Paths.globalOpenloop.appending("workflows").appending(fileName)
+        if PathIO.isFileExistent(atPath: gfp.string) {
+            return try await FileLoader.loadWorkflowAtPath(gfp)
+        }
         return nil
     }
 
@@ -160,11 +159,11 @@ public struct WorkflowValidator {
                 return try await FileLoader.loadPersonaAtPath(fp)
             }
         }
-        // Global persona support (Paths.share) disabled — re-enable by uncommenting.
-        // let fp = Paths.share.appending("openloop").appending("personas").appending(fileName)
-        // if PathIO.isFileExistent(atPath: fp.string) {
-        //     return try await FileLoader.loadPersonaAtPath(fp)
-        // }
+        // Last-resort lookup: user-global (system-wide) personas.
+        let gfp = Paths.globalOpenloop.appending("personas").appending(fileName)
+        if PathIO.isFileExistent(atPath: gfp.string) {
+            return try await FileLoader.loadPersonaAtPath(gfp)
+        }
         return nil
     }
 

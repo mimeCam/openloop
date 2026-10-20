@@ -10,8 +10,7 @@ import shared
 struct KnowledgeHandler: Sendable {
 
     private func knowledgeDir(instancePath: String, personaId: String) -> FilePath {
-        FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        Paths.objectsRoot(forInstance: instancePath)
             .appending("knowledge")
             .appending(personaId)
     }

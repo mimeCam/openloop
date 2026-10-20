@@ -93,11 +93,11 @@ public extension FileLoader {
                 return w
             }
         }
-        // Global workflow support (~/.local/share/openloop) disabled — re-enable by uncommenting.
-        // let gfp = Paths.share.appending("openloop").appending("workflows").appending("\(id).\(json)")
-        // if PathIO.isFileExistent(atPath: gfp.string) {
-        //     return try await loadWorkflowAtPath(gfp)
-        // }
+        // Last-resort lookup: user-global (system-wide) workflows.
+        let gfp = Paths.globalOpenloop.appending("workflows").appending("\(id).\(json)")
+        if PathIO.isFileExistent(atPath: gfp.string) {
+            return try await loadWorkflowAtPath(gfp)
+        }
 
         return nil
     }
@@ -119,11 +119,11 @@ public extension FileLoader {
                 return p
             }
         }
-        // Global persona support (~/.local/share/openloop) disabled — re-enable by uncommenting.
-        // let gfp = Paths.share.appending("openloop").appending("personas").appending("\(id).\(json)")
-        // if PathIO.isFileExistent(atPath: gfp.string) {
-        //     return try await loadPersonaAtPath(gfp)
-        // }
+        // Last-resort lookup: user-global (system-wide) personas.
+        let gfp = Paths.globalOpenloop.appending("personas").appending("\(id).\(json)")
+        if PathIO.isFileExistent(atPath: gfp.string) {
+            return try await loadPersonaAtPath(gfp)
+        }
 
         return nil
     }

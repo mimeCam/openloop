@@ -52,9 +52,8 @@ struct InstanceHandler: Sendable {
         }
 
         // Synthetic instance for user-global shared personas/workflows
-        let globalSharePath = Paths.globalShare.string
         instances.append(InstanceInfo(
-            path: globalSharePath,
+            path: Paths.globalOpenloop.string,
             parentPath: nil,
             state: nil,
             manualActive: 0,

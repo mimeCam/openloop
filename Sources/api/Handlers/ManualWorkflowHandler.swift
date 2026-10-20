@@ -67,6 +67,7 @@ struct ManualWorkflowHandler: Sendable {
             throw Abort(.badRequest)
         }
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
+        try throwIfGlobalShare(instancePath)
         let body = try req.content.decode(ManualWorkflowLaunchRequest.self)
 
         let roots = Paths.dirsToHome(from: FilePath(instancePath))
@@ -91,16 +92,16 @@ struct ManualWorkflowHandler: Sendable {
         }
 
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
+        try throwIfGlobalShare(instancePath)
         let launchRequest = try req.content.decode(ManualWorkflowLaunchRequest.self)
 
         // Validate workflow exists
         let workflowId = launchRequest.workflow_id
-        let filePath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
-            .appending("workflows")
-            .appending("\(workflowId).\(json)")
+        let filePath = resolveWorkflowFile(
+            id: workflowId, instancePath: instancePath
+        )
 
-        guard PathIO.isFileExistent(atPath: filePath.string),
+        guard let filePath,
               let workflow = try? await FileLoader.loadWorkflowAtPath(filePath) else {
             throw Abort(.notFound, reason: "Workflow not found: \(workflowId)")
         }
@@ -140,7 +141,7 @@ struct ManualWorkflowHandler: Sendable {
                 await ManualWorkflowRegistry.shared.updateStatus(
                     id: runId,
                     status: "failed",
-                    output: "Error: \(error.localizedDescription)"
+                    output: "Error: \(error.descriptiveMessage)"
                 )
             }
         }
@@ -223,11 +224,55 @@ struct ManualWorkflowHandler: Sendable {
     }
 }
 
+private struct ManualRunError: Error, CustomStringConvertible {
+    let message: String
+    var description: String { message }
+}
+
+private extension Error {
+    // `localizedDescription` on bridged errors is useless text like "(ArgumentParser.ValidationError error 1.)" — prefer the error's own description.
+    var descriptiveMessage: String {
+        (self as CustomStringConvertible).description
+    }
+}
+
+// The global share is a shared library, never a run target — runs execute in the launching project's `.openloop`.
+private func throwIfGlobalShare(_ instancePath: String) throws {
+    assert(instancePath.notEmpty)
+    guard FilePath(instancePath) != Paths.globalOpenloop else {
+        throw Abort(
+            .conflict,
+            reason: "Global share is a shared library, not a run target — launch the workflow from a project instance so it runs and logs in that project"
+        )
+    }
+}
+
+// Same ladder as WorkflowValidator/loadWorkflowById: project-local `.openloop` folders nearest-first, then the user-global root.
+private func resolveWorkflowFile(id: String, instancePath: String) -> FilePath? {
+    assert(id.notEmpty)
+    assert(instancePath.notEmpty)
+    let fileName = "\(id).\(json)"
+    for root in Paths.dirsToHome(from: FilePath(instancePath)) {
+        let fp = root
+            .appending(Paths.dataFolderName)
+            .appending("workflows")
+            .appending(fileName)
+        if PathIO.isFileExistent(atPath: fp.string) {
+            return fp
+        }
+    }
+    let gfp = Paths.globalOpenloop.appending("workflows").appending(fileName)
+    return PathIO.isFileExistent(atPath: gfp.string) ? gfp : nil
+}
+
 private func runManualWorkflow(
     instancePath: String,
     workflowId: String,
     ask: String
 ) async throws -> String {
+    assert(instancePath.notEmpty)
+    assert(workflowId.notEmpty)
+
     let runnerPath = Paths.bin.appending("openloop-runner")
 
     guard PathIO.isFileExistent(atPath: runnerPath.string) else {
@@ -236,16 +281,26 @@ private func runManualWorkflow(
 
     let args = [workflowId, ask]
 
-    let res = try await exec(
+    // A dead runner must read as failed, not completed — `exec` returns stdout even on non-zero exit.
+    let res = try await execDetailed(
         runnerPath.string,
         args: args, chroot: instancePath
     )
 
-    guard let res, res.notEmpty else {
-        throw Abort(.internalServerError, reason: "Failed to launch workflow manually.")
+    guard res.success else {
+        let detail = res.combinedOutput
+        throw ManualRunError(
+            message:
+                "Runner exited with code \(res.exitCode)" +
+                (detail.notEmpty ? ":\n\(detail)" : ".")
+        )
     }
 
-    return res
+    guard let output = res.stdout, output.notEmpty else {
+        throw ManualRunError(message: "Runner finished without output.")
+    }
+
+    return output
 }
 
 extension ManualWorkflowHandler {

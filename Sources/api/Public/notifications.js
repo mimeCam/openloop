@@ -1,6 +1,6 @@
 // notifications.js — /notifications.html page logic.
 // ?instance=<path> → that instance's notifications; no param → all instances.
-// Read state changes ONLY through the explicit buttons — deep links never mark.
+// Read state changes via the explicit buttons or "open ↗" (followed link = seen); title deep links never mark.
 (function () {
     'use strict';
 
@@ -94,7 +94,7 @@
             `</div>` +
             (n.prompt ? promptHtml(n) : '') +
             `</div>` +
-            `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener">open ↗</a>` +
+            `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener" data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}">open ↗</a>` +
             (n.read ? '' : `<button class="mark-read-btn" data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}">mark read</button>`) +
             `</div>`;
     }
@@ -175,6 +175,12 @@
     function bindRows() {
         $('list').querySelectorAll('.mark-read-btn').forEach(btn =>
             btn.addEventListener('click', () => markRead(btn.dataset)));
+        // "open ↗" doubles as the read receipt — target="_blank" lets the mark POST ride along with navigation.
+        $('list').querySelectorAll('.notif-open').forEach(a =>
+            a.addEventListener('click', () => {
+                const n = items.find(x => x.id === a.dataset.ref && x.instance_path === a.dataset.inst);
+                if (n && !n.read) markRead(a.dataset);
+            }));
         $('list').querySelectorAll('.notif-more').forEach(btn =>
             btn.addEventListener('click', () => expandPrompt(btn)));
         $('mark-all').onclick = markAllRead;
@@ -220,6 +226,7 @@
     function runSanityChecks() {
         checkDeepLink();
         checkPromptClamp();
+        checkOpenMarksRead();
         console.log('All sanity checks passed.');
     }
 
@@ -270,6 +277,20 @@
         console.assert(expandKey(mk('p', '/x')) === '/x/r1' && expandKey(mk('p', '/y')) === '/y/r1',
             'expandKey: composite (instance_path, id) — same id, two instances, two keys');
         console.log('OK: prompt clamp');
+    }
+
+    // "open ↗" must carry the same payload the mark-read POST needs (kind/ref/inst).
+    function checkOpenMarksRead() {
+        const base = { kind: 'node_run', instance_path: '/tmp/demo', node_id: 'n1',
+            success: true, took: 4, ended_at: Date.now(), title: 't' };
+        const html = rowHtml({ ...base, id: 'r 1', read: false });
+        // anchor the regex on the open <a> — the mark-read button carries identical attributes
+        console.assert(/<a class="notif-open"[^>]*\bdata-kind="node_run"[^>]*\bdata-ref="r 1"[^>]*\bdata-inst="\/tmp\/demo"/.test(html),
+            'rowHtml: open anchor carries kind/ref/inst for the implicit mark');
+        const quoted = rowHtml({ ...base, id: 'r"1', read: false });
+        console.assert(/<a class="notif-open"[^>]*\bdata-ref="r&quot;1"/.test(quoted),
+            'rowHtml: open payload attributes escaped');
+        console.log('OK: open marks read');
     }
 
     if (ISOLATED_RUN) runSanityChecks();

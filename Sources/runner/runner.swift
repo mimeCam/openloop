@@ -41,8 +41,10 @@ struct runner: ParsableCommand {
                     isTop: true
                 )
             } catch {
-                assertionFailure("ERR. \(error.localizedDescription)")
-                log.err(error.localizedDescription)
+                // ValidationError.localizedDescription bridges to a useless NSError message — the reason lives in `.message`.
+                let msg = (error as? ValidationError)?.message ?? error.localizedDescription
+                assertionFailure("ERR. \(msg)")
+                log.err(msg)
                 runner.exit(withError: error)
             }
 
@@ -329,11 +331,11 @@ private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]
             }
         }
 
-        // Global persona support (~/.local/share/openloop) disabled — re-enable by uncommenting.
-        // let gfp = Paths.share.appending("openloop").appending("personas").appending(fileName)
-        // if PathIO.isFileExistent(atPath: gfp.string) {
-        //     return try await FileLoader.loadPersonaAtPath(gfp)
-        // }
+        // Last-resort lookup: user-global (system-wide) personas.
+        let gfp = Paths.globalOpenloop.appending("personas").appending(fileName)
+        if PathIO.isFileExistent(atPath: gfp.string) {
+            return try await FileLoader.loadPersonaAtPath(gfp)
+        }
         return nil
     }
 
@@ -416,12 +418,11 @@ private func resolveKnowledgePath(for id: String) -> String? {
     }) {
         return dir.appending(rel).string
     }
-    // Global knowledge support (~/.local/share/openloop) disabled — re-enable by uncommenting.
-    // let gRel = FilePath("openloop").appending("knowledge").appending(id).components
-    // let share = Paths.share.appending(gRel)
-    // if PathIO.isDirectoryExistent(atPath: share.string) {
-    //     return share.string
-    // }
+    // Last-resort lookup: user-global (system-wide) knowledge.
+    let gfp = Paths.globalOpenloop.appending("knowledge").appending(id)
+    if PathIO.isDirectoryExistent(atPath: gfp.string) {
+        return gfp.string
+    }
     return nil
 }
 
@@ -437,14 +438,13 @@ private func preparePersonaFolder(
         .appending(Paths.dataFolderName).appending("knowledge")
         .appending(id).string
 
-    // Global knowledge support (~/.local/share/openloop) disabled — re-enable by uncommenting.
-    // let share = Paths.share
-    //     .appending("openloop").appending("knowledge")
-    //     .appending(id).string
+    let share = Paths.globalOpenloop
+        .appending("knowledge")
+        .appending(id).string
 
     // TODO: - fetch from remote
 
-    throw ValidationError("No persona found and no folder exists. For local-only knowledge create folder: \(Paths.dataFolderName)/knowledge/\(id)")
+    throw ValidationError("No persona found and no folder exists. For local-only knowledge create folder: \(Paths.dataFolderName)/knowledge/\(id) (or system-wide: \(share))")
 
     return nil
 }
@@ -533,8 +533,9 @@ private func personaRunContext(personaId: String, runId: String, runDir: FilePat
     guard isRealPersona(personaId) else { return PersonaRunContext(prefix: "", mcpPath: nil) }
     let (files, mcps) = collectContext(personaId: personaId, runDir: runDir)
     assert(files.allSatisfy { $0.string.hasPrefix(runDir.string) })
-    let refs = files.map { "\(GraphStore.containerCtxDir)/\($0.lastComponent)" }.joined(separator: " ")
-    let prefix = files.isEmpty ? "" : "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs)\n\n"
+    // `lastComponent` is Optional — unwrap or the prompt gets `/context/Optional("…")`; `@` = agent-side file mention.
+    let refs = files.compactMap(\.lastComponent).map { "@\(GraphStore.containerCtxDir)/\($0.string)" }
+    let prefix = refs.isEmpty ? "" : "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs.joined(separator: " "))\n\n"
     return PersonaRunContext(prefix: prefix, mcpPath: GraphStore.writeMcpConfig(mcps, runId: runId))
 }
 

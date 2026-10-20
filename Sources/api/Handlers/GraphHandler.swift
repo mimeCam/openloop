@@ -722,9 +722,9 @@ private func ancestors(of node: GraphNode, in nodes: [GraphNode]) -> [GraphNode]
     Array(GraphStore.chain(of: node, in: nodes).dropLast())
 }
 
-private let ctxFileLine = "Context file: \(GraphStore.containerCtxDir)/ctx.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
+private let ctxFileLine = "Context file: @\(GraphStore.containerCtxDir)/ctx.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
 
-private let convoFileLine = "Previous conversation summary: @\(GraphStore.containerCtxDir)/convo.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering.\n"
+private let convoFileLine = "Previous conversation summary: @\(GraphStore.containerCtxDir)/convo.md — absolute path at filesystem root, outside the working directory, read-only. Read it before answering; treat it as already-known context — build on it, do not restate it.\n"
 
 private func prefixedPrompt(_ prompt: String, _ ctxPath: String?) -> String {
     ctxPath.map { _ in ctxFileLine + prompt } ?? prompt
@@ -790,11 +790,16 @@ private func runSummary(
 
 private let summaryInstruction = "Summarize the QUESTION and ANSWER below concisely, plain text, no preamble, just state the found fact, dont mention question and/or answer."
 
+// Delta vs convo.md — without it the summarizer re-compresses each turn's recap into the next convo.md, compounding every turn.
+private let deltaSummaryInstruction = " @\(GraphStore.containerCtxDir)/convo.md is the previous conversation summary — read it first and treat its facts as already stated. Summarize only what THIS turn adds on top of it; do not repeat anything from convo.md. If this turn adds nothing new, state that in one short sentence — never return an empty summary."
+
 private func qaSummaryPrompt(question: String, answer: String, runId: String) -> String? {
     guard (try? writeQa(question, answer, id: runId)) != nil else { return nil }
     let c = GraphStore.containerCtxDir
-    let files = "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(c)/question.md and \(c)/answer.md\n"
-    return files + "\(summaryInstruction)\n\nQUESTION: @\(c)/question.md\n\nANSWER: @\(c)/answer.md"
+    let hasConvo = runFile(runId, "convo.md") != nil
+    let files = "Context files (absolute paths at filesystem root, outside the working directory, read-only): @\(c)/question.md\(hasConvo ? ", @\(c)/convo.md and" : " and") @\(c)/answer.md\n"
+    let instruction = summaryInstruction + (hasConvo ? deltaSummaryInstruction : "")
+    return files + "\(instruction)\n\nQUESTION: @\(c)/question.md\n\nANSWER: @\(c)/answer.md"
 }
 
 private func runArgs(_ prompt: String, _ instancePath: String) -> [String] {
@@ -1376,7 +1381,7 @@ private func sessionExecPrompt(_ run: SessionRunExecution) -> String {
     let parents = parentContextFileNames(run.log.id)
     if parents.notEmpty {
         let refs = parents
-            .map { "\(GraphStore.containerCtxDir)/\($0)" }
+            .map { "@\(GraphStore.containerCtxDir)/\($0)" }
             .joined(separator: " ")
         prefix += "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs)\n"
     }

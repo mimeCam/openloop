@@ -182,40 +182,80 @@ private func toEnvironment(_ env: [String: String]?) -> Environment {
 
 // MARK: -
 
-public func exec(
+/// Subprocess result with its termination status intact — for callers that must know the child died.
+public struct ExecOutcome: Sendable {
+    public let stdout: String?
+    public let stderr: String
+    public let exitCode: Int32
+    public let success: Bool
+
+    /// stderr + stdout concatenated (skipping empties).
+    public var combinedOutput: String {
+        [stdout, stderr]
+            .compactMap { $0 }
+            .filter { $0.notEmpty }
+            .joined(separator: "\n")
+    }
+}
+
+private let execIoLimitBytes = 10 * 1024 * 1024
+
+public func execDetailed(
     _ binaryFullPath: String,
     args: [String],
     chroot: String? = nil,
     env: [String: String]? = nil
-) async throws -> String? {
+) async throws -> ExecOutcome {
     let res = try await run(
         .path(.init(binaryFullPath)),
         arguments: .init(args),
         environment: toEnvironment(env),
         workingDirectory: (chroot == nil) ? nil : .init(chroot!),
         output: .string(
-            limit: 10 * 1024 * 1024, encoding: UTF8.self
+            limit: execIoLimitBytes, encoding: UTF8.self
+        ),
+        error: .string(
+            limit: execIoLimitBytes, encoding: UTF8.self
         )
     )
 
-    let status = res.terminationStatus
-    guard status.isSuccess else {
-        let code: Int32
-        switch status {
-            case .exited(let exitCode):
-//                    log.err("Exit code: \(exitCode).")
-                code = exitCode
-            case .unhandledException(let excCode):
-//                    log.err("Unhandled exception code: \(excCode).")
-                code = excCode
-        }
-
-        log.err("stdout: \(res.standardOutput ?? "<none>")")
-        log.err("stderr: \(res.standardError)")
-
-//        assertionFailure()
-        return res.standardOutput
+    let code: Int32
+    switch res.terminationStatus {
+        case .exited(let exitCode):
+//            log.err("Exit code: \(exitCode).")
+            code = exitCode
+        case .unhandledException(let excCode):
+//            log.err("Unhandled exception code: \(excCode).")
+            code = excCode
     }
 
-    return res.standardOutput
+    assert(res.standardError != nil, "error: .string capture must always produce a value")
+
+    return ExecOutcome(
+        stdout: res.standardOutput,
+        stderr: res.standardError ?? "",
+        exitCode: code,
+        success: res.terminationStatus.isSuccess
+    )
+}
+
+public func exec(
+    _ binaryFullPath: String,
+    args: [String],
+    chroot: String? = nil,
+    env: [String: String]? = nil
+) async throws -> String? {
+    let res = try await execDetailed(
+        binaryFullPath, args: args, chroot: chroot, env: env
+    )
+
+    guard res.success else {
+        log.err("stdout: \(res.stdout ?? "<none>")")
+        log.err("stderr: \(res.stderr)")
+
+//        assertionFailure()
+        return res.stdout
+    }
+
+    return res.stdout
 }

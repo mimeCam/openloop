@@ -174,7 +174,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = personas.length + ' persona' + (personas.length !== 1 ? 's' : '');
                     const emptyMsg = isGlobal
-                        ? 'No system-wide personas. Global personas are deprecated in favor of <code>w2</code>, which downloads them directly into your project.'
+                        ? 'No system-wide personas. Add persona files under <code>~/.local/share/openloop/personas/</code>.'
                         : 'No personas in this instance.';
                     body.innerHTML = personas.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
@@ -184,11 +184,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = workflows.length + ' workflow' + (workflows.length !== 1 ? 's' : '');
                     const emptyMsg = isGlobal
-                        ? 'No system-wide workflows. Global workflows are deprecated in favor of <code>w2</code>, which downloads them directly into your project.'
+                        ? 'No system-wide workflows. Add workflow files under <code>~/.local/share/openloop/workflows/</code>.'
                         : 'No workflows in this instance.';
                     body.innerHTML = workflows.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
-                        : '<div class="workflow-list">' + renderWorkflowsHtml(workflows, parentPath) + '</div>';
+                        : '<div class="workflow-list">' + renderWorkflowsHtml(workflows, parentPath, section.dataset.currentInstancePath) + '</div>';
                 }
             } catch (err) {
                 console.error('Failed to load parent instance data:', err);
@@ -230,7 +230,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const pp = await fetchParentPersonas(parentPath);
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = pp.length + ' item' + (pp.length !== 1 ? 's' : '');
-                    const emptyMsg = isGlobal ? 'No system-wide personas. Global personas are deprecated in favor of <code>w2</code>.' : 'No personas in this instance.';
+                    const emptyMsg = isGlobal ? 'No system-wide personas. Add persona files under <code>~/.local/share/openloop/personas/</code>.' : 'No personas in this instance.';
                     body.innerHTML = pp.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
                         : pp.map(p => `<div class="persona-selector-item" data-persona-id="${escapeHtml(p.id)}">${getAvatarHtml(p.avatar)}<div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">${escapeHtml(p.name)}</span>${p.role ? `<span class="persona-selector-role">${escapeHtml(p.role)}</span>` : ''}</div>${p.about ? `<span class="persona-selector-about">${escapeHtml(p.about)}</span>` : ''}</div></div>`).join('');
@@ -239,7 +239,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const filtered = ww.filter(w => w.id !== workflowId);
                     const countBadge = header.querySelector('.parent-section-count');
                     if (countBadge) countBadge.textContent = filtered.length + ' item' + (filtered.length !== 1 ? 's' : '');
-                    const emptyMsg = isGlobal ? 'No system-wide workflows. Global workflows are deprecated in favor of <code>w2</code>.' : 'No workflows in this instance.';
+                    const emptyMsg = isGlobal ? 'No system-wide workflows. Add workflow files under <code>~/.local/share/openloop/workflows/</code>.' : 'No workflows in this instance.';
                     body.innerHTML = filtered.length === 0
                         ? `<div class="parent-section-empty">${emptyMsg}</div>`
                         : filtered.map(w => `<div class="persona-selector-item workflow-selector-item" data-workflow-id="${escapeHtml(w.id)}"><span class="workflow-selector-icon">\u25CB</span><div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">${escapeHtml(w.name)}</span></div>${w.desc ? `<span class="persona-selector-about">${escapeHtml(w.desc)}</span>` : ''}</div></div>`).join('');
@@ -254,6 +254,22 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Re-apply active search filter to include newly rendered items
         applySelectorFilter(selector);
+    }
+
+    // ── Search integrity across collapsed parent/Global sections ──
+    // Invariant: the no-results message may never show while a match can hide in a collapsed/unloaded section — auto-expand on search, never auto-collapse back.
+
+    function expandCollapsedParentSections(scope) {
+        // Route through the header's real click path so lazy fetch/render/re-filter run exactly as on a user tap.
+        scope.querySelectorAll('.parent-section-header[aria-expanded="false"]')
+            .forEach(header => header.click());
+    }
+
+    function hasUnloadedParentSections(scope) {
+        // Unloaded = count badge still shows the lazy em-dash; a failed load (visible error UI) must never gate the message forever.
+        return Array.from(scope.querySelectorAll('.parent-section')).some(section =>
+            section.querySelector('.parent-section-count')?.textContent === '—' &&
+            !section.querySelector('.parent-section-error'));
     }
 
     async function fetchInstances(isAutoRefresh = false) {
@@ -1326,8 +1342,10 @@ document.addEventListener('DOMContentLoaded', function() {
         `}).join('');
     }
 
-    function renderWorkflowsHtml(workflows, path) {
+    function renderWorkflowsHtml(workflows, path, launchContextPath) {
         if (workflows.length === 0) return '<div class="subview-empty">No workflows</div>';
+        // Parent/Global sections launch in the current instance — the runner resolves shared objects via its lookup ladder.
+        const launchPath = launchContextPath || path;
         return workflows.map(w => `
             <div class="workflow-node"
                  data-instance-path="${escapeHtml(path)}"
@@ -1339,7 +1357,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     </div>
                     <span class="workflow-label">${escapeHtml(w.name)}</span>
                     <span class="workflow-desc">${escapeHtml(w.desc || '')}</span>
-                    <button class="workflow-launch-btn" data-instance-path="${escapeHtml(path)}" data-workflow-id="${escapeHtml(w.id)}" data-workflow-name="${escapeHtml(w.name)}" data-workflow-ask="${escapeHtml(w.ask || '')}" title="Launch workflow manually">▶ Launch</button>
+                    <button class="workflow-launch-btn" data-instance-path="${escapeHtml(launchPath)}" data-workflow-id="${escapeHtml(w.id)}" data-workflow-name="${escapeHtml(w.name)}" data-workflow-ask="${escapeHtml(w.ask || '')}" title="Launch workflow manually">▶ Launch</button>
                 </div>
             </div>
         `).join('');
@@ -2505,12 +2523,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const workflowDeleteBtn = currentInlineEditor.querySelector('[data-action="delete-workflow"]');
             if (workflowDeleteBtn) {
-                workflowDeleteBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (confirm(`Delete workflow "${workflowId}"?`)) {
-                        deleteWorkflow(instancePath, workflowId, currentInlineEditor);
-                    }
-                });
+                bindArmedDelete(workflowDeleteBtn,
+                    () => deleteWorkflow(instancePath, workflowId, currentInlineEditor));
             }
 
             currentInlineEditor.querySelector('.wf-add-level-btn').addEventListener('click', (e) => {
@@ -3387,6 +3401,18 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Armed double-confirm — panel.js armedButton owns the state; this wrapper only mirrors .armed onto the visible label.
+    // The busy/rest label writes stay owned by deleteWorkflow ("Deleting..."/"Delete" — rest label must stay exactly 'Delete').
+    function bindArmedDelete(btn, onCommit) {
+        const syncLabel = () => {
+            if (!btn.disabled) {
+                btn.textContent = btn.classList.contains('armed') ? 'Confirm delete' : 'Delete';
+            }
+        };
+        new MutationObserver(syncLabel).observe(btn, { attributes: true, attributeFilter: ['class'] });
+        OpenLoopPanel.armedButton(btn, 'Delete workflow', 'Confirm — delete workflow', onCommit);
+    }
+
     async function deleteWorkflow(instancePath, workflowId, editor) {
         const deleteBtn = editor.querySelector('[data-action="delete-workflow"]');
         if (deleteBtn) {
@@ -3475,6 +3501,11 @@ document.addEventListener('DOMContentLoaded', function() {
              + text.slice(idx + query.length);
     }
 
+    function shouldShowNoResults(query, anyVisible, unloadedRemaining) {
+        // Honest-message rule: only a fully searched, fully visible miss may be called a miss.
+        return !!query && !anyVisible && !unloadedRemaining;
+    }
+
     function filterSelectorItems(panel, query, selector) {
         let anyVisible = false;
         panel.querySelectorAll('.persona-selector-item').forEach(item => {
@@ -3487,7 +3518,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const label = item.querySelector('.persona-selector-name');
             if (label) label.innerHTML = (query && visible) ? highlightMatch(label.textContent, query) : label.textContent;
         });
-        toggleNoResults(panel, query, !anyVisible);
+        toggleNoResults(panel, query, shouldShowNoResults(query, anyVisible, hasUnloadedParentSections(panel)));
     }
 
     function applySelectorFilter(selector) {
@@ -3496,6 +3527,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const panel = activeTab === 'personas'
             ? selector.querySelector('.picker-personas-panel')
             : selector.querySelector('.picker-workflows-panel');
+        if (query) expandCollapsedParentSections(panel);
         filterSelectorItems(panel, query, selector);
     }
 
@@ -3528,6 +3560,8 @@ document.addEventListener('DOMContentLoaded', function() {
     function applySubviewFilter(input) {
         const query = input.value.toLowerCase();
         const subview = input.closest('.subview');
+        // The columns have no no-results message; here the fix is purely visibility.
+        if (query) expandCollapsedParentSections(subview);
         if (input.dataset.filter === 'personas') filterPersonas(subview, query);
         else filterWorkflows(subview, query);
     }
@@ -3553,4 +3587,125 @@ document.addEventListener('DOMContentLoaded', function() {
             e.target.click();
         }
     });
+
+    // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) — panel.js convention.
+    const ISOLATED_RUN = false;
+
+    async function checkBindArmedDelete() {
+        const btn = document.createElement('button');
+        document.body.appendChild(btn);
+        btn.textContent = 'Delete';
+        let commits = 0;
+        // deleteWorkflow's busy pose, synchronous up to its await:
+        bindArmedDelete(btn, () => {
+            btn.disabled = true;
+            btn.textContent = 'Deleting...';
+            commits++;
+        });
+        const tick = () => new Promise(r => setTimeout(r, 0)); // let the MutationObserver deliver
+        btn.click();
+        await tick();
+        console.assert(btn.classList.contains('armed'), 'armedDelete: first click arms');
+        console.assert(btn.getAttribute('aria-label') === 'Confirm — delete workflow', 'armedDelete: aria swaps on arm');
+        console.assert(btn.textContent === 'Confirm delete', 'armedDelete: visible label swaps on arm');
+        btn.dispatchEvent(new Event('blur'));
+        await tick();
+        console.assert(!btn.classList.contains('armed'), 'armedDelete: blur disarms');
+        console.assert(btn.title === 'Delete workflow', 'armedDelete: title restores on disarm');
+        console.assert(btn.textContent === 'Delete', 'armedDelete: visible label restores on disarm');
+        btn.click();
+        btn.click();
+        await tick();
+        console.assert(commits === 1, 'armedDelete: second click inside the window commits exactly once');
+        console.assert(btn.textContent === 'Deleting...', 'armedDelete: busy label survives the commit blur');
+        btn.disabled = false;             // deleteWorkflow's failure-path restore
+        btn.textContent = 'Delete';
+        btn.click();                      // a failed delete must re-arm cleanly
+        await tick();
+        console.assert(btn.classList.contains('armed') && btn.textContent === 'Confirm delete', 'armedDelete: re-arms after a failed delete');
+        btn.remove();
+        console.log('OK: bindArmedDelete');
+    }
+
+    function runAppSanityChecks() {
+        checkBindArmedDelete();
+        console.log('All app sanity checks passed.');
+    }
+
+    if (ISOLATED_RUN) runAppSanityChecks();
+
+    // ── Sanity: search must not lie about collapsed parent/Global sections — run with #sanity-search.
+    // Builds a synthetic picker (parentInstanceData pre-seeded, no network); asserts throw → the run stops there.
+    async function runSearchSanity() {
+        const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+        const GLOBAL = '/global-share';
+        parentInstanceData[GLOBAL] = {
+            workflows: [
+                { id: 'deploy-checklist', name: 'Deploy checklist', desc: '' },
+                { id: 'code-review', name: 'Code review', desc: '' }
+            ]
+        };
+        const host = document.createElement('div');
+        host.style.display = 'none';
+        host.innerHTML = `
+            <div class="persona-selector-wrapper">
+                <input class="selector-search" value="">
+                <div class="picker-tab active" data-tab="workflows">Workflows</div>
+                <div class="picker-panel picker-workflows-panel">
+                    <div class="persona-selector-item workflow-selector-item" data-workflow-id="local-alpha"><div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">Alpha local</span></div></div></div>
+                    <div class="persona-selector-item workflow-selector-item" data-workflow-id="local-beta"><div class="persona-selector-info"><div class="persona-selector-name-row"><span class="persona-selector-name">Beta local</span></div></div></div>
+                    ${renderParentSectionsHtml([GLOBAL], 'workflows', '/proj')}
+                </div>
+            </div>`;
+        document.body.appendChild(host);
+        // Mirror the picker's real click delegation (openPersonaSelector).
+        const wrapper = host.firstElementChild;
+        host.addEventListener('click', e => {
+            const header = e.target.closest('.parent-section-header');
+            if (header) {
+                e.stopPropagation();
+                togglePickerParentSection(header, wrapper, '/proj', 'self-workflow');
+            }
+        });
+        const search = wrapper.querySelector('.selector-search');
+        const header = () => wrapper.querySelector('.parent-section-header');
+        const item = id => Array.from(wrapper.querySelectorAll('.persona-selector-item'))
+            .find(i => i.dataset.workflowId === id);
+        try {
+            // 1. Query matches only the global item; section was collapsed+unloaded.
+            search.value = 'deploy';
+            applySelectorFilter(wrapper);
+            assert(!wrapper.querySelector('.selector-no-results'), 'message must be suppressed while global section is unloaded');
+            assert(header().getAttribute('aria-expanded') === 'true', 'collapsed section must auto-expand on search');
+            console.log('OK. SANITY search checkpoint 1 — message suppressed while Global section unloaded');
+            // 2. Cache-hit fetch resolves in a microtask; the toggle re-filters itself.
+            await new Promise(r => setTimeout(r, 0));
+            const hit = item('deploy-checklist');
+            assert(hit && hit.style.display !== 'none', 'global match must be visible after auto-expand');
+            assert(hit && hit.querySelector('mark'), 'global match must be highlighted');
+            assert(!wrapper.querySelector('.selector-no-results'), 'no false message with a visible match');
+            console.log('OK. SANITY search checkpoint 2 — auto-expand made match visible + highlighted');
+            // 3. Everything loaded, nothing matches anywhere → verdict is truthful.
+            search.value = 'zzz';
+            applySelectorFilter(wrapper);
+            const verdict = wrapper.querySelector('.selector-no-results');
+            assert(verdict && verdict.textContent.indexOf('No matching') !== -1, 'truthful message when nothing matches anywhere');
+            console.log('OK. SANITY search checkpoint 3 — truthful message when nothing matches anywhere');
+            // 4. Clearing keeps sections expanded — never auto-collapse.
+            search.value = '';
+            applySelectorFilter(wrapper);
+            assert(!wrapper.querySelector('.selector-no-results'), 'message removed on clear');
+            assert(header().getAttribute('aria-expanded') === 'true', 'section must stay expanded after clear');
+            assert(Array.from(wrapper.querySelectorAll('.persona-selector-item')).every(i => i.style.display !== 'none'), 'all items visible after clear');
+            console.log('OK. SANITY search checkpoint 4 — cleared query keeps section expanded, all items visible');
+            console.log('OK: runSearchSanity');
+        } catch (err) {
+            console.error('FAIL: runSearchSanity — ' + err.message);
+        } finally {
+            host.remove();
+            delete parentInstanceData[GLOBAL];
+        }
+    }
+
+    if (location.hash === '#sanity-search') runSearchSanity();
 });

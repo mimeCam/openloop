@@ -10,6 +10,15 @@
     --accent-glow-strong: rgba(124, 92, 255, 0.2);
     --accent-cyan: #00d9ff;
     --accent-green: #16a34a;
+
+    /* danger trio — light twin of graph.html's Danger-zone grammar; red-700 text keeps AA at 13px */
+    --danger-text: #b91c1c;
+    --danger-fill-rest: #fef2f2;
+    --danger-fill-hover: #fee2e2;
+    --danger-border-rest: #fecaca;
+    --danger-border-hover: #fca5a5;
+    --danger-deep: #b91c1c; /* armed fill — white text ≈6.4:1 */
+    --danger-glow: rgba(185, 28, 28, 0.3);
     
     --text-primary: #1a1a2e;
     --text-secondary: #4a4a68;
@@ -2326,21 +2335,22 @@ mark {
 
 .delete-btn {
     padding: 10px 18px;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
+    background: var(--danger-fill-rest);
+    border: 1px solid var(--danger-border-rest);
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 13px;
-    color: #dc2626;
+    color: var(--danger-text);
     font-family: var(--font-body);
     font-weight: 500;
     transition: all var(--transition-fast);
     margin-top: 8px;
 }
 
-.delete-btn:hover {
-    background: #fee2e2;
-    border-color: #fca5a5;
+/* hover answers attention; it must never escalate an armed or busy button */
+.delete-btn:hover:not(.armed):not(:disabled) {
+    background: var(--danger-fill-hover);
+    border-color: var(--danger-border-hover);
     box-shadow: 0 2px 8px rgba(220, 38, 38, 0.15);
 }
 
@@ -2359,6 +2369,82 @@ mark {
     margin-top: 0;
     padding: 6px 12px;
     font-size: 12px;
+}
+
+/* Workflow delete: armed double-confirm (panel.js armedButton) — fuse (3s) MUST match armedButton's setTimeout(…, 3000); icon is a CSS mask so textContent writes can't wipe it */
+.wf-header-actions .delete-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.wf-header-actions .delete-btn::before {
+    content: '';
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M3 6h18'/%3E%3Cpath d='M8 6V4h8v2'/%3E%3Cpath d='M19 6l-1 14H6L5 6'/%3E%3Cpath d='M10 11v6M14 11v6'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M3 6h18'/%3E%3Cpath d='M8 6V4h8v2'/%3E%3Cpath d='M19 6l-1 14H6L5 6'/%3E%3Cpath d='M10 11v6M14 11v6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.wf-header-actions .delete-btn:focus-visible {
+    outline: 2px solid var(--danger-text); /* red rings for the delete family */
+    outline-offset: 2px;
+}
+
+.wf-header-actions .delete-btn.armed {
+    background: var(--danger-deep);
+    border-color: rgba(185, 28, 28, 0.4);
+    color: #fff;
+    box-shadow: 0 4px 16px var(--danger-glow), 0 0 0 1px rgba(185, 28, 28, 0.4);
+    position: relative;
+    overflow: hidden; /* the fuse clips to the --radius-sm corners */
+}
+
+.wf-header-actions .delete-btn.armed::after {
+    /* the 3s fuse — 2px bar pinned to the bottom edge, burning left→right */
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.85);
+    transform-origin: left;
+    animation: delete-fuse 3s linear forwards;
+}
+
+@keyframes delete-fuse {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+}
+
+/* busy: keep the armed fill while the DELETE is in flight — no certainty flicker */
+.wf-header-actions .delete-btn:disabled {
+    background: var(--danger-deep);
+    border-color: rgba(185, 28, 28, 0.4);
+    color: #fff;
+    cursor: default;
+    animation: delete-busy-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes delete-busy-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+@media (max-width: 768px) {
+    /* a destructive double-tap target must never be 28px tall */
+    .wf-header-actions .delete-btn { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wf-header-actions .delete-btn.armed::after {
+        animation: none; /* state, not countdown */
+        background: rgba(255, 255, 255, 0.35);
+    }
+    .wf-header-actions .delete-btn:disabled { animation: none; }
 }
 
 .persona-textarea {

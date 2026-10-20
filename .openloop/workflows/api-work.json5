@@ -1,4 +1,5 @@
 {
+  "ask" : "Describe a feature or fix",
   "levels" : [
     [
       "architect"
@@ -6,11 +7,16 @@
     [
       "isolated_run",
       "designer"
+    ],
+    [
+      "fun_sid_coder:rw"
+    ],
+    [
+      ":clean-code"
     ]
   ],
-  "name" : "MAIN. Feature-work on 'api' app",
-  "desc" : "Manual worflow good for feaeture work or fixes. Manually run it like: openloop 'api-work' 'type in an ask, feature-task, etc...'",
   "every_secs" : 0,
   "agent" : "cc_docker-swift-z",
-  "ask" : "Describe a feature or fix"
+  "name" : "MAIN. Feature-work on 'api' app",
+  "desc" : "Manual worflow good for feaeture work or fixes. Manually run it like: openloop 'api-work' 'type in an ask, feature-task, etc...'"
 }

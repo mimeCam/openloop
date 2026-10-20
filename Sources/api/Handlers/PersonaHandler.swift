@@ -16,8 +16,7 @@ struct PersonaHandler: Sendable {
         
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
         
-        let personasPath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let personasPath = Paths.objectsRoot(forInstance: instancePath)
             .appending("personas")
         
         guard PathIO.isDirectoryExistent(atPath: personasPath.string) else {
@@ -55,11 +54,10 @@ struct PersonaHandler: Sendable {
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
         let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
         
-        let filePath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let filePath = Paths.objectsRoot(forInstance: instancePath)
             .appending("personas")
             .appending("\(personaId).\(json)")
-        
+
         guard PathIO.isFileExistent(atPath: filePath.string),
               let persona = try? await FileLoader.loadPersonaAtPath(filePath) else {
             throw Abort(.notFound)
@@ -88,11 +86,10 @@ struct PersonaHandler: Sendable {
         
         let updateRequest = try req.content.decode(PersonaUpdateRequest.self)
         
-        let filePath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let filePath = Paths.objectsRoot(forInstance: instancePath)
             .appending("personas")
             .appending("\(personaId).\(json)")
-        
+
         guard PathIO.isFileExistent(atPath: filePath.string),
               let existingPersona = try? await FileLoader.loadPersonaAtPath(filePath) else {
             throw Abort(.notFound)
@@ -131,11 +128,10 @@ struct PersonaHandler: Sendable {
         let createRequest = try req.content.decode(PersonaCreateRequest.self)
         let personaId = createRequest.id ?? UUID().uuidString
         
-        let filePath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let filePath = Paths.objectsRoot(forInstance: instancePath)
             .appending("personas")
             .appending("\(personaId).\(json)")
-        
+
         let personasDir = filePath.removingLastComponent()
         _ = PathIO.createDirectoryIfNotExists(atPath: personasDir.string)
 
@@ -150,8 +146,7 @@ struct PersonaHandler: Sendable {
         
         try await FileLoader.savePersona(persona, at: filePath)
         
-        let knowledgeDir = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let knowledgeDir = Paths.objectsRoot(forInstance: instancePath)
             .appending("knowledge")
             .appending(personaId)
         _ = PathIO.createDirectoryIfNotExists(atPath: knowledgeDir.string)
@@ -177,11 +172,10 @@ struct PersonaHandler: Sendable {
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
         let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
         
-        let filePath = FilePath(instancePath)
-            .appending(Paths.dataFolderName)
+        let filePath = Paths.objectsRoot(forInstance: instancePath)
             .appending("personas")
             .appending("\(personaId).\(json)")
-        
+
         guard PathIO.isFileExistent(atPath: filePath.string) else {
             throw Abort(.notFound)
         }

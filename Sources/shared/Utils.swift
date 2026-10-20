@@ -58,6 +58,17 @@ public struct Paths {
 
     public static let globalShare = share
 
+    // User-global (system-wide) objects root, last-resort lookup — no `.openloop` wrapper inside it.
+    public static let globalOpenloop = share.appending("openloop")
+
+    // `<instance>/.openloop` for projects; the root itself for the synthetic global-share instance.
+    public static func objectsRoot(forInstance instancePath: String) -> FilePath {
+        assert(instancePath.notEmpty)
+        return FilePath(instancePath) == globalOpenloop
+            ? globalOpenloop
+            : FilePath(instancePath).appending(dataFolderName)
+    }
+
     public static let tmpRoot = local
         .appending("state")
         .appending("tmp")
