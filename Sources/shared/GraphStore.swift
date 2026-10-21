@@ -6,7 +6,9 @@ import SQLite
 @preconcurrency import SystemPackage
 #endif
 
-let storeLog = PrintLog(module: "graph-store")
+private let storeLog = PrintLog(module: "graph-store")
+
+private let sqliteBusyTimeout: Double = 3
 
 public struct GraphNode: Sendable {
     public let id: String
@@ -17,9 +19,7 @@ public struct GraphNode: Sendable {
     public let output: String?
     public let took: Int?
     public let mcp: String?
-    /// Marker only: this node's MCP endpoint requires an auth key. The key
-    /// itself lives in `.openloop/secrets.json5` (SecretStore), keyed by
-    /// `mcp` — per machine, never in the committed node file.
+    /// Marker only: the auth key itself lives in SecretStore keyed by `mcp` URL — never in the committed node file.
     public let mcpRequiresAuth: Bool
     public let summary: String?
     public let name: String?
@@ -113,11 +113,11 @@ public struct GraphMcpEndpoint: Hashable, Sendable {
     }
 }
 
-struct McpConfig: Codable {
+private struct McpConfig: Codable {
     let mcpServers: [String: McpServer]
 }
 
-struct McpServer: Codable {
+private struct McpServer: Codable {
     let type = "http"
     let url: String
     let headers: [String: String]?
@@ -153,18 +153,61 @@ public struct GraphStore {
             .string
     }
 
-    static func connect(at instancePath: String) throws -> Connection {
+    private struct ConnectStageError: Error, CustomStringConvertible {
+        let stage: String
+        let underlying: Error
+        var description: String { "\(stage): \(GraphStore.describeSqliteError(underlying))" }
+    }
+
+    private static func connect(at instancePath: String) throws -> Connection {
         _ = PathIO.createDirectoryIfNotExists(
             atPath: FilePath(instancePath).appending(Paths.dataFolderName).string
         )
-        let db = try Connection(dbPath(at: instancePath))
-        db.busyTimeout = 3
-        try db.execute("PRAGMA journal_mode=WAL;")
-        try db.execute("PRAGMA synchronous=NORMAL;")
+        let path = dbPath(at: instancePath)
+        let db: Connection
+        do {
+            db = try Connection(path)
+        } catch {
+            throw ConnectStageError(stage: "open \(path)", underlying: error)
+        }
+        db.busyTimeout = sqliteBusyTimeout
+        do {
+            try db.execute("PRAGMA journal_mode=WAL;")
+        } catch {
+            throw ConnectStageError(stage: "PRAGMA journal_mode=WAL on \(path)", underlying: error)
+        }
+        do {
+            try db.execute("PRAGMA synchronous=NORMAL;")
+        } catch {
+            throw ConnectStageError(stage: "PRAGMA synchronous=NORMAL on \(path)", underlying: error)
+        }
         return db
     }
 
-    static let runLogTableDdl = """
+    private static func describeSqliteError(_ error: Error) -> String {
+        if case let SQLite.Result.error(message, code, _) = error {
+            return "\(message) [code \(code) \(sqliteCodeName(code))]"
+        }
+        if case let SQLite.Result.extendedError(message, extendedCode, _) = error {
+            return "\(message) [extended code \(extendedCode) \(sqliteCodeName(extendedCode))]"
+        }
+        return String(describing: error)
+    }
+
+    private static let sqliteResultCodeNames: [Int32: String] = [
+        0: "SQLITE_OK", 1: "SQLITE_ERROR", 2: "SQLITE_INTERNAL", 3: "SQLITE_PERM",
+        4: "SQLITE_ABORT", 5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 7: "SQLITE_NOMEM",
+        8: "SQLITE_READONLY", 9: "SQLITE_INTERRUPT", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT",
+        12: "SQLITE_NOTFOUND", 13: "SQLITE_FULL", 14: "SQLITE_CANTOPEN", 15: "SQLITE_PROTOCOL",
+        17: "SQLITE_SCHEMA", 18: "SQLITE_TOOBIG", 19: "SQLITE_CONSTRAINT", 20: "SQLITE_MISMATCH",
+        21: "SQLITE_MISUSE", 23: "SQLITE_AUTH", 25: "SQLITE_RANGE", 26: "SQLITE_NOTADB",
+    ]
+
+    private static func sqliteCodeName(_ code: Int32) -> String {
+        sqliteResultCodeNames[code] ?? "SQLITE_CODE_\(code)"
+    }
+
+    private static let runLogTableDdl = """
     CREATE TABLE IF NOT EXISTS graph_run_logs (
         id TEXT PRIMARY KEY,
         node_id TEXT NOT NULL,
@@ -180,94 +223,17 @@ public struct GraphStore {
 
     public static func createTables(at instancePath: String) throws {
         try NodeStore.ensureDir(at: instancePath)
-        try migrateLegacyNodes(at: instancePath)
         try createRunLogTables(at: instancePath)
     }
 
-    // One-shot sqlite → files migration for pre-file instances. Node metadata
-    // now lives in NodeStore; a legacy `graph_nodes` table (if present) is
-    // dumped to `<UUID>.json5` files, then RENAMEd (not dropped — rollback
-    // stays a one-liner; dropping `graph_nodes_bak` is a later release task).
-    // Idempotent: no table ⇒ no-op, so this can run on every createTables.
-    static func migrateLegacyNodes(at instancePath: String) throws {
-        let db = try connect(at: instancePath)
-        guard try sqliteMasterHas("graph_nodes", db) else { return }
-        migrateLegacyNodeColumns(db)
-        try dumpLegacyNodes(db, at: instancePath)
-        do {
-            try db.run("ALTER TABLE graph_nodes RENAME TO graph_nodes_bak;")
-        } catch {
-            storeLog.warn("legacy graph_nodes dumped to files but rename failed: \(error)")
-        }
-    }
-
-    // Historical ALTER ladder: older instances may predate `took`/`name`/…
-    // columns — bring any such table up to the full column set before the
-    // dump SELECT (all idempotent `try?`, exactly as before the file era).
-    // `mcp_auth` is deliberately NOT in the ladder: that era never shipped,
-    // legacy rows carry no auth at all — keys live only in SecretStore.
-    static func migrateLegacyNodeColumns(_ db: Connection) {
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN took INTEGER;")
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN mcp TEXT;")
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN summary TEXT;")
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN personas TEXT;")
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN name TEXT;")
-        try? db.run("ALTER TABLE graph_nodes ADD COLUMN active INTEGER NOT NULL DEFAULT 1;")
-    }
-
-    static func dumpLegacyNodes(_ db: Connection, at instancePath: String) throws {
-        let rows = try db.prepare("SELECT \(legacyNodeColumns) FROM graph_nodes ORDER BY created_at;")
-        for row in rows {
-            guard let file = legacyNodeFile(row) else {
-                assertionFailure("undecodable legacy graph_nodes row during migration")
-                storeLog.warn("skipping undecodable legacy graph_nodes row during migration")
-                continue
-            }
-            try NodeStore.save(file.node, at: instancePath)
-        }
-    }
-
-    // Column list is positional input for legacyNodeFile below — same
-    // explicit-SELECT discipline as runLogColumns; any reshuffle must fail loudly.
-    // The pre-split `mcp_auth` column is never read: that era never shipped,
-    // so a stale column (hand-added by the old ALTER ladder) contributes
-    // nothing — marker false, value never stored anywhere.
-    static let legacyNodeColumns = "id, parent_id, prompt, agent, status, output, took, mcp, summary, personas, created_at, completed_at, active, name"
-
-    static func sqliteMasterHas(_ table: String, _ db: Connection) throws -> Bool {
+    private static func sqliteMasterHas(_ table: String, _ db: Connection) throws -> Bool {
         let n = try db.scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?;", table
         ) as? Int64
         return (n ?? 0) > 0
     }
 
-    static func legacyNodeFile(_ row: [Binding?]) -> NodeFile? {
-        guard let id = row[0] as? String,
-              let prompt = row[2] as? String,
-              let agent = row[3] as? String,
-              let createdAt = row[10] as? Double else { return nil }
-        let summary = row[8] as? String
-        let status = row[4] as? String ?? "failed"
-        return NodeFile(GraphNode(
-            id: id,
-            parentId: row[1] as? String,
-            prompt: prompt,
-            agent: agent,
-            status: (status == "success" && summary == nil) ? "answered" : status,
-            output: row[5] as? String,
-            took: (row[6] as? Int64).map(Int.init),
-            mcp: row[7] as? String,
-            mcpRequiresAuth: false,
-            summary: summary,
-            name: row[13] as? String,
-            personas: NodeStore.decodePersonas(row[9] as? String),
-            createdAt: createdAt,
-            completedAt: row[11] as? Double,
-            active: (row[12] as? Int64).map { $0 != 0 } ?? true
-        ))
-    }
-
-    static func createRunLogTables(at instancePath: String) throws {
+    private static func createRunLogTables(at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.execute(runLogTableDdl)
         try db.run("CREATE INDEX IF NOT EXISTS idx_graph_run_logs_node ON graph_run_logs(node_id);")
@@ -281,23 +247,19 @@ public struct GraphStore {
         try db.execute(LogManager.notificationKindsDdl)
     }
 
-    static func migrateRunLogColumns(_ db: Connection) {
+    private static func migrateRunLogColumns(_ db: Connection) {
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN parent_run_id TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN summary TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN root_run_id TEXT;")
         backfillRootRunIds(db)
     }
 
-    static func backfillRootRunIds(_ db: Connection) {
+    private static func backfillRootRunIds(_ db: Connection) {
         repairRootRunIds(db)
     }
 
-    // One invariant, two callers (the boot backfill above, and deleteRunLog's
-    // splice below): a row whose root is NULL or dangles at a run that no
-    // longer exists re-derives it from the parent chain — boot self-heals
-    // legacy corruption, delete heals its own splice. Dangling extends the
-    // original NULL-only contract without changing any boot outcome.
-    static func repairRootRunIds(_ db: Connection) {
+    // NULL or dangling root re-derives from the parent chain — boot self-heals, delete heals its own splice.
+    private static func repairRootRunIds(_ db: Connection) {
         let ids = repairableRunIds(db)
         guard !ids.isEmpty else { return }
         let parentOf = runParentMap(db)
@@ -307,7 +269,7 @@ public struct GraphStore {
         }
     }
 
-    static func repairableRunIds(_ db: Connection) -> [String] {
+    private static func repairableRunIds(_ db: Connection) -> [String] {
         let sql = """
         SELECT id FROM graph_run_logs
         WHERE root_run_id IS NULL OR root_run_id NOT IN (SELECT id FROM graph_run_logs);
@@ -316,10 +278,8 @@ public struct GraphStore {
         return statement.compactMap { $0[0] as? String }
     }
 
-    // Parent edges among LIVING rows only: a parent_run_id pointing at a
-    // deleted run (raw corruption, pre-feature manual deletes) reads as no
-    // parent, so convoRoot terminates at the orphan itself, never at a ghost.
-    static func runParentMap(_ db: Connection) -> [String: String] {
+    // Parent edges among LIVING rows only — dangling parents read as no parent, never as a ghost.
+    private static func runParentMap(_ db: Connection) -> [String: String] {
         let sql = "SELECT c.id, c.parent_run_id FROM graph_run_logs c JOIN graph_run_logs p ON p.id = c.parent_run_id;"
         guard let statement = try? db.prepare(sql) else { return [:] }
         let pairs = statement.compactMap { row -> (String, String)? in
@@ -329,7 +289,7 @@ public struct GraphStore {
         return Dictionary(uniqueKeysWithValues: pairs)
     }
 
-    static func convoRoot(of id: String, parentOf: [String: String]) -> String? {
+    private static func convoRoot(of id: String, parentOf: [String: String]) -> String? {
         var seen: Set<String> = []
         var cur = id
         while let parent = parentOf[cur] {
@@ -339,9 +299,7 @@ public struct GraphStore {
         return cur
     }
 
-    // MARK: - Node CRUD (facade → NodeStore files)
-    // Signatures frozen: api handlers, runner and tests keep compiling as-is.
-    // Node metadata lives in `.openloop/nodes/<UUID>.json5` (see NodeStore).
+    // MARK: - Node CRUD (facade → NodeStore files; signatures frozen for api/runner/tests)
 
     public static func insertNode(_ node: GraphNode, at instancePath: String) throws {
         try NodeStore.save(node, at: instancePath)
@@ -398,10 +356,7 @@ public struct GraphStore {
         try NodeStore.mutate(id: id, at: instancePath) { $0.name = name }
     }
 
-    /// Auth keys live per machine in SecretStore keyed by the node's MCP
-    /// URL (dedup: one key serves every node on that URL). The node file
-    /// keeps only the `mcp_requires_auth` marker. Clearing (`auth` nil/empty)
-    /// removes the URL's key and the marker.
+    /// Key lives in SecretStore keyed by the node's MCP URL; clearing (`auth` nil/empty) removes key + marker.
     public static func updateMcpAuth(
         id: String,
         auth: String?,
@@ -417,18 +372,13 @@ public struct GraphStore {
         try NodeStore.mutate(id: id, at: instancePath) { $0.mcpRequiresAuth = (auth?.notEmpty == true) }
     }
 
-    /// How many nodes wait on an MCP key this computer doesn't hold: marker
-    /// on (the repo says "this MCP requires a key") and no local secret for
-    /// the node's URL — the same pair `mcp_requires_auth`/`mcp_auth_local` the
-    /// graph wire exposes per node. Read-only and dir-missing tolerant
-    /// (NodeStore.list → []): powers the graph header warning and the
-    /// instances-list cell badge without creating anything.
+    /// Read-only, dir-missing tolerant: nodes marked "MCP requires a key" this machine doesn't hold.
     public static func mcpAuthMissingCount(at instancePath: String) -> Int {
         let secrets = SecretStore.load(at: instancePath)
         func hasLocalKey(_ url: String?) -> Bool {
             url.flatMap { secrets[$0] }?.notEmpty == true
         }
-        return ((try? fetchNodes(at: instancePath)) ?? [])
+        return NodeStore.list(at: instancePath)
             .filter { $0.mcpRequiresAuth && !hasLocalKey($0.mcp) }
             .count
     }
@@ -504,11 +454,7 @@ public struct GraphStore {
         return seen
     }
 
-    // Delete semantics preserved from the SQL era: single delete bridges
-    // children to the deleted node's parent; subtree delete removes all.
-    // Files are removed children-first (deepest first), so an interrupted
-    // delete leaves orphans the frontend already tolerates — never a parent
-    // whose subtree half-exists. Run-log cleanup stays one sqlite transaction.
+    // SQL-era semantics: single delete bridges children to the deleted node's parent; subtree delete removes all.
     public static func deleteNode(id: String, at instancePath: String) throws {
         try bridgeChildren(of: id, at: instancePath)
         try NodeStore.delete(id: id, at: instancePath)
@@ -522,17 +468,15 @@ public struct GraphStore {
         try deleteRunLogs(underNodeIds: ids, at: instancePath)
     }
 
-    static func bridgeChildren(of id: String, at instancePath: String) throws {
+    private static func bridgeChildren(of id: String, at instancePath: String) throws {
         guard let gone = NodeStore.load(id: id, at: instancePath) else { return }
         for child in NodeStore.list(at: instancePath) where child.parentId == id {
             try NodeStore.mutate(id: child.id, at: instancePath) { $0.parentId = gone.parentId }
         }
     }
 
-    // Takes NODE ids (cascade companion to deleteNode/deleteNodes): removes
-    // every run-log row anchored at those nodes — a run thread is never left
-    // dangling under a node that no longer exists.
-    static func deleteRunLogs(underNodeIds ids: Set<String>, at instancePath: String) throws {
+    // Takes NODE ids: removes every run-log row anchored at those nodes.
+    private static func deleteRunLogs(underNodeIds ids: Set<String>, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
             for id in ids {
@@ -547,12 +491,7 @@ public struct GraphStore {
         return try db.prepare(sql, id).compactMap(toRunLog).first
     }
 
-    // The "delete a turn" contract, shared by node threads and session
-    // threads: ONE row splices out — every row whose parent_run_id pointed
-    // at it re-parents to ITS parent (nil ⇒ those rows become thread roots),
-    // roots re-derive, and the row's notification marker + read rows drop —
-    // all in ONE transaction (all statements or none). Deleting a parent is
-    // the feature, not an error: no "has children" guard.
+    // "Delete a turn": ONE row splices out, children re-parent to its parent — all in ONE transaction.
     public static func deleteRunLog(id: String, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
@@ -563,10 +502,8 @@ public struct GraphStore {
         }
     }
 
-    // `next` reparents to `deleted.parent` — the splice that lets a
-    // follow-up turn survive the deletion of the turn it answered. Must run
-    // BEFORE the row dies: the subselect reads the deleted run's parent.
-    static func bridgeRunChildren(of id: String, _ db: Connection) throws {
+    // `next` reparents to `deleted.parent`; must run BEFORE the row dies (the subselect reads its parent).
+    private static func bridgeRunChildren(of id: String, _ db: Connection) throws {
         let sql = """
         UPDATE graph_run_logs
         SET parent_run_id = (SELECT parent_run_id FROM graph_run_logs WHERE id = ?)
@@ -575,20 +512,13 @@ public struct GraphStore {
         try db.run(sql, id, id)
     }
 
-    // Hygiene, not correctness: the notification LIST derives from rows (a
-    // deleted run's notification vanishes with its row), but the kind marker
-    // and read rows would linger forever. notification_reads may not exist
-    // on graph-only instances — that failure must not fail the delete.
-    static func dropRunMarkerRows(_ db: Connection, runId: String) {
+    // Hygiene: marker/read rows would linger after the run row dies; notification_reads may not exist on graph-only instances.
+    private static func dropRunMarkerRows(_ db: Connection, runId: String) {
         try? db.run("DELETE FROM notification_kinds WHERE run_id = ?;", runId)
         try? db.run("DELETE FROM notification_reads WHERE ref_id = ?;", runId)
     }
 
-    // The "delete a full RUN" contract (the runs-list delete): the thread
-    // root AND every row of its thread go together — the conversation twin
-    // of deleteNodes' subtree cascade. Ids are collected BEFORE the delete
-    // (marker/read hygiene for each); repairRootRunIds stays the safety net
-    // for any stray row still pointing into the dead thread.
+    // "Delete a full RUN": the thread root AND every row of its thread go together.
     public static func deleteRunThread(id: String, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
@@ -599,20 +529,20 @@ public struct GraphStore {
         }
     }
 
-    static func threadRunIds(_ rootId: String, _ db: Connection) -> [String] {
+    private static func threadRunIds(_ rootId: String, _ db: Connection) -> [String] {
         let sql = "SELECT id FROM graph_run_logs WHERE id = ? OR root_run_id = ?;"
         guard let rows = try? db.prepare(sql, rootId, rootId) else { return [] }
         return rows.compactMap { $0[0] as? String }
     }
 
-    static func deepestFirst(_ ids: Set<String>, at instancePath: String) -> [String] {
+    private static func deepestFirst(_ ids: Set<String>, at instancePath: String) -> [String] {
         let parentOf = NodeStore.list(at: instancePath)
             .reduce(into: [:]) { $0[$1.id] = $1.parentId }
         return ids.sorted { (depth(of: $0, parentOf: parentOf), $1) > (depth(of: $1, parentOf: parentOf), $0) }
     }
 
     // Cycle-safe hop count up the parent chain (0 = root).
-    static func depth(of id: String, parentOf: [String: String?]) -> Int {
+    private static func depth(of id: String, parentOf: [String: String?]) -> Int {
         var hops = 0
         var seen: Set<String> = []
         var cur: String? = id
@@ -648,16 +578,7 @@ public struct GraphStore {
         chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
     }
 
-    /// Auth is resolved HERE, by URL, from the secrets store OF THE INSTANCE
-    /// THE NODES CAME FROM — never stored on the node. Parent-instance
-    /// semantics fall out for free: every caller builds its chain from one
-    /// dir's node files and passes that same dir, so a node living in
-    /// `/prj/root/.openloop/nodes` reads `/prj/root/.openloop/secrets.json5`
-    /// while a node in `/prj/root/inner/.openloop` reads its own — the
-    /// runner/collectContext and sessionPersonaContext per-dir loops keep
-    /// that pairing intact. Marker-less URLs on a machine that happens to
-    /// hold their key still get auth: the store is keyed by endpoint, and a
-    /// configured endpoint's key applies to every node that calls it.
+    /// Auth is resolved HERE by URL from the secrets store of the instance the nodes came from — never stored on the node.
     public static func chainMcpEndpoints(_ chain: [GraphNode], at instancePath: String) -> Set<GraphMcpEndpoint> {
         let secrets = SecretStore.load(at: instancePath)
         return Set(chain.compactMap { node in
@@ -676,13 +597,19 @@ public struct GraphStore {
         _ = PathIO.deleteDirectoryAndItsContents(atPath: contextRunDir(id).string)
     }
 
-    public static func sweepStaleRunArtifacts(maxAge: TimeInterval = 24 * 3600) {
+    private static let staleArtifactsMaxAge: TimeInterval = 24 * 3600
+
+    public static func sweepStaleRunArtifacts() {
+        sweepStaleRunArtifacts(maxAge: staleArtifactsMaxAge)
+    }
+
+    public static func sweepStaleRunArtifacts(maxAge: TimeInterval) {
         let tmp = Paths.tmpRoot
         sweepStaleEntries(in: tmp.appending("graph-runs").string, maxAge: maxAge)
         sweepStaleEntries(in: tmp.appending("graph-mcp").string, maxAge: maxAge)
     }
 
-    static func sweepStaleEntries(in dir: String, maxAge: TimeInterval) {
+    private static func sweepStaleEntries(in dir: String, maxAge: TimeInterval) {
         let cutoff = Date().addingTimeInterval(-maxAge)
         for entry in (try? PathIO.contentsOfDirectory(atPath: dir)) ?? [] {
             let path = (dir as NSString).appendingPathComponent(entry)
@@ -721,7 +648,7 @@ public struct GraphStore {
         return data.flatMap { String(data: $0, encoding: .utf8) }
     }
 
-    static func uniqueServerName(for url: String, used: Set<String>) -> String {
+    private static func uniqueServerName(for url: String, used: Set<String>) -> String {
         let host = URL(string: url)?.host ?? url
         let base = String(host.split(separator: ".").first ?? Substring(host))
         guard used.contains(base) else { return base }
@@ -736,23 +663,23 @@ public struct GraphStore {
         return file
     }
 
-    static func longestAssignedChains(personaId: String, nodes: [GraphNode]) -> [[GraphNode]] {
+    private static func longestAssignedChains(personaId: String, nodes: [GraphNode]) -> [[GraphNode]] {
         let matched = assignedWithSummary(personaId: personaId, nodes: nodes)
         return matched
             .filter { node in !matched.contains { isAncestor(node, of: $0, nodes: nodes) } }
             .map { chain(of: $0, in: nodes) }
     }
 
-    static func assignedWithSummary(personaId: String, nodes: [GraphNode]) -> [GraphNode] {
+    private static func assignedWithSummary(personaId: String, nodes: [GraphNode]) -> [GraphNode] {
         nodes.filter { $0.active && $0.personas.contains(personaId) && $0.summary?.notEmpty == true }
     }
 
-    static func isAncestor(_ node: GraphNode, of other: GraphNode, nodes: [GraphNode]) -> Bool {
+    private static func isAncestor(_ node: GraphNode, of other: GraphNode, nodes: [GraphNode]) -> Bool {
         guard other.id != node.id else { return false }
         return chain(of: other, in: nodes).contains { $0.id == node.id }
     }
 
-    static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id"
+    private static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id"
 
     public static func insertRunLog(_ log: GraphRunLog, at instancePath: String) throws {
         let db = try connect(at: instancePath)
@@ -762,13 +689,7 @@ public struct GraphStore {
         )
     }
 
-    /// Session-anchored run-log insert (workflow follow-up thread). `nodeId`
-    /// carries the workflow session UUID — the single overloaded anchor
-    /// column — and the notification kind discriminator is the marker row
-    /// written in the SAME transaction, never inferred from the id later.
-    /// Unlike insertRunLog this also persists `completed_at` (the seeded
-    /// run-0 row is born with it set, so its completion surfaces in
-    /// notifications the moment its status turns terminal).
+    /// Session-anchored insert: `nodeId` carries the workflow session UUID; kind marker written in the same transaction.
     public static func insertSessionRunLog(
         _ log: GraphRunLog,
         session: String,
@@ -845,8 +766,7 @@ public struct GraphStore {
         return rows.compactMap(toRunLog)
     }
 
-    /// One thread by its root id (root included), oldest first — the
-    /// liveness-guard source for the full-RUN delete.
+    /// One thread by its root id (root included), oldest first.
     public static func fetchRunThread(rootId: String, at instancePath: String) throws -> [GraphRunLog] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
@@ -858,10 +778,94 @@ public struct GraphStore {
     public static func fetchProgressRunLogs(at instancePath: String) throws -> [GraphRunLog] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(
-            "SELECT \(runLogColumns) FROM graph_run_logs WHERE status IN ('progress', 'summarizing');"
+            "SELECT \(runLogColumns) FROM graph_run_logs WHERE status IN (\(runningStatusesSqlList));"
         )
         return rows.compactMap(toRunLog)
     }
+
+    public static let runningStatuses = ["progress", "summarizing"]
+
+    private static let runningStatusesSqlList = runningStatuses.map { "'\($0)'" }.joined(separator: ", ")
+
+    public static func countRunningRunLogs(at instancePath: String) -> (node: Int, session: Int) {
+        let path = dbPath(at: instancePath)
+        guard PathIO.isFileExistent(atPath: path) else { return (0, 0) }
+        var stage = "connect (open + pragmas)"
+        do {
+            let db = try connect(at: instancePath)
+            stage = "sqlite_master table probe"
+            let hasRunLogs = try sqliteMasterHas("graph_run_logs", db)
+            let hasKinds = try sqliteMasterHas("notification_kinds", db)
+            guard hasRunLogs, hasKinds else {
+                storeLog.warn(
+                    "running-count: tolerated state at \(path): graph_run_logs=\(hasRunLogs) notification_kinds=\(hasKinds) — returning 0/0"
+                )
+                return (0, 0)
+            }
+            stage = "count query"
+            return try runningRunCounts(on: db)
+        } catch {
+            storeLog.err("running-count: FAILED at stage [\(stage)] on \(path): \(describeSqliteError(error))")
+            logDbDiagnostics(at: path)
+            assertionFailure("graph_run_logs read failed on an existing db [stage \(stage)]: \(describeSqliteError(error))")
+            return (0, 0)
+        }
+    }
+
+    private static func logDbDiagnostics(at path: String) {
+        let fm = FileManager.default
+        func sizeInfo(_ p: String) -> String {
+            guard let attrs = try? fm.attributesOfItem(atPath: p),
+                  let size = attrs[.size] as? Int,
+                  let mtime = attrs[.modificationDate] as? Date else { return "missing" }
+            return "\(size)B mtime=\(Int(mtime.timeIntervalSinceReferenceDate))"
+        }
+        storeLog.err(
+            "diag: db=\(sizeInfo(path)) wal=\(sizeInfo(path + "-wal")) shm=\(sizeInfo(path + "-shm"))"
+        )
+        do {
+            let db = try Connection(path)
+            let tables = (try? db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"))?
+                .compactMap { $0[0] as? String } ?? ["<unreadable>"]
+            storeLog.err("diag: tables: \(tables.joined(separator: ", "))")
+            if tables.contains("graph_run_logs") {
+                let histogram = (try? db.prepare("SELECT status, COUNT(*) FROM graph_run_logs GROUP BY status;"))?
+                    .compactMap { row -> String? in
+                        guard let status = row[0] as? String, let n = row[1] as? Int64 else { return nil }
+                        return "\(status)=\(n)"
+                    } ?? []
+                storeLog.err(
+                    "diag: graph_run_logs by status: \(histogram.joined(separator: ", ")) (counted as running: \(runningStatuses.joined(separator: ", ")))"
+                )
+            }
+        } catch {
+            storeLog.err("diag: diagnostics read failed: \(describeSqliteError(error))")
+        }
+    }
+
+    private static func runningRunCounts(on db: Connection) throws -> (node: Int, session: Int) {
+        var counts = (node: 0, session: 0)
+        for row in try db.prepare(runningRunCountSql) {
+            guard let isSession = row[0] as? Int64,
+                  let n = row[1] as? Int64 else {
+                storeLog.err(
+                    "running-count: undecodable row is_session=\(String(describing: row[0])) count=\(String(describing: row[1]))"
+                )
+                assertionFailure("corrupt graph_run_logs running-count row")
+                continue
+            }
+            if isSession == 1 { counts.session = Int(n) } else { counts.node = Int(n) }
+        }
+        return counts
+    }
+
+    private static let runningRunCountSql = """
+    SELECT (COALESCE(k.kind, '') = 'session_run') AS is_session, COUNT(*)
+    FROM graph_run_logs g
+    LEFT JOIN notification_kinds k ON k.run_id = g.id
+    WHERE g.status IN (\(runningStatusesSqlList))
+    GROUP BY is_session;
+    """
 
     /// Terminal one-off node runs (Run button) ended after `since` — the
     /// node-run source for notifications. `since` is exclusive;
@@ -897,19 +901,25 @@ public struct GraphStore {
         }
     }
 
-    static func countParts(_ row: [Binding?]) -> (id: String, status: String, n: Int)? {
+    private static func countParts(_ row: [Binding?]) -> (id: String, status: String, n: Int)? {
         guard let id = row[0] as? String,
               let status = row[1] as? String,
-              let n = row[2] as? Int64 else { return nil }
+              let n = row[2] as? Int64 else {
+            assertionFailure("corrupt graph_run_logs count row")
+            return nil
+        }
         return (id, status, Int(n))
     }
 
-    static func toRunLog(_ row: [Binding?]) -> GraphRunLog? {
+    private static func toRunLog(_ row: [Binding?]) -> GraphRunLog? {
         guard let id = row[0] as? String,
               let nodeId = row[1] as? String,
               let prompt = row[2] as? String,
               let status = row[3] as? String,
-              let createdAt = row[6] as? Double else { return nil }
+              let createdAt = row[6] as? Double else {
+            assertionFailure("corrupt graph_run_logs row: \(row[0] ?? "nil")")
+            return nil
+        }
         return GraphRunLog(
             id: id, nodeId: nodeId, prompt: prompt, status: status,
             output: row[4] as? String, took: (row[5] as? Int64).map(Int.init),

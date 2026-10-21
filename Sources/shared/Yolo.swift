@@ -9,6 +9,8 @@ import Subprocess
 
 private let log = PrintLog(module: "yolo")
 
+private let execIoLimitBytes = 10 * 1024 * 1024
+
 public func subprocess(
 //    _ name: String,
     _ name: FilePath,
@@ -40,7 +42,7 @@ public func subprocess(
             workingDirectory: (verifiedChroot == nil) ? nil : .init(verifiedChroot!),
             input: stdin,
             output: .string(
-                limit: 10 * 1024 * 1024, encoding: UTF8.self
+                limit: execIoLimitBytes, encoding: UTF8.self
             )
         )
 
@@ -197,8 +199,6 @@ public struct ExecOutcome: Sendable {
             .joined(separator: "\n")
     }
 }
-
-private let execIoLimitBytes = 10 * 1024 * 1024
 
 public func execDetailed(
     _ binaryFullPath: String,

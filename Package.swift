@@ -73,6 +73,7 @@ let package = Package(
             dependencies: [
                 "shared",
                 .product(name: "SQLite", package: "SQLite.swift"),
+                .product(name: "SystemPackage", package: "swift-system"),
             ],
         ),
     ]

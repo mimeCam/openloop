@@ -37,6 +37,7 @@ struct InstanceHandler: Sendable {
             let svcStatus = InstanceHandler.computeServiceStatus(
                 workingDirectory: path, state: state
             )
+            let runningRuns = GraphStore.countRunningRunLogs(at: path)
 
             instances.append(InstanceInfo(
                 path: path,
@@ -47,7 +48,9 @@ struct InstanceHandler: Sendable {
                 unreadNotifications: Notifications.unreadCount(at: path),
                 configEnabled: svcStatus.configEnabled,
                 processRunning: svcStatus.processRunning,
-                graphMcpAuthMissing: GraphStore.mcpAuthMissingCount(at: path)
+                graphMcpAuthMissing: GraphStore.mcpAuthMissingCount(at: path),
+                runningGraphRuns: runningRuns.node,
+                runningSessionRuns: runningRuns.session
             ))
         }
 
@@ -159,6 +162,8 @@ extension InstanceHandler {
         /// secrets store doesn't hold — the home page badges the cell so the
         /// user opens the graph knowing a key is due (0 = nothing to say).
         var graphMcpAuthMissing: Int = 0
+        var runningGraphRuns: Int = 0
+        var runningSessionRuns: Int = 0
     }
 
     struct InstanceListResponse: Content, Sendable {

@@ -137,13 +137,16 @@ public enum Notifications {
     }
 
     static func nodeRunItems(at instancePath: String) throws -> [NotificationItem] {
-        let logs = try? GraphStore.fetchTerminalRunLogs(since: 0, at: instancePath)
-        guard (logs ?? []).notEmpty else { return [] }
+        guard let logs = try? GraphStore.fetchTerminalRunLogs(since: 0, at: instancePath) else { return [] }
+        guard logs.notEmpty else { return [] }
         // Kind lives with the notification, not the run log: session-anchored
         // rows (workflow follow-ups) carry a persisted marker written at
         // insert time; marker-less rows are node runs.
-        let markers = (try? LogManager.fetchNotificationKinds(at: instancePath)) ?? [:]
-        return (logs ?? []).map { log in
+        guard let markers = try? LogManager.fetchNotificationKinds(at: instancePath) else {
+            assertionFailure("notification_kinds must exist — list() created it via LogManager.createTables")
+            return []
+        }
+        return logs.map { log in
             let marker = markers[log.id]
             return NotificationItem(
                 kind: marker?.kind ?? "node_run", refId: log.id,

@@ -1,42 +1,11 @@
 //
 // Node metadata file store — one `.openloop/nodes/<UUID>.json5` per node.
-//
-// Why files, not sqlite: node metadata must `git merge` across machines
-// (coordination); a binary DB gives git nothing to work with. Run logs stay
-// in sqlite (GraphStore) — only node metadata moved out.
-//
-// Format contract (merge-calm, byte-stable):
-// - One key per line, 2-space indent, snake_case keys that exactly match the
-//   API wire format (`parent_id`, `mcp`, …). What you PUT is what you read
-//   in the file. The one deliberate split from the wire: MCP authorization
-//   KEYS never live here — node files are committed, so the key goes to the
-//   per-machine `.openloop/secrets.json5` (SecretStore) keyed by URL, and
-//   this file keeps only the `mcp_requires_auth` marker that travels with
-//   the repo. No migration ships for the pre-split plaintext-`mcp_auth` era: it
-//   was never distributed — its values were moved by hand when the split
-//   landed, and `mcp_auth` on disk is just another unknown key now.
-// - `NodeFile.Field` (below) IS the JSON key set and order: stable identity
-//   first (id/parent_id/created_at), human-merged words next, volatile
-//   machine state after, the big `output` dump last — so ordinary churn
-//   never buries identity in a diff.
-// - `created_at`/`completed_at` are reference-date Doubles (seconds since
-//   2001-01-01) — the same canonical representation as `GraphNode` in memory
-//   and run-log REAL columns; the API edge converts to unix ms. ISO-8601 is
-//   a v2 candidate and would require a file-format migration — do not mix.
-// - No comments in files, ever (the encoder would eat them on rewrite).
-//   An unchanged node must produce a byte-identical file — `git status`
-//   after merely viewing the graph stays empty.
-//
-// Durability: writes are temp+rename (`Data.write(options: .atomic)`), so a
-// crash never leaves a torn file; crash-leftover `*.tmp` is gitignored.
-// Files lost SQL's field-level atomicity, so every read-modify-write goes
-// through `mutate`, which serializes per-node on an NSLock (only `api`
-// writes nodes, so in-process locking suffices; atomic rename protects
-// concurrent readers).
-//
-// Corrupt-file policy: one bad file must never take the canvas down — skip
-// it, keep the rest, warn with the filename. The filename is the identity:
-// if the inner `id` disagrees, the filename wins and the file is skipped.
+// Files (not sqlite) so node metadata git-merges across machines; run logs stay in sqlite (GraphStore).
+// Byte-stable format: one key per line, snake_case keys = wire format, order declared once in `NodeFile.Field` (identity first, `output` last).
+// MCP auth KEYS never live here — per-machine SecretStore keyed by URL; this file keeps only the `mcp_requires_auth` marker.
+// `created_at`/`completed_at` are reference-date Doubles; no comments in files; unchanged node ⇒ byte-identical file (git status stays quiet).
+// Writes are atomic temp+rename; `mutate` serializes read-modify-write per-node.
+// Corrupt file ⇒ skip + warn, keep the rest; filename wins over a disagreeing inner id.
 //
 
 import Foundation
@@ -48,9 +17,7 @@ import Foundation
 
 private let nodeLog = PrintLog(module: "node-store")
 
-/// Codable twin of `GraphNode` (Model.swift stays storage-agnostic).
-/// File key set, spelling and serialization order are declared once in
-/// `Field` below (kept parallel to property order for readability).
+/// Codable twin of `GraphNode`; key set and serialization order declared once in `Field` below.
 public struct NodeFile: Codable, Equatable, Sendable {
     public var id: String
     public var parentId: String?
@@ -65,8 +32,7 @@ public struct NodeFile: Codable, Equatable, Sendable {
     public var active: Bool
     public var personas: [String]
     public var mcp: String?
-    /// Repo-traveling marker: this node's MCP endpoint requires an
-    /// authorization key (the key itself lives in SecretStore, keyed by `mcp`).
+    /// Repo-traveling marker: endpoint requires an auth key (the key itself lives in SecretStore, keyed by `mcp`).
     public var mcpRequiresAuth: Bool
     public var output: String?
 
@@ -98,32 +64,16 @@ public struct NodeFile: Codable, Equatable, Sendable {
         )
     }
 
-    /// Single source of truth for the file's keys: `rawValue` is the
-    /// snake_case disk/wire spelling (`parent_id`, `mcp`, …); case
-    /// order IS the serialization order — the merge-stability layout
-    /// (identity first, `output` last). `jsonText` walks `allCases` and its
-    /// value switch is exhaustive, so a new case without a serializer arm is
-    /// a compile error; a new property that never got a case here is caught
-    /// by the round-trip assert in `jsonText` on first write.
-    enum Field: String, CaseIterable, Sendable {
+    /// `rawValue` is the disk/wire spelling; case order IS the serialization order — the merge-stability layout.
+    fileprivate enum Field: String, CaseIterable, Sendable {
         case id, parentId = "parent_id", createdAt = "created_at", agent, took
         case completedAt = "completed_at", name, summary, prompt, status
         case active, personas, mcp, mcpRequiresAuth = "mcp_requires_auth", output
     }
 
-    // Tolerant decode: `personas`/`active`/`mcp_requires_auth` may be absent
-    // in hand-edited or older files; identity fields stay mandatory — a file
-    // without them is a bad hand-merge and belongs on the skip+warn path.
-    //
-    // Trap: `dec` decodes with `.convertFromSnakeCase`, which renames JSON
-    // keys BEFORE lookup (`mcp_requires_auth` arrives here as
-    // `mcpRequiresAuth`) — so case names must be the POST-conversion
-    // camelCase spelling, never the disk spelling
-    // (`mcpRequiresAuth = "mcp_requires_auth"` would silently decode
-    // nil and strand the value). (Disk spellings and file order live in
-    // `Field` above — the jsonText round-trip assert keeps the two sets in
-    // lockstep.)
-    enum CodingKeys: String, CodingKey {
+    // Tolerant decode for `personas`/`active`/`mcp_requires_auth`; identity fields stay mandatory.
+    // Trap: `dec` uses .convertFromSnakeCase, so case names must be the POST-conversion camelCase spelling.
+    private enum CodingKeys: String, CodingKey {
         case id, parentId, createdAt, agent, took, completedAt
         case name, summary, prompt, status, active, personas
         case mcp, mcpRequiresAuth, output
@@ -176,8 +126,7 @@ public struct NodeStore {
         try write(NodeFile(node), at: instancePath)
     }
 
-    /// Single read-modify-write entry point. No-op when the file is missing
-    /// (mirrors SQL `UPDATE … WHERE id = ?` on a missing row).
+    /// Single read-modify-write entry point; no-op on missing file (SQL UPDATE parity).
     public static func mutate(id: String, at instancePath: String, _ change: (inout NodeFile) -> Void) throws {
         let lock = nodeLock(for: id)
         lock.lock()
@@ -191,8 +140,7 @@ public struct NodeStore {
         readFile(id: id, at: instancePath)?.node
     }
 
-    /// Deterministic `(createdAt, id)` order — mirrors the frontend lane
-    /// order, so columns never shuffle between polls when timestamps tie.
+    /// Deterministic `(createdAt, id)` order — columns never shuffle between polls when timestamps tie.
     public static func list(at instancePath: String) -> [GraphNode] {
         let dir = nodesDir(at: instancePath)
         let names = (try? PathIO.contentsOfDirectory(atPath: dir.string)) ?? []
@@ -207,15 +155,6 @@ public struct NodeStore {
         let fp = filePath(id: id, at: instancePath)
         guard PathIO.isFileExistent(atPath: fp.string) else { return }
         try FileManager.default.removeItem(atPath: fp.string)
-    }
-
-    /// Legacy sqlite `personas` column held a JSON array string; that decoding
-    /// lives with the node domain — used by the one-shot migration only.
-    static func decodePersonas(_ json: String?) -> [String] {
-        guard let json,
-              let data = json.data(using: .utf8),
-              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return list
     }
 }
 
@@ -240,12 +179,7 @@ private extension NodeStore {
         return file
     }
 
-    // The other extension blindside, read side: keys on disk this build
-    // doesn't know. Decoding ignores them (reads stay forward-compatible),
-    // but the next `mutate` read-modify-write rewrites the file WITHOUT them
-    // — silently erasing another machine's newer-format field from the repo.
-    // Debug builds fail loudly at first read instead; release keeps the
-    // tolerant frozen-contract behavior.
+    // Unknown on-disk keys would be silently dropped by the next mutate rewrite — DEBUG fails loudly at first read instead.
     static func assertNoUnknownKeys(in data: Data, at fp: FilePath) {
         #if DEBUG
         let unknown = unknownKeys(in: data)
@@ -259,8 +193,7 @@ private extension NodeStore {
         #endif
     }
 
-    // Decoding `[String: Present]` yields exactly the object's key set:
-    // `Present.init(from:)` reads no value, so every JSON value shape decodes.
+    // Decoding `[String: Present]` yields exactly the object's key set — `Present.init(from:)` reads no value.
     private enum Present: Decodable {
         case any
         init(from decoder: Decoder) throws { self = .any }
@@ -272,8 +205,7 @@ private extension NodeStore {
         return keys.keys.filter { !known.contains($0) }.sorted()
     }
 
-    /// Atomic temp+rename; skips the write entirely when bytes are unchanged
-    /// (byte-stability: no rewrite churn, mtime preserved, `git status` quiet).
+    /// Atomic temp+rename; skips the write when bytes are unchanged (byte-stability: mtime preserved, git quiet).
     static func write(_ file: NodeFile, at instancePath: String) throws {
         let fp = filePath(id: file.id, at: instancePath)
         let data = Data(jsonText(file).utf8)
@@ -281,16 +213,7 @@ private extension NodeStore {
         try data.write(to: URL(fileURLWithPath: fp.string), options: .atomic)
     }
 
-    // Deterministic serializer: JSONEncoder's object key order is unspecified
-    // (hash order — reshuffled in every new process; within one process it
-    // merely *looks* stable, which is why in-process tests can't catch it) —
-    // unusable for files that must diff calmly and be byte-stable. Note
-    // `.sortedKeys` IS byte-stable (verified Swift 6.4.1/linux) but was
-    // rejected on order semantics: alphabetical ≠ the merge-stability layout
-    // (identity first, `output` last), and it can't express a custom order.
-    // Keys and order come from `NodeFile.Field`; values are still
-    // escaped/encoded by the shared encoder — only the key layout is
-    // hand-rolled.
+    // Deterministic serializer: JSONEncoder's key order is unspecified hash order; `.sortedKeys` is stable but alphabetical ≠ merge-stability layout.
     static func jsonText(_ f: NodeFile) -> String {
         let body = NodeFile.Field.allCases
             .map { "  \"\($0.rawValue)\" : \(scalar(of: $0, in: f))" }
@@ -308,9 +231,7 @@ private extension NodeStore {
         scalar(of:in:) switch and init(from:) together.
         """
 
-    // Field→value mapping is a switch so it cannot silently lag the enum:
-    // a new Field case without an arm here is a compile error, not a
-    // dropped key.
+    // Field→value mapping is a switch: a new Field case without an arm here is a compile error, not a dropped key.
     static func scalar(of field: NodeFile.Field, in f: NodeFile) -> String {
         switch field {
         case .id: return scalar(f.id)
@@ -331,12 +252,7 @@ private extension NodeStore {
         }
     }
 
-    // Debug tripwire (assert is compiled out of release and its autoclosure
-    // costs nothing there): re-decode what we just serialized and demand
-    // field-for-field equality. This closes the one hole the enum cannot
-    // catch at compile time — a NodeFile property that never got a Field
-    // case. The first test that saves a fully-populated node trips it,
-    // instead of a field-dropping file format shipping silently.
+    // Debug tripwire: re-decode what we just serialized and demand equality — catches a property that never got a Field case.
     static func roundTrips(to f: NodeFile, text: String) -> Bool {
         guard let back = try? dec.decode(NodeFile.self, from: Data(text.utf8)) else { return false }
         return back == f
@@ -347,13 +263,17 @@ private extension NodeStore {
         return String(data: data, encoding: .utf8) ?? "null"
     }
 
-    // Per-node write serialization. Entries live for the process lifetime
-    // (keyed by UUID, bounded by node count) — removal would need its own
-    // locking and buys nothing at this scale.
-    private static let registry = NSLock()
-    private static var locks: [String: NSLock] = [:]
-
     static func nodeLock(for id: String) -> NSLock {
+        nodeLocks.lock(for: id)
+    }
+}
+
+// Per-node write serialization; entries live for the process lifetime (keyed by UUID, bounded by node count).
+private final class NodeLockRegistry {
+    private let registry = NSLock()
+    private var locks: [String: NSLock] = [:]
+
+    func lock(for id: String) -> NSLock {
         registry.lock()
         defer { registry.unlock() }
         if let lock = locks[id] { return lock }
@@ -362,3 +282,5 @@ private extension NodeStore {
         return lock
     }
 }
+
+private let nodeLocks = NodeLockRegistry()

@@ -110,7 +110,7 @@ public struct LogManager {
     /// pre-session-era row stays marker-less.
     /// GraphStore.createRunLogTables creates this table too (same logs.db),
     /// so the transactional session insert never races a fresh instance.
-    public static let notificationKindsDdl = """
+    static let notificationKindsDdl = """
     CREATE TABLE IF NOT EXISTS notification_kinds (
         run_id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
@@ -536,14 +536,21 @@ public struct LogManager {
         )
         return rows.compactMap { row in
             guard let session = row[0] as? String,
-                  let workflowId = row[1] as? String else { return nil }
+                  let workflowId = row[1] as? String,
+                  let success = row[2] as? Int64,
+                  let took = row[3] as? Int64,
+                  let startedAt = row[4] as? Double,
+                  let endedAt = row[5] as? Double else {
+                assertionFailure("corrupt run_ends row for session \(session)")
+                return nil
+            }
             return RunEnd(
                 session: session,
                 workflowId: workflowId,
-                success: (row[2] as? Int64 ?? 0) != 0,
-                took: Int(row[3] as? Int64 ?? 0),
-                startedAt: row[4] as? Double ?? 0,
-                endedAt: row[5] as? Double ?? 0
+                success: success != 0,
+                took: Int(took),
+                startedAt: startedAt,
+                endedAt: endedAt
             )
         }.first
     }

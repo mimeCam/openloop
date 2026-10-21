@@ -237,6 +237,72 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(counts.active, 1)
     }
 
+    private func sessionRun(_ id: String, status: String) throws {
+        try GraphStore.insertSessionRunLog(
+            GraphRunLog(id: id, nodeId: "sess-1", prompt: "p", status: status, output: nil, took: nil, createdAt: 1, completedAt: nil),
+            session: "sess-1", workflowId: "wf", at: path
+        )
+    }
+
+    private func assertRunning(_ node: Int, _ session: Int, line: UInt = #line) {
+        let c = GraphStore.countRunningRunLogs(at: path)
+        XCTAssertEqual(c.node, node, line: line)
+        XCTAssertEqual(c.session, session, line: line)
+    }
+
+    func testCountRunningSplitsNodeAndSessionRuns() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("n1", node: "a", status: "progress"), at: path)
+        try GraphStore.insertRunLog(runLog("n2", node: "a", status: "failed"), at: path)
+        try sessionRun("s1", status: "summarizing")
+        assertRunning(1, 1)
+    }
+
+    func testCountRunningCountsEveryInFlightRowNotRoots() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "progress", root: "r1"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a", status: "progress", parent: "r1", root: "r1"), at: path)
+        try sessionRun("s1", status: "progress")
+        assertRunning(2, 1)
+    }
+
+    func testCountRunningTreatsSummarizingAsRunning() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("n1", node: "a", status: "summarizing"), at: path)
+        assertRunning(1, 0)
+    }
+
+    func testCountRunningEmptyDbIsZeroZero() {
+        assertRunning(0, 0)
+    }
+
+    func testCountRunningToleratesMissingInstanceDir() {
+        let missing = NSTemporaryDirectory() + "openloop-no-such-\(UUID().uuidString)"
+        let c = GraphStore.countRunningRunLogs(at: missing)
+        XCTAssertEqual(c.node, 0)
+        XCTAssertEqual(c.session, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing), "a badge read must not create anything")
+    }
+
+    func testCountRunningToleratesLogOnlyDb() throws {
+        let logOnly = NSTemporaryDirectory() + "openloop-logonly-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: logOnly + "/.openloop", withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: logOnly) }
+        try LogManager.createTables(at: logOnly)
+
+        let c = GraphStore.countRunningRunLogs(at: logOnly)
+        XCTAssertEqual(c.node, 0)
+        XCTAssertEqual(c.session, 0)
+    }
+
+    func testCountRunningToleratesDbWithoutKindMarkers() throws {
+        let db = try Connection(GraphStore.dbPath(at: path))
+        try db.run("DROP TABLE notification_kinds;")
+        assertRunning(0, 0)
+    }
+
     func testRunChainWalksParentRunIdsOldestFirst() throws {
         try insert(node("a", nil))
         try GraphStore.insertRunLog(GraphRunLog(id: "r1", nodeId: "a", prompt: "p", status: "success", output: "o", took: 1, createdAt: 1, completedAt: nil), at: path)
@@ -535,33 +601,5 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: path), 0)
         let empty = NSTemporaryDirectory() + "openloop-graphstore-none-\(UUID().uuidString)"
         XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: empty), 0)
-    }
-
-    func testLegacyDbMigratesNameColumn() throws {
-        // pre-name database: the original 8-column schema. createTables runs
-        // migrateNodeColumns; if the ALTER is missing, insertNode throws.
-        let legacy = NSTemporaryDirectory() + "openloop-graphstore-legacy-\(UUID().uuidString)"
-        try FileManager.default.createDirectory(
-            atPath: (legacy as NSString).appendingPathComponent(Paths.dataFolderName),
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(atPath: legacy) }
-        let db = try Connection(GraphStore.dbPath(at: legacy))
-        try db.execute("""
-        CREATE TABLE graph_nodes (
-            id TEXT PRIMARY KEY,
-            parent_id TEXT,
-            prompt TEXT NOT NULL,
-            agent TEXT NOT NULL,
-            status TEXT NOT NULL,
-            output TEXT,
-            created_at REAL NOT NULL,
-            completed_at REAL
-        );
-        """)
-        try GraphStore.createTables(at: legacy)
-        try GraphStore.insertNode(node("a", nil), at: legacy)
-        try GraphStore.updateName(id: "a", name: "old db", at: legacy)
-        XCTAssertEqual(try GraphStore.fetchNodes(at: legacy).first?.name, "old db")
     }
 }

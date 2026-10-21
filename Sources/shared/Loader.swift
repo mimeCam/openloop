@@ -103,29 +103,36 @@ public extension FileLoader {
     }
 
     static func loadPersonById(_ id: String) async throws -> Persona? {
-        func tryLoad(in root: FilePath) async throws -> Persona? {
-            let fp = root
-                .appending(Paths.dataFolderName).appending("personas")
-                .appending("\(id).\(json)")
-            guard PathIO.isFileExistent(atPath: fp.string) else {
-                return nil
-            }
-
-            return try await loadPersonaAtPath(fp)
+        guard let fp = resolvePersonaFile(id: id, from: Paths.curDir) else {
+            return nil
         }
+        return try await loadPersonaAtPath(fp)
+    }
 
-        for dir in Paths.dirsToHome() {
-            if let p = try await tryLoad(in: dir) {
-                return p
-            }
+    static func resolvePersonaFile(
+        id: String, from start: FilePath, globalRoot: FilePath = Paths.globalOpenloop
+    ) -> FilePath? {
+        let fileName = "\(id).\(json)"
+        for dir in Paths.dirsToHome(from: start) {
+            let fp = dir.appending(Paths.dataFolderName).appending("personas").appending(fileName)
+            if PathIO.isFileExistent(atPath: fp.string) { return fp }
         }
         // Last-resort lookup: user-global (system-wide) personas.
-        let gfp = Paths.globalOpenloop.appending("personas").appending("\(id).\(json)")
-        if PathIO.isFileExistent(atPath: gfp.string) {
-            return try await loadPersonaAtPath(gfp)
-        }
+        let gfp = globalRoot.appending("personas").appending(fileName)
+        return PathIO.isFileExistent(atPath: gfp.string) ? gfp : nil
+    }
 
-        return nil
+    static func resolveKnowledgeDir(
+        id: String, from start: FilePath, globalRoot: FilePath = Paths.globalOpenloop
+    ) -> FilePath? {
+        let rel = FilePath(Paths.dataFolderName).appending("knowledge").appending(id).components
+        for dir in Paths.dirsToHome(from: start) {
+            let fp = dir.appending(rel)
+            if PathIO.isDirectoryExistent(atPath: fp.string) { return fp }
+        }
+        // Last-resort lookup: user-global (system-wide) knowledge.
+        let gfp = globalRoot.appending("knowledge").appending(id)
+        return PathIO.isDirectoryExistent(atPath: gfp.string) ? gfp : nil
     }
 
     static func loadPersonaAtPath(_ fp: FilePath) async throws -> Persona {

@@ -315,28 +315,10 @@ private struct LevelRunItemAndId {
 
 private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]]? {
     func fetchPerson(_ id: String) async throws -> Persona? {
-        let fileName = "\(id).\(json)"
-
-        func tryLoad(in dir: FilePath) async throws -> Persona? {
-            let fp = dir
-                .appending(Paths.dataFolderName).appending("personas")
-                .appending(fileName)
-            guard PathIO.isFileExistent(atPath: fp.string) else { return nil }
-            return try await FileLoader.loadPersonaAtPath(fp)
+        guard let fp = FileLoader.resolvePersonaFile(id: id, from: Paths.curDir) else {
+            return nil
         }
-
-        for dir in Paths.dirsToHome() {
-            if let p = try await tryLoad(in: dir) {
-                return p
-            }
-        }
-
-        // Last-resort lookup: user-global (system-wide) personas.
-        let gfp = Paths.globalOpenloop.appending("personas").appending(fileName)
-        if PathIO.isFileExistent(atPath: gfp.string) {
-            return try await FileLoader.loadPersonaAtPath(gfp)
-        }
-        return nil
+        return try await FileLoader.loadPersonaAtPath(fp)
     }
 
     var res: [[LevelRunItemAndId]] = []
@@ -411,19 +393,7 @@ private func parsePersonaRef(_ input: String) -> PersonaRef {
 //}
 
 private func resolveKnowledgePath(for id: String) -> String? {
-    let rel = FilePath(Paths.dataFolderName).appending("knowledge").appending(id).components
-
-    if let dir = Paths.dirsToHome().first(where: {
-        PathIO.isDirectoryExistent(atPath: $0.appending(rel).string)
-    }) {
-        return dir.appending(rel).string
-    }
-    // Last-resort lookup: user-global (system-wide) knowledge.
-    let gfp = Paths.globalOpenloop.appending("knowledge").appending(id)
-    if PathIO.isDirectoryExistent(atPath: gfp.string) {
-        return gfp.string
-    }
-    return nil
+    FileLoader.resolveKnowledgeDir(id: id, from: Paths.curDir)?.string
 }
 
 private func preparePersonaFolder(
@@ -434,10 +404,6 @@ private func preparePersonaFolder(
         return path
     }
 
-    let cur = Paths.curDir
-        .appending(Paths.dataFolderName).appending("knowledge")
-        .appending(id).string
-
     let share = Paths.globalOpenloop
         .appending("knowledge")
         .appending(id).string
@@ -445,8 +411,6 @@ private func preparePersonaFolder(
     // TODO: - fetch from remote
 
     throw ValidationError("No persona found and no folder exists. For local-only knowledge create folder: \(Paths.dataFolderName)/knowledge/\(id) (or system-wide: \(share))")
-
-    return nil
 }
 
 private func preparePersonas(

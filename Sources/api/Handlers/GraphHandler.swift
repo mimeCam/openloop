@@ -7,6 +7,10 @@ import Foundation
 #endif
 import shared
 
+private let runnerEnvSidecarSuffix = ".env"
+private let baseScriptVariants: Set<String> = ["base", "swift", "swiftbridge"]
+private let noKnowledgeSentinel = "_bottom_"
+
 actor GraphRunRegistry {
     static let shared = GraphRunRegistry()
 
@@ -288,7 +292,7 @@ private extension GraphHandler {
     }
 
     func isRunning(_ status: String) -> Bool {
-        status == "progress" || status == "summarizing"
+        GraphStore.runningStatuses.contains(status)
     }
 
     func resolveScript(for agent: String) throws -> FilePath {
@@ -300,12 +304,21 @@ private extension GraphHandler {
     }
 
     func isRunnerScript(_ file: String) -> Bool {
-        guard file.hasPrefix("openloop_") else { return false }
-        let body = file.dropFirst("openloop_".count)
-        guard let r = body.range(of: "_docker") else { return false }
-        let variant = body[r.upperBound...]
-        guard variant.hasPrefix("-"), variant.count > 1 else { return false }
-        return !["base", "swift", "swiftbridge"].contains(String(variant.dropFirst()))
+        guard file.hasPrefix("openloop_"), !file.hasSuffix(runnerEnvSidecarSuffix) else { return false }
+        guard let variant = dockerVariant(of: file.dropFirst("openloop_".count)) else { return false }
+        return !baseScriptVariants.contains(variant)
+    }
+
+    func isBaseScript(_ bare: String) -> Bool {
+        guard let variant = dockerVariant(of: bare[...]) else { return false }
+        return baseScriptVariants.contains(variant)
+    }
+
+    func dockerVariant(of bare: Substring) -> String? {
+        guard let r = bare.range(of: "_docker") else { return nil }
+        let variant = bare[r.upperBound...]
+        guard variant.hasPrefix("-"), variant.count > 1 else { return nil }
+        return String(variant.dropFirst())
     }
 
     func resolveParentId(
@@ -330,9 +343,8 @@ private extension GraphHandler {
     }
 
     func sweepInterrupted(instancePath: String) async throws {
-        let stale = try GraphStore.fetchNodes(at: instancePath).filter {
-            $0.status == "progress" || $0.status == "summarizing"
-        }
+        let stale = try GraphStore.fetchNodes(at: instancePath)
+            .filter { GraphStore.runningStatuses.contains($0.status) }
         for node in stale where !(await GraphRunRegistry.shared.isLive(node.id)) {
             try sweepNode(node, at: instancePath)
         }
@@ -1027,28 +1039,18 @@ private extension GraphHandler {
         }
     }
 
-    /// Persona file lookup walking instance → home — the runner's
-    /// fetchPerson, anchored at the instance instead of process cwd.
     func sessionPersona(_ id: String, instancePath: String) async -> Persona? {
-        let fileName = "\(id).\(json)"
-        for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            let fp = dir.appending(Paths.dataFolderName).appending("personas").appending(fileName)
-            guard PathIO.isFileExistent(atPath: fp.string) else { continue }
-            if let persona = try? await FileLoader.loadPersonaAtPath(fp) { return persona }
+        guard let fp = FileLoader.resolvePersonaFile(id: id, from: FilePath(instancePath)) else {
+            return nil
         }
-        return nil
+        return try? await FileLoader.loadPersonaAtPath(fp)
     }
 
     /// Knowledge dir resolution mirroring the runner's resolveKnowledgePath,
     /// anchored at the instance. "" when none exists — the runner's own
     /// convention for project-bin-agent personas.
     func sessionKnowledgePath(_ personaId: String, instancePath: String) -> String {
-        let rel = FilePath(Paths.dataFolderName).appending("knowledge").appending(personaId)
-        for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            let fp = dir.appending(rel.string)
-            if PathIO.isDirectoryExistent(atPath: fp.string) { return fp.string }
-        }
-        return ""
+        FileLoader.resolveKnowledgeDir(id: personaId, from: FilePath(instancePath))?.string ?? ""
     }
 
     /// The tip's recorded agent name is whichever form the runner resolved
@@ -1063,6 +1065,12 @@ private extension GraphHandler {
             : recordedAgent
         guard bare.notEmpty else {
             throw Abort(.badRequest, reason: "Unknown agent: \(recordedAgent)")
+        }
+        guard !isBaseScript(bare) else {
+            throw Abort(
+                .badRequest,
+                reason: "Agent \(recordedAgent) is a base container script (needs image/suffix args) — set the persona's agent to a variant script"
+            )
         }
         for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
             let project = dir.appending(Paths.dataFolderName).appending("bin").appending(bare)
@@ -1369,7 +1377,8 @@ private func sessionRunArgs(_ run: SessionRunExecution) -> [String] {
     guard isRealSessionPersona(run.tip.personaId) else {
         return [root, run.tip.personaId, prompt]
     }
-    return [root, run.tip.knowledgePath, prompt, run.tip.about]
+    let knowledge = run.tip.knowledgePath.notEmpty ? run.tip.knowledgePath : noKnowledgeSentinel
+    return [root, knowledge, prompt, run.tip.about]
 }
 
 /// The stored prompt stays clean for UI display; the exec prompt prefixes

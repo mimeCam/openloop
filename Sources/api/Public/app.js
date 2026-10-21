@@ -292,6 +292,7 @@ document.addEventListener('DOMContentLoaded', function() {
             console.log('DEBUG: Raw API response:', data);
 
             updateNotifBubble(data.instances || []);
+            updateRunningBubble(data.instances || []);
 
             if (data.instances && data.instances.length > 0) {
                 const tree = buildTreeFromPaths(data.instances);
@@ -1424,6 +1425,44 @@ document.addEventListener('DOMContentLoaded', function() {
             badge.classList.add('badge-pop');
         }
         lastNotifTotal = total;
+    }
+
+    const runningBadgeLabelCap = 99;
+    const instancePollSeconds = 30;
+    let lastRunningTotal = 0;
+
+    function runningBreakdown(instances) {
+        return instances.reduce((acc, d) => ({
+            workflows: acc.workflows + (d.state?.activeRunningWorkflows || 0),
+            manual: acc.manual + (d.manualActive || 0),
+            runs: acc.runs + (d.runningGraphRuns || 0) + (d.runningSessionRuns || 0)
+        }), { workflows: 0, manual: 0, runs: 0 });
+    }
+
+    function runningTooltip(b, total) {
+        return `Running tasks: ${total}
+${b.workflows} workflows · ${b.manual} manual · ${b.runs} graph & convo runs
+updates with the instance list, every ${instancePollSeconds} s`;
+    }
+
+    function popOnce(el) {
+        el.classList.remove('badge-pop');
+        void el.offsetWidth;
+        el.classList.add('badge-pop');
+    }
+
+    function updateRunningBubble(instances) {
+        const badge = document.getElementById('running-badge');
+        const count = document.getElementById('running-count');
+        if (!badge || !count) return;
+        const b = runningBreakdown(instances);
+        const total = b.workflows + b.manual + b.runs;
+        badge.title = runningTooltip(b, total);
+        const label = total > runningBadgeLabelCap ? runningBadgeLabelCap + '+' : String(total);
+        if (count.textContent !== label) count.textContent = label;
+        badge.classList.toggle('is-running', total > 0);
+        if (total > 0 && lastRunningTotal === 0) popOnce(badge);
+        lastRunningTotal = total;
     }
 
     function getPersonaCountHtml(path, state, totalFromFetch) {

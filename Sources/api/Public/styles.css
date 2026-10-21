@@ -2672,7 +2672,8 @@ mark {
 }
 .log-expand-link:hover { text-decoration: underline; }
 
-.notif-badge {
+.notif-badge,
+.running-badge {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -2681,9 +2682,11 @@ mark {
     border-radius: var(--radius-sm);
     padding: 8px 10px;
     color: var(--text-secondary);
-    text-decoration: none;
     transition: all var(--transition-fast);
 }
+
+.notif-badge { text-decoration: none; }
+.running-badge { cursor: default; }
 
 .notif-badge:hover {
     color: var(--text-primary);
@@ -2696,7 +2699,8 @@ mark {
     color: #ffffff;
 }
 
-.notif-count {
+.notif-count,
+.running-count {
     font-size: 11px;
     font-family: var(--font-mono);
     color: var(--text-faint);
@@ -2741,9 +2745,33 @@ mark {
 
 .notif-badge.badge-pop { animation: badge-pop-anim 0.35s ease; }
 
+.running-badge.is-running {
+    background: rgba(0, 217, 255, 0.10);
+    border-color: rgba(8, 145, 178, 0.35);
+    color: #0e7490;
+    box-shadow: 0 0 10px rgba(8, 145, 178, 0.15);
+    animation: running-pulse 2.5s ease-in-out infinite;
+}
+
+.running-badge.is-running .running-count {
+    color: #0e7490;
+    font-weight: 600;
+}
+
+@keyframes running-pulse {
+    0%, 100% { border-color: rgba(8, 145, 178, 0.25); }
+    50% { border-color: rgba(8, 145, 178, 0.55); }
+}
+
+.running-badge.badge-pop { animation: badge-pop-anim 0.35s ease; }
+.running-badge.is-running.badge-pop {
+    animation: badge-pop-anim 0.35s ease, running-pulse 2.5s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-    .notif-badge.badge-pop { animation: none; }
+    .notif-badge.badge-pop, .running-badge.badge-pop { animation: none; }
     .notif-badge:hover { transform: none; }
+    .running-badge.is-running { animation: none; border-color: rgba(8, 145, 178, 0.35); }
 }
 
 .log-duration {
