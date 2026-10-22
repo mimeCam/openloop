@@ -800,10 +800,9 @@ private func runSummary(
     await GraphRunRegistry.shared.remove(node.id)
 }
 
-private let summaryInstruction = "Summarize the QUESTION and ANSWER below concisely, plain text, no preamble, just state the found fact, dont mention question and/or answer."
-
+private let summaryInstruction = "You are turning the QUESTION and ANSWER below into knowledge notes: plain text, terse and dense, each bit of information for a later reuse. Capture the subject itself — facts with their specifics (names, paths, numbers) and the reasoning that matters. Where a choice is still open, list each option with its trade-offs and leave the pick to the reader. End with the open threads: what is still unverified and which questions are worth pursuing next."
 // Delta vs convo.md — without it the summarizer re-compresses each turn's recap into the next convo.md, compounding every turn.
-private let deltaSummaryInstruction = " @\(GraphStore.containerCtxDir)/convo.md is the previous conversation summary — read it first and treat its facts as already stated. Summarize only what THIS turn adds on top of it; do not repeat anything from convo.md. If this turn adds nothing new, state that in one short sentence — never return an empty summary."
+private let deltaSummaryInstruction = " @\(GraphStore.containerCtxDir)/convo.md is the previous conversation summary — read it first and treat its facts as already stated. Write only what THIS turn adds on top of it: new facts, shifted trade-offs, movement on the open threads. If this turn adds nothing new, drive towards dynamic information discovery instead of reiterating already known facts."
 
 private func qaSummaryPrompt(question: String, answer: String, runId: String) -> String? {
     guard (try? writeQa(question, answer, id: runId)) != nil else { return nil }
