@@ -5,6 +5,7 @@
     'use strict';
 
     const instanceParam = new URLSearchParams(location.search).get('instance');
+    const POLL_SECONDS = 30; // list + running badge both ride this cadence
     let items = [];
     const ISOLATED_RUN = false; // flip to true to run sanity checks in DevTools
 
@@ -35,6 +36,7 @@
     }
 
     async function load() {
+        refreshRunning();
         try {
             items = instanceParam ? await loadOne(instanceParam) : await loadAll();
         } catch (e) {
@@ -58,6 +60,60 @@
             )
         );
         return lists.flat().sort((a, b) => b.ended_at - a.ended_at);
+    }
+
+    // ── running-tasks badge (grammar cloned from app.js updateRunningBubble) ──
+    // Same /api/instances counters as the home page badge. ?instance= scopes
+    // this page, so the badge follows the page's scope, not the fleet's.
+    const runningBadgeLabelCap = 99;
+    let lastRunningTotal = 0;
+
+    function scopedInstances(data, param) {
+        const all = data.instances || [];
+        return param ? all.filter(i => i.path === param) : all;
+    }
+
+    const runningBreakdown = insts => insts.reduce((acc, d) => ({
+        workflows: acc.workflows + (d.state?.activeRunningWorkflows || 0),
+        manual: acc.manual + (d.manualActive || 0),
+        runs: acc.runs + (d.runningGraphRuns || 0) + (d.runningSessionRuns || 0)
+    }), { workflows: 0, manual: 0, runs: 0 });
+
+    const runningLabel = total =>
+        total > runningBadgeLabelCap ? runningBadgeLabelCap + '+' : String(total);
+
+    function runningTooltip(b, total, scopePath) {
+        const scope = scopePath ? ` — ${shortPath(scopePath)}` : '';
+        return `Running tasks${scope}: ${total}\n` +
+            `${b.workflows} workflows · ${b.manual} manual · ${b.runs} graph & convo runs\n` +
+            `updates every ${POLL_SECONDS} s`;
+    }
+
+    function popOnce(el) {
+        el.classList.remove('badge-pop');
+        void el.offsetWidth;
+        el.classList.add('badge-pop');
+    }
+
+    function updateRunningBadge(instances) {
+        const badge = $('running-badge'), count = $('running-count');
+        if (!badge || !count) return;
+        const b = runningBreakdown(instances);
+        const total = b.workflows + b.manual + b.runs;
+        badge.title = runningTooltip(b, total, instanceParam);
+        const label = runningLabel(total);
+        if (count.textContent !== label) count.textContent = label;
+        badge.classList.toggle('is-running', total > 0);
+        if (total > 0 && lastRunningTotal === 0) popOnce(badge);
+        lastRunningTotal = total;
+    }
+
+    // Status, not content: a failed fetch keeps the last known count — the
+    // list owns this page's only error surface.
+    function refreshRunning() {
+        fetchJson('/api/instances')
+            .then(data => updateRunningBadge(scopedInstances(data, instanceParam)))
+            .catch(() => {});
     }
 
     function render() {
@@ -227,6 +283,7 @@
         checkDeepLink();
         checkPromptClamp();
         checkOpenMarksRead();
+        checkRunningBadge();
         console.log('All sanity checks passed.');
     }
 
@@ -293,6 +350,31 @@
         console.log('OK: open marks read');
     }
 
+    function checkRunningBadge() {
+        const fleet = [
+            { path: '/a', state: { activeRunningWorkflows: 2 }, manualActive: 1,
+              runningGraphRuns: 3, runningSessionRuns: 4 },
+            { path: '/b', state: null, manualActive: 0 } // stopped: missing counters must read as 0
+        ];
+        const b = runningBreakdown(fleet);
+        console.assert(b.workflows === 2 && b.manual === 1 && b.runs === 7,
+            'runningBreakdown: sums the three counters, tolerates null state / missing fields');
+        console.assert(runningLabel(0) === '0' && runningLabel(99) === '99' && runningLabel(100) === '99+',
+            'runningLabel: caps at 99, plus sign beyond');
+        const data = { instances: fleet };
+        console.assert(scopedInstances(data, null).length === 2,
+            'scopedInstances: no param → whole fleet');
+        console.assert(scopedInstances(data, '/a').length === 1 && scopedInstances(data, '/a')[0].path === '/a',
+            'scopedInstances: param → only that instance');
+        console.assert(scopedInstances(data, '/gone').length === 0,
+            'scopedInstances: unknown instance → empty (badge reads 0, never the fleet)');
+        console.assert(runningTooltip(b, 10, '/x/y/demo').startsWith('Running tasks — …/demo: 10\n'),
+            'runningTooltip: scoped title leads with short path + total');
+        console.assert(runningTooltip(b, 10, null).startsWith('Running tasks: 10\n'),
+            'runningTooltip: fleet title carries no scope');
+        console.log('OK: running badge');
+    }
+
     if (ISOLATED_RUN) runSanityChecks();
-    else { load(); setInterval(load, 30000); }
+    else { load(); setInterval(load, POLL_SECONDS * 1000); }
 })();

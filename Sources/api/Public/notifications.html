@@ -60,6 +60,48 @@
         .mark-all-btn.visible { display: block; }
         .mark-all-btn:hover { color: var(--text-primary); border-color: var(--accent-blue); }
 
+        /* Running-tasks badge — dark-theme twin of index.html's .running-badge
+           (same counters, cap, pulse and pop; cyan shifted for this canvas). */
+        .toolbar-side {
+            display: flex; align-items: center; gap: 10px;
+        }
+        .running-badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            border: 1px solid var(--border-card); border-radius: 8px;
+            padding: 5px 9px; color: var(--text-muted);
+            cursor: default;
+        }
+        .running-badge svg { display: block; }
+        .running-count {
+            font-size: 11px; font-family: 'JetBrains Mono', monospace;
+            color: var(--text-faint); min-width: 12px; text-align: center;
+        }
+        .running-badge.is-running {
+            background: rgba(34, 211, 238, 0.08);
+            border-color: rgba(34, 211, 238, 0.35);
+            color: #67e8f9;
+            box-shadow: 0 0 10px rgba(34, 211, 238, 0.12);
+            animation: running-pulse 2.5s ease-in-out infinite;
+        }
+        .running-badge.is-running .running-count { color: #67e8f9; font-weight: 600; }
+        @keyframes running-pulse {
+            0%, 100% { border-color: rgba(34, 211, 238, 0.25); }
+            50% { border-color: rgba(34, 211, 238, 0.55); }
+        }
+        @keyframes badge-pop-anim {
+            0% { transform: scale(1); }
+            40% { transform: scale(1.18); }
+            100% { transform: scale(1); }
+        }
+        .running-badge.badge-pop { animation: badge-pop-anim 0.35s ease; }
+        .running-badge.is-running.badge-pop {
+            animation: badge-pop-anim 0.35s ease, running-pulse 2.5s ease-in-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .running-badge.badge-pop { animation: none; }
+            .running-badge.is-running { animation: none; border-color: rgba(34, 211, 238, 0.35); }
+        }
+
         .list {
             max-width: 720px; margin: 0 auto;
             padding: calc(var(--toolbar-height) + 24px) 16px 40px;
@@ -177,7 +219,31 @@
             Notifications
             <span id="unread-pill" class="unread-pill zero">0</span>
         </div>
-        <button id="mark-all" class="mark-all-btn">Mark all as read</button>
+        <div class="toolbar-side">
+            <span
+                id="running-badge"
+                class="running-badge"
+                role="status"
+                aria-label="Running tasks"
+                title="Running tasks"
+            >
+                <svg
+                    viewBox="0 0 24 24"
+                    width="14"
+                    height="14"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                >
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                </svg>
+                <span id="running-count" class="running-count" aria-live="polite">0</span>
+            </span>
+            <button id="mark-all" class="mark-all-btn">Mark all as read</button>
+        </div>
     </header>
     <main id="list" class="list">
         <div class="empty">Loading…</div>

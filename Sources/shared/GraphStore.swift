@@ -19,7 +19,9 @@ public struct GraphNode: Sendable {
     public let output: String?
     public let took: Int?
     public let mcp: String?
-    /// Marker only: the auth key itself lives in SecretStore keyed by `mcp` URL — never in the committed node file.
+    /// Marker only: this node's MCP endpoint requires an auth key. The key
+    /// itself lives in `.openloop/secrets.json5` (SecretStore), keyed by
+    /// `mcp` — per machine, never in the committed node file.
     public let mcpRequiresAuth: Bool
     public let summary: String?
     public let name: String?
@@ -258,7 +260,11 @@ public struct GraphStore {
         repairRootRunIds(db)
     }
 
-    // NULL or dangling root re-derives from the parent chain — boot self-heals, delete heals its own splice.
+    // One invariant, two callers (the boot backfill above, and deleteRunLog's
+    // splice below): a row whose root is NULL or dangles at a run that no
+    // longer exists re-derives it from the parent chain — boot self-heals
+    // legacy corruption, delete heals its own splice. Dangling extends the
+    // original NULL-only contract without changing any boot outcome.
     private static func repairRootRunIds(_ db: Connection) {
         let ids = repairableRunIds(db)
         guard !ids.isEmpty else { return }
@@ -278,7 +284,9 @@ public struct GraphStore {
         return statement.compactMap { $0[0] as? String }
     }
 
-    // Parent edges among LIVING rows only — dangling parents read as no parent, never as a ghost.
+    // Parent edges among LIVING rows only: a parent_run_id pointing at a
+    // deleted run (raw corruption, pre-feature manual deletes) reads as no
+    // parent, so convoRoot terminates at the orphan itself, never at a ghost.
     private static func runParentMap(_ db: Connection) -> [String: String] {
         let sql = "SELECT c.id, c.parent_run_id FROM graph_run_logs c JOIN graph_run_logs p ON p.id = c.parent_run_id;"
         guard let statement = try? db.prepare(sql) else { return [:] }
@@ -299,7 +307,9 @@ public struct GraphStore {
         return cur
     }
 
-    // MARK: - Node CRUD (facade → NodeStore files; signatures frozen for api/runner/tests)
+    // MARK: - Node CRUD (facade → NodeStore files)
+    // Signatures frozen: api handlers, runner and tests keep compiling as-is.
+    // Node metadata lives in `.openloop/nodes/<UUID>.json5` (see NodeStore).
 
     public static func insertNode(_ node: GraphNode, at instancePath: String) throws {
         try NodeStore.save(node, at: instancePath)
@@ -356,7 +366,10 @@ public struct GraphStore {
         try NodeStore.mutate(id: id, at: instancePath) { $0.name = name }
     }
 
-    /// Key lives in SecretStore keyed by the node's MCP URL; clearing (`auth` nil/empty) removes key + marker.
+    /// Auth keys live per machine in SecretStore keyed by the node's MCP
+    /// URL (dedup: one key serves every node on that URL). The node file
+    /// keeps only the `mcp_requires_auth` marker. Clearing (`auth` nil/empty)
+    /// removes the URL's key and the marker.
     public static func updateMcpAuth(
         id: String,
         auth: String?,
@@ -372,7 +385,12 @@ public struct GraphStore {
         try NodeStore.mutate(id: id, at: instancePath) { $0.mcpRequiresAuth = (auth?.notEmpty == true) }
     }
 
-    /// Read-only, dir-missing tolerant: nodes marked "MCP requires a key" this machine doesn't hold.
+    /// How many nodes wait on an MCP key this computer doesn't hold: marker
+    /// on (the repo says "this MCP requires a key") and no local secret for
+    /// the node's URL — the same pair `mcp_requires_auth`/`mcp_auth_local` the
+    /// graph wire exposes per node. Read-only and dir-missing tolerant
+    /// (NodeStore.list → []): powers the graph header warning and the
+    /// instances-list cell badge without creating anything.
     public static func mcpAuthMissingCount(at instancePath: String) -> Int {
         let secrets = SecretStore.load(at: instancePath)
         func hasLocalKey(_ url: String?) -> Bool {
@@ -454,7 +472,11 @@ public struct GraphStore {
         return seen
     }
 
-    // SQL-era semantics: single delete bridges children to the deleted node's parent; subtree delete removes all.
+    // Delete semantics preserved from the SQL era: single delete bridges
+    // children to the deleted node's parent; subtree delete removes all.
+    // Files are removed children-first (deepest first), so an interrupted
+    // delete leaves orphans the frontend already tolerates — never a parent
+    // whose subtree half-exists. Run-log cleanup stays one sqlite transaction.
     public static func deleteNode(id: String, at instancePath: String) throws {
         try bridgeChildren(of: id, at: instancePath)
         try NodeStore.delete(id: id, at: instancePath)
@@ -475,7 +497,9 @@ public struct GraphStore {
         }
     }
 
-    // Takes NODE ids: removes every run-log row anchored at those nodes.
+    // Takes NODE ids (cascade companion to deleteNode/deleteNodes): removes
+    // every run-log row anchored at those nodes — a run thread is never left
+    // dangling under a node that no longer exists.
     private static func deleteRunLogs(underNodeIds ids: Set<String>, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
@@ -491,7 +515,12 @@ public struct GraphStore {
         return try db.prepare(sql, id).compactMap(toRunLog).first
     }
 
-    // "Delete a turn": ONE row splices out, children re-parent to its parent — all in ONE transaction.
+    // The "delete a turn" contract, shared by node threads and session
+    // threads: ONE row splices out — every row whose parent_run_id pointed
+    // at it re-parents to ITS parent (nil ⇒ those rows become thread roots),
+    // roots re-derive, and the row's notification marker + read rows drop —
+    // all in ONE transaction (all statements or none). Deleting a parent is
+    // the feature, not an error: no "has children" guard.
     public static func deleteRunLog(id: String, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
@@ -502,7 +531,9 @@ public struct GraphStore {
         }
     }
 
-    // `next` reparents to `deleted.parent`; must run BEFORE the row dies (the subselect reads its parent).
+    // `next` reparents to `deleted.parent` — the splice that lets a
+    // follow-up turn survive the deletion of the turn it answered. Must run
+    // BEFORE the row dies: the subselect reads the deleted run's parent.
     private static func bridgeRunChildren(of id: String, _ db: Connection) throws {
         let sql = """
         UPDATE graph_run_logs
@@ -512,13 +543,20 @@ public struct GraphStore {
         try db.run(sql, id, id)
     }
 
-    // Hygiene: marker/read rows would linger after the run row dies; notification_reads may not exist on graph-only instances.
+    // Hygiene, not correctness: the notification LIST derives from rows (a
+    // deleted run's notification vanishes with its row), but the kind marker
+    // and read rows would linger forever. notification_reads may not exist
+    // on graph-only instances — that failure must not fail the delete.
     private static func dropRunMarkerRows(_ db: Connection, runId: String) {
         try? db.run("DELETE FROM notification_kinds WHERE run_id = ?;", runId)
         try? db.run("DELETE FROM notification_reads WHERE ref_id = ?;", runId)
     }
 
-    // "Delete a full RUN": the thread root AND every row of its thread go together.
+    // The "delete a full RUN" contract (the runs-list delete): the thread
+    // root AND every row of its thread go together — the conversation twin
+    // of deleteNodes' subtree cascade. Ids are collected BEFORE the delete
+    // (marker/read hygiene for each); repairRootRunIds stays the safety net
+    // for any stray row still pointing into the dead thread.
     public static func deleteRunThread(id: String, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.transaction {
@@ -578,7 +616,16 @@ public struct GraphStore {
         chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
     }
 
-    /// Auth is resolved HERE by URL from the secrets store of the instance the nodes came from — never stored on the node.
+    /// Auth is resolved HERE, by URL, from the secrets store OF THE INSTANCE
+    /// THE NODES CAME FROM — never stored on the node. Parent-instance
+    /// semantics fall out for free: every caller builds its chain from one
+    /// dir's node files and passes that same dir, so a node living in
+    /// `/prj/root/.openloop/nodes` reads `/prj/root/.openloop/secrets.json5`
+    /// while a node in `/prj/root/inner/.openloop` reads its own — the
+    /// runner/collectContext and sessionPersonaContext per-dir loops keep
+    /// that pairing intact. Marker-less URLs on a machine that happens to
+    /// hold their key still get auth: the store is keyed by endpoint, and a
+    /// configured endpoint's key applies to every node that calls it.
     public static func chainMcpEndpoints(_ chain: [GraphNode], at instancePath: String) -> Set<GraphMcpEndpoint> {
         let secrets = SecretStore.load(at: instancePath)
         return Set(chain.compactMap { node in
@@ -689,7 +736,13 @@ public struct GraphStore {
         )
     }
 
-    /// Session-anchored insert: `nodeId` carries the workflow session UUID; kind marker written in the same transaction.
+    /// Session-anchored run-log insert (workflow follow-up thread). `nodeId`
+    /// carries the workflow session UUID — the single overloaded anchor
+    /// column — and the notification kind discriminator is the marker row
+    /// written in the SAME transaction, never inferred from the id later.
+    /// Unlike insertRunLog this also persists `completed_at` (the seeded
+    /// run-0 row is born with it set, so its completion surfaces in
+    /// notifications the moment its status turns terminal).
     public static func insertSessionRunLog(
         _ log: GraphRunLog,
         session: String,
@@ -766,7 +819,8 @@ public struct GraphStore {
         return rows.compactMap(toRunLog)
     }
 
-    /// One thread by its root id (root included), oldest first.
+    /// One thread by its root id (root included), oldest first — the
+    /// liveness-guard source for the full-RUN delete.
     public static func fetchRunThread(rootId: String, at instancePath: String) throws -> [GraphRunLog] {
         let db = try connect(at: instancePath)
         let rows = try db.prepare(

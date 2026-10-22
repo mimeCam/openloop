@@ -2,7 +2,7 @@
   "id" : "802C8652-A81B-4086-A5C4-8FF2EE47C551",
   "parent_id" : "94BBDC67-FCAF-4D6C-B64E-C6B4AF2B5642",
   "created_at" : 813405712.882092,
-  "agent" : "cc_docker-z",
+  "agent" : "cc_docker-swift-z",
   "took" : 34,
   "completed_at" : 813405747.000409,
   "name" : "Web Search MCPs overview",
