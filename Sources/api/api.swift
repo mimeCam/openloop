@@ -32,7 +32,7 @@ struct api {
     }
 }
 
-func configure(_ app: Application) async throws {
+private func configure(_ app: Application) async throws {
     app.routes.defaultMaxBodySize = "2mb"
 
     let publicPath: String
@@ -54,7 +54,7 @@ func configure(_ app: Application) async throws {
 
     app.get { req async throws in //req async -> Response in
         try await req.fileio.asyncStreamFile(
-            at: publicPath  + "index.html"
+            at: publicPath + "index.html"
         )
     }
 
@@ -139,6 +139,11 @@ func configure(_ app: Application) async throws {
     // Workflow delete endpoint
     instances.grouped(":id", "workflows", ":wid").delete { req async throws in
         try await WorkflowHandler().delete(req: req)
+    }
+
+    // Instance files endpoint
+    instances.get(":id", "files") { req async throws in
+        try await FilesHandler().listFiles(req: req)
     }
 
     // Knowledge file endpoints
@@ -245,8 +250,4 @@ private func isDirectoryExistent(atPath path: String) -> Bool {
     var isDirectory = ObjCBool(false)
     let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
     return exists && isDirectory.boolValue
-}
-
-private func publicFolderURL() -> String? {
-    return Bundle.module.path(forResource: "Public", ofType: nil)
 }

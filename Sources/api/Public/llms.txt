@@ -9,6 +9,7 @@ or a handler's Content struct:
   [ ] manual-workflows (ManualWorkflowHandler — validate/launch/get/delete, RAM-only)
   [ ] logs personas|workflows|sessions (LogHandler)
   [ ] knowledge files get|put|delete|list (KnowledgeHandler, ** catch-all)
+  [ ] instance files index (FilesHandler — @-mention source, registered instance only)
   [ ] graph nodes + run logs (GraphHandler)
   [ ] notifications (NotificationHandler — per instance, logs.db-derived)
 Served as text/plain by FileMiddleware — NO route is registered for it.
@@ -125,7 +126,30 @@ Knowledge — per-persona plain-text file store
   GET    /api/instances/:id/personas/:pid/knowledge/**path  → raw text (text/plain)
   PUT    /api/instances/:id/personas/:pid/knowledge/**path  body = raw text → 200
   DELETE /api/instances/:id/personas/:pid/knowledge/**path  → 204
-  (** = catch-all sub-path. ../ traversal is rejected with 403.)
+  (** = catch-all sub-path, percent-decoded, relative under the persona's
+                                   knowledge folder — ".." components or absolute
+                                   paths → 403, malformed encoding → 400. :id must
+                                   be a registered instance, same as /files.)
+
+Instance files — project-tree index for the @-mention composer
+  GET /api/instances/:id/files → { files:[{ path, isMarkdown, mtimeMs?,
+                                  sizeBytes? }], truncated }
+                                  Bounded walk of the instance folder itself:
+                                  dot-entries skipped (one rule hides .git/,
+                                  .openloop/, .DS_Store), node_modules/
+                                  vendor/ Pods/ build/ target/ dist/ .build/
+                                  skipped, symlinked dirs never followed
+                                  (cycle safety), depth ≤ 20, ≤ 200 entries
+                                  per directory (every folder stays visible
+                                  on oversized trees), ≤ 10000 total. paths
+                                  are relative + posix + sorted; truncated=true
+                                  = a cap tripped. :id must be a registered
+                                  instance (exact match) — the walk never
+                                  touches an arbitrary disk path. isMarkdown
+                                  = md/mdx (the composer glyph); finer
+                                  md/mdx/txt ranking tiers are client-side.
+                                  No cache — live per fetch. Powers the
+                                  @./file mentions in the follow-up composers.
 
 Graph — node graph per instance (powers /graph.html)
   GET    /api/instances/:id/graph              → { nodes:[GraphNode] }

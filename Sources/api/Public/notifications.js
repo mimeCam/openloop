@@ -119,11 +119,23 @@
     function render() {
         renderHeader();
         if (!items.length) {
-            $('list').innerHTML = '<div class="empty">No notifications yet</div>';
+            $('list').innerHTML = emptyHtml();
             return;
         }
         $('list').innerHTML = items.map(rowHtml).join('');
         bindRows();
+    }
+
+    function emptyHtml() {
+        return `<div class="empty">` +
+            `<div class="empty-icon" aria-hidden="true">${bellIcon()}</div>` +
+            `<div class="empty-title">All caught up</div>` +
+            `<div class="empty-hint">Finished workflows, follow-ups and node runs land here. Updates every ${POLL_SECONDS} s.</div>` +
+            `</div>`;
+    }
+
+    function bellIcon() {
+        return '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>';
     }
 
     function renderHeader() {
@@ -137,22 +149,34 @@
     function rowHtml(n) {
         return `<div class="notif${n.read ? '' : ' unread'}" data-id="${esc(n.id)}">` +
             `<span class="notif-icon ${n.success ? 'ok' : 'fail'}">${kindIcon(n)}</span>` +
-            `<div class="notif-body">` +
-            `<div class="notif-head">` +
-            `<span class="notif-kind">${kindLabel(n)}</span>` +
-            `<span class="notif-title"><a href="${deepLink(n)}" target="_blank" rel="noopener">${esc(n.title)}</a></span>` +
-            `<span class="notif-status ${n.success ? 'ok' : 'fail'}">${n.success ? '✓ succeeded' : '✗ failed'}</span>` +
-            `</div>` +
-            `<div class="notif-meta">` +
-            `<span>${fmtTook(n.took)}</span>` +
-            `<span>${relTime(n.ended_at)}</span>` +
-            `<span title="${esc(n.instance_path)}">${esc(shortPath(n.instance_path))}</span>` +
-            `</div>` +
-            (n.prompt ? promptHtml(n) : '') +
-            `</div>` +
-            `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener" data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}">open ↗</a>` +
-            (n.read ? '' : `<button class="mark-read-btn" data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}">mark read</button>`) +
+            `<div class="notif-body">${headHtml(n)}${metaHtml(n)}${promptHtml(n)}</div>` +
+            actionsHtml(n) +
             `</div>`;
+    }
+
+    function headHtml(n, scoped = !!instanceParam) {
+        const chip = scoped ? '' :
+            `<span class="notif-path" title="${esc(n.instance_path)}">${esc(shortPath(n.instance_path))}</span>` +
+            `<span class="notif-sep" aria-hidden="true">·</span>`;
+        return `<div class="notif-head">${chip}` +
+            `<span class="notif-title"><a href="${deepLink(n)}" target="_blank" rel="noopener">${esc(n.title)}</a></span>` +
+            `</div>`;
+    }
+
+    function metaHtml(n) {
+        const took = fmtTook(n.took);
+        return `<div class="notif-meta">` +
+            `<span class="notif-kind">${kindLabel(n)}</span>` +
+            `<span class="notif-status ${n.success ? 'ok' : 'fail'}">${n.success ? '✓ succeeded' : '✗ failed'}</span>` +
+            (took ? `<span>${took}</span>` : '') +
+            `<span>${relTime(n.ended_at)}</span>` +
+            `</div>`;
+    }
+
+    function actionsHtml(n) {
+        const ds = `data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}"`;
+        return `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener" ${ds}>open ↗</a>` +
+            (n.read ? '' : `<button class="mark-read-btn" ${ds}>mark read</button>`);
     }
 
     // The clamp can bite when chars fill ~3 wrapped lines OR when extra
@@ -228,6 +252,14 @@
         return '…/' + String(p).split('/').filter(Boolean).pop();
     }
 
+    const scopeLabel = p => (p ? ` — ${shortPath(p)}` : '');
+
+    function renderScope() {
+        const el = $('toolbar-scope');
+        el.textContent = scopeLabel(instanceParam);
+        el.title = instanceParam || '';
+    }
+
     function bindRows() {
         $('list').querySelectorAll('.mark-read-btn').forEach(btn =>
             btn.addEventListener('click', () => markRead(btn.dataset)));
@@ -284,6 +316,7 @@
         checkPromptClamp();
         checkOpenMarksRead();
         checkRunningBadge();
+        checkHeroLayout();
         console.log('All sanity checks passed.');
     }
 
@@ -375,6 +408,46 @@
         console.log('OK: running badge');
     }
 
+    function checkHeroLayout() {
+        const base = { kind: 'node_run', id: 'r1', instance_path: '/x/y/openloop',
+            node_id: 'n1', success: false, took: 1628, ended_at: Date.now(),
+            title: 'nightly-agents-digest', prompt: null, read: false };
+        const html = rowHtml(base);
+        const head = html.slice(html.indexOf('notif-head'), html.indexOf('notif-meta'));
+        console.assert(head.indexOf('notif-path') < head.indexOf('notif-title') &&
+            head.includes(`title="${esc(base.instance_path)}"`) &&
+            head.includes(`>${esc(shortPath(base.instance_path))}<`),
+            'hero: escaped shortPath chip leads the head, full-path tooltip kept');
+        console.assert(!head.includes('notif-status') &&
+            html.indexOf('notif-status') > html.indexOf('notif-meta') &&
+            /notif-status fail[^<]*>✗ failed</.test(html),
+            'status: demoted below the hero, glyph + word survive the demotion');
+        console.assert(html.indexOf('notif-meta') < html.indexOf('notif-kind') &&
+            html.indexOf('notif-kind') < html.indexOf('notif-status'),
+            'meta: kind opens the sentence, status follows');
+        const hostile = rowHtml({ ...base, instance_path: '/x/"y"<z>/openloop' });
+        console.assert(!hostile.includes('<z>') && hostile.includes('&lt;z&gt;') &&
+            hostile.includes('&quot;y&quot;'),
+            'hero: hostile path (quotes + angle brackets) escaped in the loudest pixel');
+        console.assert(headHtml(base, true).includes('notif-title') &&
+            !headHtml(base, true).includes('notif-path') &&
+            headHtml(base, false).includes('notif-path'),
+            'hero: scoped mode drops the chip, fleet keeps it — one renderer');
+        console.assert(headHtml(base, false).includes(`href="${deepLink(base)}"`),
+            'hero: title deep link unchanged (deepLink regression pin)');
+        const long = rowHtml({ ...base, prompt: 'x'.repeat(301) });
+        console.assert(long.includes('</div><button class="notif-more" data-key="/x/y/openloop/r1">'),
+            'adjacency: .notif-more still the immediate sibling after .notif-prompt');
+        console.assert(scopeLabel('/a/b') === ' — …/b' &&
+            scopeLabel('') === '' && scopeLabel(null) === '',
+            'scopeLabel: scoped toolbar suffix, empty for fleet');
+        const noTook = metaHtml({ ...base, took: null });
+        console.assert(!noTook.includes('<span></span>') &&
+            noTook.split('<span').length - 1 === 3,
+            'meta: took-less rows (interrupted runs) drop the slot — kind, status, ago; no dangling separator');
+        console.log('OK: hero layout');
+    }
+
     if (ISOLATED_RUN) runSanityChecks();
-    else { load(); setInterval(load, POLL_SECONDS * 1000); }
+    else { renderScope(); load(); setInterval(load, POLL_SECONDS * 1000); }
 })();

@@ -12,6 +12,19 @@ import LLMGraph
 
 private let log = PrintLog(module: "runner")
 
+private let agentBinaryPrefix = "openloop_"
+private let bottomItemId = "_bottom_"
+private let headItemId = "_head_"
+private let rwPersonaIdSuffix = ":rw"
+
+/// `ValidationError.localizedDescription` bridges to a useless NSError message — the reason lives in `.message`.
+private func errorMessage(_ error: Error) -> String {
+    if let validationError = error as? ValidationError {
+        return validationError.message
+    }
+    return error.localizedDescription
+}
+
 @main
 struct runner: ParsableCommand {
 //    @Argument(help: "The agent to use")
@@ -35,14 +48,13 @@ struct runner: ParsableCommand {
 
                 _ = try await start(
                     workflow, ask: ask,
-                    context: try? readPipedStdin(),
+                    context: try readPipedStdin(),
                     contextParents: [],
                     session: UUID().uuidString,
                     isTop: true
                 )
             } catch {
-                // ValidationError.localizedDescription bridges to a useless NSError message — the reason lives in `.message`.
-                let msg = (error as? ValidationError)?.message ?? error.localizedDescription
+                let msg = errorMessage(error)
                 assertionFailure("ERR. \(msg)")
                 log.err(msg)
                 runner.exit(withError: error)
@@ -57,6 +69,8 @@ struct runner: ParsableCommand {
 }
 
 private func readPipedStdin() throws -> String? {
+    let readChunkSize = 10 * 1024
+
     let isPiped = isatty(FileDescriptor.standardInput.rawValue) == 0
 
     guard isPiped else {
@@ -64,7 +78,7 @@ private func readPipedStdin() throws -> String? {
     }
 
     var data = [UInt8]()
-    var buffer = [UInt8](repeating: 0, count: 10 * 1024)
+    var buffer = [UInt8](repeating: 0, count: readChunkSize)
 
     while true {
         let bytesRead = try buffer.withUnsafeMutableBytes { ptr in
@@ -74,7 +88,10 @@ private func readPipedStdin() throws -> String? {
         data.append(contentsOf: buffer[0..<bytesRead])
     }
 
-    return String(bytes: data, encoding: .utf8)
+    guard let text = String(bytes: data, encoding: .utf8) else {
+        throw ValidationError("Piped stdin is not valid UTF-8")
+    }
+    return text
 }
 
 private func start(
@@ -155,7 +172,7 @@ private func start(
         }
 
     } catch {
-        let msg = (error as? ValidationError)?.message ?? error.localizedDescription
+        let msg = errorMessage(error)
 
         log.err(msg)
         try? await saveLog(
@@ -207,8 +224,10 @@ private func runWorkflow(
     )
     if validationErrors.notEmpty {
         throw ValidationError(
-            "Workflow tree validation failed:\n" +
-            validationErrors.map(\.description).joined(separator: "\n")
+            """
+            Workflow tree validation failed:
+            \(validationErrors.map(\.description).joined(separator: "\n"))
+            """
         )
     }
 
@@ -220,7 +239,7 @@ private func runWorkflow(
     guard w.agent.notEmpty else {
         throw ValidationError("Workflow has empty `agent` value. Set it to `oc_docker`, `cc_docker` or other custom agent.")
     }
-    let agent = "openloop_\(w.agent)"
+    let agent = agentBinaryPrefix + w.agent
 //    let localAgentExists = PathIO.isFileExistent(
 //        atPath: Paths.curDir
 //            .appending("openloop").appending("bin")
@@ -234,36 +253,26 @@ private func runWorkflow(
     }
 
     let levels = try await fetchLevels(w.levels)
-    guard let levels else {
-        throw ValidationError("Bad levels")
-    }
 
-    let preparedPersonas = try await preparePersonas(levels)
-    guard let preparedPersonas else {
-        throw ValidationError("Bad personas")
-    }
+    let preparedPersonas = try preparePersonas(levels)
 //    defer {
 //        cleanUpTempFolders(for: preparedPersonas)
 //    }
 
+    var runPersonas = preparedPersonas
     let addSingleBottomCompletion: Bool
-    var runPersonas: [[PreparedRunItem]]
     if preparedPersonas.isEmpty {
-        runPersonas = []
-
         addSingleBottomCompletion = true
     } else {
-        runPersonas = preparedPersonas
-
-        let empty = (preparedPersonas.last?.count ?? 0) == 0
-        assert(!empty)
-        let moreThanOne = (preparedPersonas.last?.count ?? 0) > 1
-        addSingleBottomCompletion = moreThanOne
+        assert(preparedPersonas.notEmpty)
+        let lastLevel = preparedPersonas.last!
+        assert(lastLevel.notEmpty)
+        addSingleBottomCompletion = lastLevel.count > 1
     }
     if addSingleBottomCompletion {
         let bottom = PreparedRunItem(
-            id: UUID().uuidString, realId: "_bottom_",
-            name: "_bottom_",
+            id: UUID().uuidString, realId: bottomItemId,
+            name: bottomItemId,
             persona: PreparedPersona(
                 role: "",
                 about: "",
@@ -274,9 +283,7 @@ private func runWorkflow(
             workflow: nil,
             forceRW: true
         )
-        runPersonas.append(
-            [bottom]
-        )
+        runPersonas.append([bottom])
     }
 
     let res = try await runGraph(
@@ -313,7 +320,7 @@ private struct LevelRunItemAndId {
     let isRW: Bool
 }
 
-private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]]? {
+private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]] {
     func fetchPerson(_ id: String) async throws -> Persona? {
         guard let fp = FileLoader.resolvePersonaFile(id: id, from: Paths.curDir) else {
             return nil
@@ -323,7 +330,7 @@ private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]
 
     var res: [[LevelRunItemAndId]] = []
     for level in ids {
-        if level.isEmpty  {
+        if level.isEmpty {
             continue
         }
 
@@ -361,21 +368,16 @@ private func fetchLevels(_ ids: [[String]]) async throws -> [[LevelRunItemAndId]
 }
 
 private struct PersonaRef: Sendable {
-    public let id: String
-    public let isRW: Bool
-
-    public init(id: String, isRW: Bool) {
-        self.id = id
-        self.isRW = isRW
-    }
+    let id: String
+    let isRW: Bool
 }
 
 private func parsePersonaRef(_ input: String) -> PersonaRef {
     if input.hasPrefix(":") {
         return PersonaRef(id: input, isRW: false)
     }
-    if input.hasSuffix(":rw") && input.count > 3 {
-        return PersonaRef(id: String(input.dropLast(3)), isRW: true)
+    if input.hasSuffix(rwPersonaIdSuffix) && input.count > rwPersonaIdSuffix.count {
+        return PersonaRef(id: String(input.dropLast(rwPersonaIdSuffix.count)), isRW: true)
     }
     return PersonaRef(id: input, isRW: false)
 }
@@ -396,10 +398,7 @@ private func resolveKnowledgePath(for id: String) -> String? {
     FileLoader.resolveKnowledgeDir(id: id, from: Paths.curDir)?.string
 }
 
-private func preparePersonaFolder(
-    for p: Persona, id: String
-) async throws -> String? {
-
+private func preparePersonaFolder(id: String) throws -> String {
     if let path = resolveKnowledgePath(for: id) {
         return path
     }
@@ -415,36 +414,36 @@ private func preparePersonaFolder(
 
 private func preparePersonas(
     _ levels: [[LevelRunItemAndId]]
-) async throws -> [[PreparedRunItem]]? {
+) throws -> [[PreparedRunItem]] {
     var knowledgePaths: [String: String] = [:]
 
     for runItems in levels {
         for ri in runItems {
             guard let p = ri.p else { continue }
 
-            let usesProjectBinAgent: Bool = {
-                if case .projectBin = resolveAgent(p.agent, workflowAgent: "") {
-                    return true
-                }
-                return false
-            }()
+            let usesProjectBinAgent: Bool
+            switch resolveAgent(p.agent, workflowAgent: "") {
+            case .projectBin: usesProjectBinAgent = true
+            case .userLocalBin, .workflowFallback: usesProjectBinAgent = false
+            }
 
             if usesProjectBinAgent {
                 knowledgePaths[ri.id] = ""
             } else {
-                let fp = try await preparePersonaFolder(for: p, id: ri.id)
-                guard let fp else {
-                    assertionFailure(); return nil
-                }
-                knowledgePaths[ri.id] = fp
+                knowledgePaths[ri.id] = try preparePersonaFolder(id: ri.id)
             }
         }
     }
 
-    return levels.enumerated().map { li, personasAndIds in
+    return try levels.map { personasAndIds in
         let soloOnLevel = personasAndIds.count == 1
-        return personasAndIds.enumerated().map { pi, personaAndId in
+        return try personasAndIds.map { personaAndId in
             if let p = personaAndId.p {
+                guard let knowledgePath = knowledgePaths[personaAndId.id] else {
+                    assertionFailure("Knowledge path not prepared for `\(personaAndId.id)`")
+                    throw ValidationError("Knowledge path not prepared for `\(personaAndId.id)`")
+                }
+
                 let effectiveRW = personaAndId.isRW && soloOnLevel
                 return PreparedRunItem(
                     id: UUID().uuidString, realId: personaAndId.id,
@@ -453,8 +452,8 @@ private func preparePersonas(
                         role: p.role,
                         about: p.about,
                         task: p.task,
-                        agent: p.agent == nil ? nil : ("openloop_" + p.agent!),
-                        knowledgePath: knowledgePaths[personaAndId.id] ?? ""
+                        agent: p.agent.map { agentBinaryPrefix + $0 },
+                        knowledgePath: knowledgePath
                     ),
                     workflow: nil,
                     forceRW: effectiveRW
@@ -470,7 +469,8 @@ private func preparePersonas(
                     forceRW: false
                 )
             } else {
-                fatalError()
+                assertionFailure("Level item is neither persona nor workflow: `\(personaAndId.id)`")
+                throw ValidationError("Level item is neither persona nor workflow: `\(personaAndId.id)`")
             }
         }
     }
@@ -493,42 +493,41 @@ private struct PersonaRunContext {
     let mcpPath: String?
 }
 
-private func personaRunContext(personaId: String, runId: String, runDir: FilePath) -> PersonaRunContext {
+private func personaRunContext(personaId: String, runId: String, runDir: FilePath) throws -> PersonaRunContext {
     guard isRealPersona(personaId) else { return PersonaRunContext(prefix: "", mcpPath: nil) }
-    let (files, mcps) = collectContext(personaId: personaId, runDir: runDir)
+    let (files, mcps) = try collectContext(personaId: personaId, runDir: runDir)
     assert(files.allSatisfy { $0.string.hasPrefix(runDir.string) })
     // `lastComponent` is Optional — unwrap or the prompt gets `/context/Optional("…")`; `@` = agent-side file mention.
     let refs = files.compactMap(\.lastComponent).map { "@\(GraphStore.containerCtxDir)/\($0.string)" }
-    let prefix = refs.isEmpty ? "" : "Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs.joined(separator: " "))\n\n"
+    let prefix = refs.isEmpty ? "" : """
+        Context files (absolute paths at filesystem root, outside the working directory, read-only): \(refs.joined(separator: " "))
+
+
+        """
     return PersonaRunContext(prefix: prefix, mcpPath: GraphStore.writeMcpConfig(mcps, runId: runId))
 }
 
 private func isRealPersona(_ id: String) -> Bool {
-    id != "_bottom_" && id != "_head_" && !id.hasPrefix(":")
+    id != bottomItemId && id != headItemId && !id.hasPrefix(":")
 }
 
-private func collectContext(personaId: String, runDir: FilePath) -> ([FilePath], Set<GraphMcpEndpoint>) {
+private func collectContext(personaId: String, runDir: FilePath) throws -> ([FilePath], Set<GraphMcpEndpoint>) {
     var mcps = Set<GraphMcpEndpoint>()
-    let files = Paths.dirsToHome()
+    let files = try Paths.dirsToHome()
         .filter { PathIO.isDirectoryExistent(atPath: NodeStore.nodesDir(at: $0.string).string) }
         .flatMap { dir -> [String] in
-            let ctx = (try? GraphStore.personaContext(personaId: personaId, at: dir.string)) ?? .empty
+            let ctx = try GraphStore.personaContext(personaId: personaId, at: dir.string)
             mcps.formUnion(ctx.mcps)
             return ctx.texts
         }
-        .compactMap { writeContextFile($0, runDir: runDir) }
+        .map { try writeContextFile($0, runDir: runDir) }
     return (files, mcps)
 }
 
-private func writeContextFile(_ text: String, runDir: FilePath) -> FilePath? {
-    do {
-        let file = try GraphStore.writeContextFile(text, in: runDir)
-        assert(PathIO.isFileExistent(atPath: file.string))
-        return file
-    } catch {
-        assertionFailure("\(error)")
-        return nil
-    }
+private func writeContextFile(_ text: String, runDir: FilePath) throws -> FilePath {
+    let file = try GraphStore.writeContextFile(text, in: runDir)
+    assert(PathIO.isFileExistent(atPath: file.string))
+    return file
 }
 
 private func runEnv(runDir: FilePath, mcpPath: String?) -> [String: String] {
@@ -551,7 +550,7 @@ private func resolveAgent(
             path: Paths.bin.appending(workflowAgent)
         )
     }
-    let shortName = String(pa.trimmingPrefix("openloop_"))
+    let shortName = String(pa.trimmingPrefix(agentBinaryPrefix))
     if let hit = Paths.dirsToHome().first(where: { dir in
         PathIO.isFileExistent(atPath: dir.appending(Paths.dataFolderName).appending("bin").appending(shortName).string)
     }) {
@@ -602,11 +601,12 @@ private func runGraph(
     session: String,
     levelOffset: Int = 0
 ) async throws -> String {
-    levels.forEach {
-        assert($0.notEmpty)
-    }
+    assert(levels.notEmpty)
+    for level in levels { assert(level.notEmpty) }
 
-    let rootDir = findTopOpenloopInstanceDir() ?? Paths.curDir
+    let foundRoot = findTopOpenloopInstanceDir()
+    assert(foundRoot != nil, "Valid runs always execute inside an openloop instance, so the top instance dir must exist")
+    let rootDir = foundRoot!
     assert(rootDir.string.utf8.count <= Paths.curDir.string.utf8.count)
     assert(rootDir.string.utf8.count > NSHomeDirectory().utf8.count)
 
@@ -633,14 +633,12 @@ private func runGraph(
 
     typealias P = LLMGraph.Person
 
-    let ps: [String: PreparedRunItem] = levels.reduce(into: [:]) { res, ps in
-        ps.forEach { p in
-            res[p.id] = p
-        }
+    let ps: [String: PreparedRunItem] = levels.reduce(into: [:]) { res, level in
+        for p in level { res[p.id] = p }
     }
 
     let levelByPersonaId: [String: Int] = levels.enumerated().reduce(into: [:]) { res, pair in
-        pair.element.forEach { p in res[p.id] = pair.offset + levelOffset }
+        for p in pair.element { res[p.id] = pair.offset + levelOffset }
     }
     @Sendable func runItemById(_ id: String) -> PreparedRunItem {
         assert(ps[id] != nil)
@@ -656,7 +654,7 @@ private func runGraph(
         },
         .short
     ) { talk in
-        if let _ = talk.to {
+        if talk.to != nil {
             fatalError("Not implemented. Should not be called in Graph.short mode. For now use `.short` mode only.")
         }
         let from = runItemById(talk.from.id)
@@ -680,7 +678,7 @@ private func runGraph(
         if tops.contains(from) {
             context = outerContext
         } else {
-            context = await contextFromParents(parents, reportsDir: reportsDir)
+            context = try await contextFromParents(parents, reportsDir: reportsDir)
         }
         let hasContext = context?.notEmpty ?? false
 
@@ -693,6 +691,7 @@ private func runGraph(
             //
             // This is another workflow (nested inside this workflow)
             //
+            assert(levelByPersonaId[from.id] != nil)
             res = try await start(
                 innerWorkflowId, ask: ask,
                 context: context,
@@ -715,26 +714,27 @@ private func runGraph(
             // Persona
             //
             assert(from.persona != nil)
+            let persona = from.persona!
 
             let rw = bottoms.contains(from) || from.forceRW
 
             let coreTask: String
-            if let task = from.persona?.task, task.notEmpty {
+            if persona.task.notEmpty {
                 coreTask = """
-\(task)
+\(persona.task)
 
-# Project Vision \(rw ? "" : "(read-only context — do not act on this)") 
+# Project Vision \(rw ? "" : "(read-only context — do not act on this)")
 \(ask)
 """
             } else {
                 coreTask = ask
             }
 
-            let fakeBottom = from.realId == "_bottom_"
+            let fakeBottom = from.realId == bottomItemId
 
-            let runCtx = personaRunContext(personaId: from.realId, runId: runId, runDir: ctxRunDir)
-            let prompt = runCtx.prefix + """
-# Task (your scope)
+            let runCtx = try personaRunContext(personaId: from.realId, runId: runId, runDir: ctxRunDir)
+            let prompt = """
+\(runCtx.prefix)# Task (your scope)
 \(coreTask)
 
 # Instructions
@@ -765,43 +765,41 @@ private func runGraph(
                 mode = "plan"
             }
 
-            let systemPrompt = from.persona?.about ?? ""
+            let systemPrompt = persona.about
 
             let resolved = resolveAgent(
-                from.persona?.agent, workflowAgent: workflowAgent
+                persona.agent, workflowAgent: workflowAgent
             )
 
-            let agent: String
-            let agentPath: FilePath
-
-            switch resolved {
-            case .projectBin(let name, let path):
-                agent = name; agentPath = path
-            case .userLocalBin(let name, let path):
-                agent = name; agentPath = path
-            case .workflowFallback(let name, let path):
-                agent = name; agentPath = path
+            let (agent, agentPath): (String, FilePath) = switch resolved {
+            case let .projectBin(name, path),
+                 let .userLocalBin(name, path),
+                 let .workflowFallback(name, path):
+                (name, path)
             }
 
             let knowledgePath: String
-            if from.realId == "_bottom_" || from.realId == "_head_" {
+            if from.realId == bottomItemId || from.realId == headItemId {
                 knowledgePath = from.realId
             } else {
-                knowledgePath = from.persona!.knowledgePath
+                knowledgePath = persona.knowledgePath
             }
 
-            res = try await subprocess(
+            var args = [rootDir.string, knowledgePath, prompt, systemPrompt]
+            if let mode {
+                args.append(mode)
+            }
+
+            guard let output = try await subprocess(
                 agentPath,
-                args: (mode == nil) ? [
-                    rootDir.string, knowledgePath, prompt, systemPrompt
-                ] : [
-                    rootDir.string, knowledgePath,
-                    prompt, systemPrompt, mode!,
-                ],
-                chroot: Paths.curDir, // .init(from.folder),
+                args: args,
+                chroot: Paths.curDir,
                 stdin: context,
                 env: runEnv(runDir: ctxRunDir, mcpPath: runCtx.mcpPath)
-            ) ?? ""
+            ) else {
+                throw ValidationError("No output from agent `\(agent)` (\(from.name))")
+            }
+            res = output
 
             let success = res.notEmpty
 
@@ -852,12 +850,14 @@ private func slugify(_ s: String) -> String {
 private func contextFromParents(
     _ all: [PreparedRunItem: String],
     reportsDir: FilePath
-) async -> String? {
+) async throws -> String? {
+    let uniqueSuffixRange = 1...100
+
     guard all.notEmpty else { return nil }
 
     for pair in all {
         let item = pair.key
-        let suffix = Int.random(in: 1...100)
+        let suffix = Int.random(in: uniqueSuffixRange)
         let fileName: String
 
         if let p = item.persona {
@@ -869,16 +869,14 @@ private func contextFromParents(
         } else if item.workflow != nil {
             fileName = "\(slugify(item.name))-\(suffix).md"
         } else {
-            assertionFailure(); continue
+            assertionFailure("Neither persona nor workflow: \(item.id)")
+            throw ValidationError("Neither persona nor workflow: \(item.id)")
         }
 
         let filePath = reportsDir.appending(fileName)
-        guard let data = pair.value.data(using: .utf8) else {
-            assertionFailure(); continue
-        }
         let f = File(filePath.string)
-        guard await f.write(data) else {
-            assertionFailure(); continue
+        guard await f.write(Data(pair.value.utf8)) else {
+            throw ValidationError("Could not write report file: \(filePath.string)")
         }
     }
 

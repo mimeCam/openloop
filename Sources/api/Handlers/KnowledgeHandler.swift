@@ -15,127 +15,69 @@ struct KnowledgeHandler: Sendable {
             .appending(personaId)
     }
 
-    private func validatePath(_ path: String) throws {
-        guard !path.contains("../") else {
-            throw Abort(.forbidden, reason: "Path traversal not allowed")
+    private func knowledgeRoot(_ req: Request) async throws -> FilePath {
+        knowledgeDir(instancePath: try await req.validatedInstancePath(),
+                     personaId: try safeRelativePath(try req.routeParam("pid")))
+    }
+
+    private func safeRelativePath(_ decoded: String) throws -> String {
+        guard !decoded.isEmpty else { throw Abort(.badRequest) }
+        guard PathIO.isDescendantPath(decoded) else {
+            throw Abort(.forbidden, reason: "Path escapes the knowledge folder")
         }
-        guard !path.contains("/..") else {
-            throw Abort(.forbidden, reason: "Path traversal not allowed")
+        return decoded
+    }
+
+    // Vapor hands catch-all segments over RAW (undecoded).
+    private func knowledgeFilePath(_ req: Request) throws -> String {
+        let parts = try req.parameters.getCatchall().map { part in
+            guard let decoded = part.removingPercentEncoding else {
+                throw Abort(.badRequest, reason: "Malformed percent-encoding in path")
+            }
+            return decoded
         }
+        return try safeRelativePath(parts.joined(separator: "/"))
+    }
+
+    private func plainText(_ data: Data) -> Response {
+        var headers = HTTPHeaders()
+        headers.contentType = .plainText
+        return Response(status: .ok, headers: headers, body: Response.Body(data: data))
     }
 
     func listFiles(req: Request) async throws -> KnowledgeFileListResponse {
-        guard let rawInstancePath = req.parameters.get("id"),
-              let rawPersonaId = req.parameters.get("pid") else {
-            throw Abort(.badRequest)
-        }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
-
-        let dir = knowledgeDir(instancePath: instancePath, personaId: personaId)
-
+        let dir = try await knowledgeRoot(req)
         guard PathIO.isDirectoryExistent(atPath: dir.string) else {
             return KnowledgeFileListResponse(files: [])
         }
-
-        let allItems = (try? PathIO.contentsOfDirectory(atPath: dir.string)) ?? []
-        let files = allItems.filter { name in
-            let fp = dir.appending(name)
-            return PathIO.isFileExistent(atPath: fp.string)
-        }
-
+        let files = try PathIO.contentsOfDirectory(atPath: dir.string)
+            .filter { PathIO.isFileExistent(atPath: dir.appending($0).string) }
         return KnowledgeFileListResponse(files: files)
     }
 
     func readFile(req: Request) async throws -> Response {
-        guard let rawInstancePath = req.parameters.get("id"),
-              let rawPersonaId = req.parameters.get("pid") else {
-            throw Abort(.badRequest)
-        }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
-
-        let filePath = req.parameters.getCatchall().joined(separator: "/")
-        guard !filePath.isEmpty else {
-            throw Abort(.badRequest)
-        }
-
-        try validatePath(filePath)
-
-        let fullPath = knowledgeDir(instancePath: instancePath, personaId: personaId)
-            .appending(filePath)
-
-        guard PathIO.isFileExistent(atPath: fullPath.string) else {
-            throw Abort(.notFound)
-        }
-
+        let fullPath = try await knowledgeRoot(req).appending(try knowledgeFilePath(req))
+        guard PathIO.isFileExistent(atPath: fullPath.string) else { throw Abort(.notFound) }
         guard let data = await File(fullPath.string).read() else {
             throw Abort(.internalServerError, reason: "Failed to read file")
         }
-
-        let body = Response.Body(data: data)
-        var headers = HTTPHeaders()
-        headers.contentType = .plainText
-        return Response(status: .ok, headers: headers, body: body)
+        return plainText(data)
     }
 
     func writeFile(req: Request) async throws -> HTTPStatus {
-        guard let rawInstancePath = req.parameters.get("id"),
-              let rawPersonaId = req.parameters.get("pid") else {
-            throw Abort(.badRequest)
-        }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
-
-        let filePath = req.parameters.getCatchall().joined(separator: "/")
-        guard !filePath.isEmpty else {
-            throw Abort(.badRequest)
-        }
-
-        try validatePath(filePath)
-
-        let dir = knowledgeDir(instancePath: instancePath, personaId: personaId)
-        let fullPath = dir.appending(filePath)
-
-        let parentDir = fullPath.removingLastComponent()
-        _ = PathIO.createDirectoryIfNotExists(atPath: parentDir.string)
-
+        let fullPath = try await knowledgeRoot(req).appending(try knowledgeFilePath(req))
+        _ = PathIO.createDirectoryIfNotExists(atPath: fullPath.removingLastComponent().string)
         let buffer = req.body.data
         let data = buffer.map { Data(buffer: $0) } ?? Data()
-
         guard await File(fullPath.string).write(data) else {
             throw Abort(.internalServerError, reason: "Failed to write file")
         }
-
         return .ok
     }
 
     func deleteFile(req: Request) async throws -> HTTPStatus {
-        guard let rawInstancePath = req.parameters.get("id"),
-              let rawPersonaId = req.parameters.get("pid") else {
-            throw Abort(.badRequest)
-        }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let personaId = rawPersonaId.removingPercentEncoding ?? rawPersonaId
-
-        let filePath = req.parameters.getCatchall().joined(separator: "/")
-        guard !filePath.isEmpty else {
-            throw Abort(.badRequest)
-        }
-
-        try validatePath(filePath)
-
-        let fullPath = knowledgeDir(instancePath: instancePath, personaId: personaId)
-            .appending(filePath)
-
-        guard PathIO.isFileExistent(atPath: fullPath.string) else {
-            throw Abort(.notFound)
-        }
-
+        let fullPath = try await knowledgeRoot(req).appending(try knowledgeFilePath(req))
+        guard PathIO.isFileExistent(atPath: fullPath.string) else { throw Abort(.notFound) }
         try FileManager.default.removeItem(atPath: fullPath.string)
         return .noContent
     }

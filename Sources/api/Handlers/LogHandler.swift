@@ -7,20 +7,19 @@ import Foundation
 #endif
 import shared
 
-struct LogHandler: Sendable {
-    
-    func getPersonaLogs(req: Request) async throws -> PersonaLogsResponse {
-        guard let rawInstancePath = req.parameters.get("id") else {
-            throw Abort(.badRequest)
-        }
+private let defaultLogPageSize = 5
 
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
+struct LogHandler: Sendable {
+
+    func getPersonaLogs(req: Request) async throws -> PersonaLogsResponse {
+        let instancePath = try req.routeParam("id")
         let personaId = req.query[String.self, at: "personaId"]
         let offset = req.query[Int.self, at: "offset"] ?? 0
-        let count = req.query[Int.self, at: "count"] ?? 5
+        let count = req.query[Int.self, at: "count"] ?? defaultLogPageSize
 
         var logs: [PersonaLogEntry] = []
         var stats: [String: PersonaStats] = [:]
+        var total = 0
 
         do {
             try LogManager.createTables(at: instancePath)
@@ -29,6 +28,10 @@ struct LogHandler: Sendable {
                 personaId: personaId,
                 offset: offset,
                 limit: count
+            )
+            total = try LogManager.countLogs(
+                instancePath: instancePath,
+                personaId: personaId
             )
 
             for log in runLogs {
@@ -72,10 +75,6 @@ struct LogHandler: Sendable {
             req.logger.error("Failed to fetch logs: \(error)")
         }
 
-        let total = (try? LogManager.countLogs(
-            instancePath: instancePath,
-            personaId: personaId
-        )) ?? 0
         let safeOffset = max(0, offset)
 
         return PersonaLogsResponse(
@@ -89,11 +88,8 @@ struct LogHandler: Sendable {
     }
     
     func getSessionLogs(req: Request) async throws -> SessionLogsResponse {
-        guard let rawInstancePath = req.parameters.get("id") else { throw Abort(.badRequest) }
-        guard let rawSession = req.parameters.get("session") else { throw Abort(.badRequest) }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let session = rawSession.removingPercentEncoding ?? rawSession
+        let instancePath = try req.routeParam("id")
+        let session = try req.routeParam("session")
 
         var logs: [SessionLogEntry] = []
         do {
@@ -140,19 +136,13 @@ struct LogHandler: Sendable {
     }
 
     func getWorkflowLogs(req: Request) async throws -> WorkflowLogsResponse {
-        guard let rawInstancePath = req.parameters.get("id") else {
-            throw Abort(.badRequest)
-        }
-        guard let rawWorkflowId = req.parameters.get("workflowId") else {
-            throw Abort(.badRequest)
-        }
-
-        let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        let workflowId = rawWorkflowId.removingPercentEncoding ?? rawWorkflowId
+        let instancePath = try req.routeParam("id")
+        let workflowId = try req.routeParam("workflowId")
         let offset = req.query[Int.self, at: "offset"] ?? 0
-        let count = req.query[Int.self, at: "count"] ?? 5
+        let count = req.query[Int.self, at: "count"] ?? defaultLogPageSize
 
         var logs: [WorkflowLogEntry] = []
+        var total = 0
 
         do {
             try LogManager.createTables(at: instancePath)
@@ -162,6 +152,10 @@ struct LogHandler: Sendable {
                 workflowId: workflowId,
                 offset: offset,
                 limit: count
+            )
+            total = try LogManager.countLogs(
+                instancePath: instancePath,
+                workflowId: workflowId
             )
 
             for log in runLogs {
@@ -193,10 +187,6 @@ struct LogHandler: Sendable {
             req.logger.error("Failed to fetch workflow logs: \(error)")
         }
 
-        let total = (try? LogManager.countLogs(
-            instancePath: instancePath,
-            workflowId: workflowId
-        )) ?? 0
         let safeOffset = max(0, offset)
 
         return WorkflowLogsResponse(

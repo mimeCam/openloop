@@ -10,24 +10,26 @@ import shared
 private let runnerEnvSidecarSuffix = ".env"
 private let baseScriptVariants: Set<String> = ["base", "swift", "swiftbridge"]
 private let noKnowledgeSentinel = "_bottom_"
+private let agentBinaryPrefix = "openloop_"
 
-actor GraphRunRegistry {
-    static let shared = GraphRunRegistry()
+private actor GraphRunRegistry {
 
     private var live: Set<String> = []
 
-    func add(_ id: String) {
+    fileprivate func add(_ id: String) {
         live.insert(id)
     }
 
-    func remove(_ id: String) {
+    fileprivate func remove(_ id: String) {
         live.remove(id)
     }
 
-    func isLive(_ id: String) -> Bool {
+    fileprivate func isLive(_ id: String) -> Bool {
         live.contains(id)
     }
 }
+
+private let graphRunRegistry = GraphRunRegistry()
 
 struct GraphHandler: Sendable {
 
@@ -53,11 +55,14 @@ struct GraphHandler: Sendable {
     }
 
     func agents(req: Request) async throws -> AgentsResponse {
-        let files = (try? PathIO.contentsOfDirectory(atPath: Paths.bin.string)) ?? []
+        let files = try PathIO.contentsOfDirectory(atPath: Paths.bin.string)
         let agents = files
             .filter(isRunnerScript)
             .sorted()
-            .map { AgentEntry(name: String($0.dropFirst("openloop_".count))) }
+            .map { name -> AgentEntry in
+                assert(name.hasPrefix(agentBinaryPrefix), "isRunnerScript admits only \(agentBinaryPrefix)-prefixed scripts")
+                return AgentEntry(name: String(name.dropFirst(agentBinaryPrefix.count)))
+            }
         return AgentsResponse(agents: agents)
     }
 
@@ -77,9 +82,11 @@ struct GraphHandler: Sendable {
         let nodeId = try nodeIdFrom(req)
         let node = try regenTarget(id: nodeId, at: instancePath)
         let script = try resolveScript(for: node.agent)
-        await GraphRunRegistry.shared.add(nodeId)
+        await graphRunRegistry.add(nodeId)
         try rerun(req, node: node, script: script, instancePath: instancePath)
-        let fresh = try findNode(id: nodeId, at: instancePath) ?? node
+        guard let fresh = try findNode(id: nodeId, at: instancePath) else {
+            throw Abort(.internalServerError, reason: "Node vanished after rerun: \(nodeId)")
+        }
         return try contentWithStats(fresh, at: instancePath)
     }
 
@@ -167,7 +174,7 @@ private extension GraphHandler {
         try GraphStore.insertNode(node, at: instancePath)
         try storeCreateAuth(node, body, instancePath: instancePath)
         try reparentTarget(of: body.insert_before, to: node.id, at: instancePath)
-        await GraphRunRegistry.shared.add(node.id)
+        await graphRunRegistry.add(node.id)
         detachLifecycle(node, runId: UUID().uuidString, script: script, instancePath: instancePath)
         return toContent(node, secrets: SecretStore.load(at: instancePath))
     }
@@ -245,17 +252,11 @@ private extension GraphHandler {
     }
 
     func instancePathFrom(_ req: Request) throws -> String {
-        guard let raw = req.parameters.get("id") else {
-            throw Abort(.badRequest)
-        }
-        return raw.removingPercentEncoding ?? raw
+        try req.routeParam("id")
     }
 
     func nodeIdFrom(_ req: Request) throws -> String {
-        guard let raw = req.parameters.get("nid") else {
-            throw Abort(.badRequest)
-        }
-        return raw.removingPercentEncoding ?? raw
+        try req.routeParam("nid")
     }
 
     func findNode(id: String, at instancePath: String) throws -> GraphNode? {
@@ -284,10 +285,10 @@ private extension GraphHandler {
 
     func assertNoLiveRuns(_ ids: Set<String>, instancePath: String) async throws {
         for id in ids {
-            if await GraphRunRegistry.shared.isLive(id) { throw Abort(.conflict, reason: deleteBusyReason) }
+            if await graphRunRegistry.isLive(id) { throw Abort(.conflict, reason: deleteBusyReason) }
         }
         for log in try GraphStore.fetchProgressRunLogs(at: instancePath) where ids.contains(log.nodeId) {
-            if await GraphRunRegistry.shared.isLive(log.id) { throw Abort(.conflict, reason: deleteBusyReason) }
+            if await graphRunRegistry.isLive(log.id) { throw Abort(.conflict, reason: deleteBusyReason) }
         }
     }
 
@@ -296,7 +297,7 @@ private extension GraphHandler {
     }
 
     func resolveScript(for agent: String) throws -> FilePath {
-        let script = Paths.bin.appending("openloop_\(agent)")
+        let script = Paths.bin.appending("\(agentBinaryPrefix)\(agent)")
         guard PathIO.isFileExistent(atPath: script.string) else {
             throw Abort(.badRequest, reason: "Unknown agent: \(agent)")
         }
@@ -304,8 +305,8 @@ private extension GraphHandler {
     }
 
     func isRunnerScript(_ file: String) -> Bool {
-        guard file.hasPrefix("openloop_"), !file.hasSuffix(runnerEnvSidecarSuffix) else { return false }
-        guard let variant = dockerVariant(of: file.dropFirst("openloop_".count)) else { return false }
+        guard file.hasPrefix(agentBinaryPrefix), !file.hasSuffix(runnerEnvSidecarSuffix) else { return false }
+        guard let variant = dockerVariant(of: file.dropFirst(agentBinaryPrefix.count)) else { return false }
         return !baseScriptVariants.contains(variant)
     }
 
@@ -345,7 +346,7 @@ private extension GraphHandler {
     func sweepInterrupted(instancePath: String) async throws {
         let stale = try GraphStore.fetchNodes(at: instancePath)
             .filter { GraphStore.runningStatuses.contains($0.status) }
-        for node in stale where !(await GraphRunRegistry.shared.isLive(node.id)) {
+        for node in stale where !(await graphRunRegistry.isLive(node.id)) {
             try sweepNode(node, at: instancePath)
         }
     }
@@ -391,7 +392,7 @@ private extension GraphHandler {
 
     func graphContents(at instancePath: String) throws -> [GraphNodeContent] {
         let nodes = try GraphStore.fetchNodes(at: instancePath)
-        let counts = (try? GraphStore.fetchRunCounts(at: instancePath)) ?? [:]
+        let counts = try GraphStore.fetchRunCounts(at: instancePath)
         let secrets = SecretStore.load(at: instancePath)
         return nodes.map {
             toContent($0, counts: counts[$0.id] ?? RunCounts(), runnable: isChainReady($0, nodes: nodes), secrets: secrets)
@@ -399,7 +400,7 @@ private extension GraphHandler {
     }
 
     func contentWithStats(_ node: GraphNode, at instancePath: String) throws -> GraphNodeContent {
-        let counts = (try? GraphStore.fetchRunCounts(at: instancePath))?[node.id] ?? RunCounts()
+        let counts = try GraphStore.fetchRunCounts(at: instancePath)[node.id] ?? RunCounts()
         let nodes = try GraphStore.fetchNodes(at: instancePath)
         return toContent(node, counts: counts, runnable: isChainReady(node, nodes: nodes), secrets: SecretStore.load(at: instancePath))
     }
@@ -460,7 +461,7 @@ private extension GraphHandler {
         _ node: GraphNode, prompt: String, logId: String, parentRunId: String?, rootRunId: String, mcpPath: String?, at instancePath: String
     ) async throws -> GraphRunLog {
         let log = newRunLog(id: logId, nodeId: node.id, prompt: prompt, parentRunId: parentRunId, rootRunId: rootRunId)
-        await GraphRunRegistry.shared.add(log.id)
+        await graphRunRegistry.add(log.id)
         try GraphStore.insertRunLog(log, at: instancePath)
         try detachRun(log, agent: node.agent, mcpPath: mcpPath, instancePath: instancePath)
         return log
@@ -484,7 +485,7 @@ private extension GraphHandler {
         guard !logs.contains(where: { $0.parentRunId == runId }) else {
             throw Abort(.conflict, reason: "Run already continued — restart the conversation tip")
         }
-        if await GraphRunRegistry.shared.isLive(runId) { throw Abort(.conflict, reason: "Restart already in flight") }
+        if await graphRunRegistry.isLive(runId) { throw Abort(.conflict, reason: "Restart already in flight") }
         return run
     }
 
@@ -494,7 +495,7 @@ private extension GraphHandler {
         try writeRunContext(node, nodes: nodes, parent: parent, id: run.id, at: instancePath)
         let chain = GraphStore.chain(of: node, in: nodes)
         let mcpPath = GraphStore.writeMcpConfig(GraphStore.chainMcpEndpoints(chain, at: instancePath), runId: run.id)
-        await GraphRunRegistry.shared.add(run.id)
+        await graphRunRegistry.add(run.id)
         try GraphStore.restartRunLog(id: run.id, at: instancePath)
         try detachRun(run, agent: node.agent, mcpPath: mcpPath, instancePath: instancePath)
         return try fetchedRun(run.id, nodeId: node.id, at: instancePath)
@@ -511,8 +512,8 @@ private extension GraphHandler {
         // Session-anchored rows never sweep to "answered": an interrupted
         // follow-up or seed summarization must surface as a failure — an
         // "answered" thread root would silently block every follow-up.
-        let sessionRunIds = Set(((try? LogManager.fetchNotificationKinds(at: instancePath)) ?? [:]).keys)
-        for log in stale where !(await GraphRunRegistry.shared.isLive(log.id)) {
+        let sessionRunIds = Set(try LogManager.fetchNotificationKinds(at: instancePath).keys)
+        for log in stale where !(await graphRunRegistry.isLive(log.id)) {
             try sweepRunLog(log, sessionRunIds: sessionRunIds, at: instancePath)
         }
     }
@@ -530,8 +531,7 @@ private extension GraphHandler {
     }
 
     func runIdFrom(_ req: Request) throws -> String {
-        guard let raw = req.parameters.get("rid") else { throw Abort(.badRequest) }
-        return raw.removingPercentEncoding ?? raw
+        try req.routeParam("rid")
     }
 
     func assertRunExists(_ runId: String, nodeId: String, at instancePath: String) throws {
@@ -567,7 +567,7 @@ private extension GraphHandler {
     }
 
     func assertRunDeletable(_ run: GraphRunLog, at instancePath: String) async throws {
-        guard !isRunning(run.status), !(await GraphRunRegistry.shared.isLive(run.id)) else {
+        guard !isRunning(run.status), !(await graphRunRegistry.isLive(run.id)) else {
             throw Abort(.conflict, reason: deleteBusyReason)
         }
     }
@@ -638,7 +638,7 @@ private func runAnswerPhase(_ node: GraphNode, runId: String, script: FilePath, 
         id: node.id, status: answered ? "summarizing" : "failed", output: run.out ?? run.error,
         took: Int(tb.intervalSinceInitialized), at: instancePath
     )
-    if !answered { await GraphRunRegistry.shared.remove(node.id) }
+    if !answered { await graphRunRegistry.remove(node.id) }
 }
 
 private func executeRunLog(_ log: GraphRunLog, script: FilePath, instancePath: String, mcpPath: String?) async {
@@ -649,13 +649,13 @@ private func executeRunLog(_ log: GraphRunLog, script: FilePath, instancePath: S
     if let output = out, output.notEmpty {
         await summarizeRunLog(log, output: output, script: script, instancePath: instancePath)
     }
-    await GraphRunRegistry.shared.remove(log.id)
+    await graphRunRegistry.remove(log.id)
     cleanupRunArtifacts(log.id, mcpPath: mcpPath)
 }
 
 private func execRunLog(_ log: GraphRunLog, script: FilePath, instancePath: String, mcpPath: String?) async -> String? {
     let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(log.id))
-    return (try? await exec(script.string, args: runArgs(runExecPrompt(log), instancePath), chroot: instancePath, env: env)) ?? nil
+    return try? await exec(script.string, args: runArgs(runExecPrompt(log), instancePath), chroot: instancePath, env: env)
 }
 
 private func runExecPrompt(_ log: GraphRunLog) -> String {
@@ -722,11 +722,11 @@ private func writeQa(_ question: String, _ answer: String, id: String) throws ->
     )
 }
 
-private func chainArtifacts(_ node: GraphNode, runId: String, at instancePath: String) -> (ctxPath: String?, mcpPath: String?) {
-    let nodes = (try? GraphStore.fetchNodes(at: instancePath)) ?? []
+private func chainArtifacts(_ node: GraphNode, runId: String, at instancePath: String) throws -> (ctxPath: String?, mcpPath: String?) {
+    let nodes = try GraphStore.fetchNodes(at: instancePath)
     let chain = GraphStore.chain(of: node, in: nodes)
     return (
-        (try? writeContext(ancestors(of: node, in: nodes), id: runId)),
+        try writeContext(ancestors(of: node, in: nodes), id: runId),
         GraphStore.writeMcpConfig(GraphStore.chainMcpEndpoints(chain, at: instancePath), runId: runId)
     )
 }
@@ -755,7 +755,12 @@ private func runScript(
 }
 
 private func answerOnce(_ node: GraphNode, runId: String, script: FilePath, instancePath: String) async -> (out: String?, error: String?) {
-    let artifacts = chainArtifacts(node, runId: runId, at: instancePath)
+    let artifacts: (ctxPath: String?, mcpPath: String?)
+    do {
+        artifacts = try chainArtifacts(node, runId: runId, at: instancePath)
+    } catch {
+        return (nil, "Context prep failed: \(error)")
+    }
     defer { deleteMcpConfig(artifacts.mcpPath) }
     let args = runArgs(prefixedPrompt(node.prompt, artifacts.ctxPath), instancePath)
     let env = runEnv(mcpPath: artifacts.mcpPath, runDir: GraphStore.contextRunDir(runId))
@@ -766,15 +771,17 @@ private func maybeSummarize(id: String, runId: String, script: FilePath, instanc
     defer { GraphStore.deleteContextRunDir(runId) }
     guard let node = try? GraphStore.fetchNodes(at: instancePath).first(where: { $0.id == id }),
           node.status == "summarizing" else {
-        await GraphRunRegistry.shared.remove(id)
+        await graphRunRegistry.remove(id)
         return
     }
     await summarize(node, runId: runId, script: script, instancePath: instancePath)
 }
 
 private func summarize(_ node: GraphNode, runId: String, script: FilePath, instancePath: String) async {
-    guard let prompt = qaSummaryPrompt(question: node.prompt, answer: node.output ?? "", runId: runId) else {
-        await GraphRunRegistry.shared.remove(node.id)
+    assert((node.output ?? "").notEmpty, "summarizing nodes always carry a non-empty output")
+    guard let answer = node.output, answer.notEmpty,
+          let prompt = qaSummaryPrompt(question: node.prompt, answer: answer, runId: runId) else {
+        await graphRunRegistry.remove(node.id)
         return
     }
     await runSummary(node, runId: runId, prompt: prompt, script: script, instancePath: instancePath)
@@ -791,7 +798,7 @@ private func runSummary(
     try? GraphStore.finishSummary(
         id: node.id, summary: (trimmed?.isEmpty == true) ? nil : trimmed, at: instancePath
     )
-    await GraphRunRegistry.shared.remove(node.id)
+    await graphRunRegistry.remove(node.id)
 }
 
 // Filter, not narrate: the output is the answer's own reply at the ask's depth — a plain-wording rule only, facts and depth stay.
@@ -977,8 +984,7 @@ extension GraphHandler {
     }
 
     func sessionIdFrom(_ req: Request) throws -> String {
-        guard let raw = req.parameters.get("sid") else { throw Abort(.badRequest) }
-        return raw.removingPercentEncoding ?? raw
+        try req.routeParam("sid")
     }
 }
 
@@ -1062,8 +1068,8 @@ private extension GraphHandler {
     /// user local bin. No workflow fallback: an unresolvable agent is a 400,
     /// not a silent wrong-agent run.
     func resolveSessionScript(for recordedAgent: String, instancePath: String) throws -> FilePath {
-        let bare = recordedAgent.hasPrefix("openloop_")
-            ? String(recordedAgent.dropFirst("openloop_".count))
+        let bare = recordedAgent.hasPrefix(agentBinaryPrefix)
+            ? String(recordedAgent.dropFirst(agentBinaryPrefix.count))
             : recordedAgent
         guard bare.notEmpty else {
             throw Abort(.badRequest, reason: "Unknown agent: \(recordedAgent)")
@@ -1078,7 +1084,7 @@ private extension GraphHandler {
             let project = dir.appending(Paths.dataFolderName).appending("bin").appending(bare)
             if PathIO.isFileExistent(atPath: project.string) { return project }
         }
-        let user = Paths.bin.appending("openloop_\(bare)")
+        let user = Paths.bin.appending("\(agentBinaryPrefix)\(bare)")
         if PathIO.isFileExistent(atPath: user.string) { return user }
         throw Abort(.badRequest, reason: "Unknown agent: \(recordedAgent)")
     }
@@ -1087,12 +1093,12 @@ private extension GraphHandler {
     /// like the runner's collectContext (parent-instance nodes count).
     func sessionPersonaContext(
         personaId: String, instancePath: String
-    ) -> GraphStore.PersonaContext {
+    ) throws -> GraphStore.PersonaContext {
         guard isRealSessionPersona(personaId) else { return .empty }
         var texts: [String] = []
         var mcps = Set<GraphMcpEndpoint>()
         for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            let ctx = (try? GraphStore.personaContext(personaId: personaId, at: dir.string)) ?? .empty
+            let ctx = try GraphStore.personaContext(personaId: personaId, at: dir.string)
             texts.append(contentsOf: ctx.texts)
             mcps.formUnion(ctx.mcps)
         }
@@ -1108,7 +1114,7 @@ private extension GraphHandler {
         )
         var mcps = Set<GraphMcpEndpoint>()
         for id in personaIds {
-            mcps.formUnion(sessionPersonaContext(personaId: id, instancePath: instancePath).mcps)
+            mcps.formUnion(try sessionPersonaContext(personaId: id, instancePath: instancePath).mcps)
         }
         return mcps
     }
@@ -1187,7 +1193,7 @@ private extension GraphHandler {
         let parent = try sessionParentRun(parentRunId, logs: logs)
         let script = try resolveSessionScript(for: tipLog.agent, instancePath: instancePath)
         let tip = await sessionTipContext(tipLog, instancePath: instancePath)
-        let personaCtx = sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
+        let personaCtx = try sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
         let logId = UUID().uuidString
         try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: logId)
         // MCP scope = union over ALL session personas; ctx.md stays tip-persona-only — swap the argument, never the whole context.
@@ -1198,7 +1204,7 @@ private extension GraphHandler {
             id: logId, nodeId: session, prompt: prompt,
             parentRunId: parent?.id, rootRunId: parent?.rootRunId ?? parent?.id ?? logId
         )
-        await GraphRunRegistry.shared.add(log.id)
+        await graphRunRegistry.add(log.id)
         try GraphStore.insertSessionRunLog(
             log, session: session, workflowId: end.workflowId, at: instancePath
         )
@@ -1245,7 +1251,7 @@ private extension GraphHandler {
             completedAt: Date().timeIntervalSinceReferenceDate,
             parentRunId: nil, summary: nil, rootRunId: logId
         )
-        await GraphRunRegistry.shared.add(log.id)
+        await graphRunRegistry.add(log.id)
         try GraphStore.insertSessionRunLog(
             log, session: session, workflowId: end.workflowId, at: instancePath
         )
@@ -1277,19 +1283,19 @@ private extension GraphHandler {
         guard !logs.contains(where: { $0.parentRunId == runId }) else {
             throw Abort(.conflict, reason: "Run already continued — restart the conversation tip")
         }
-        if await GraphRunRegistry.shared.isLive(runId) {
+        if await graphRunRegistry.isLive(runId) {
             throw Abort(.conflict, reason: "Restart already in flight")
         }
         let script = try resolveSessionScript(for: tipLog.agent, instancePath: instancePath)
         let tip = await sessionTipContext(tipLog, instancePath: instancePath)
-        let personaCtx = sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
+        let personaCtx = try sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
         let parent = run.parentRunId.flatMap { pid in logs.first { $0.id == pid } }
         try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: run.id)
         // Same union scope as sessionRunLog — retry must not regress it.
         let mcpPath = GraphStore.writeMcpConfig(
             try sessionMcpUnion(session: session, at: instancePath), runId: run.id
         )
-        await GraphRunRegistry.shared.add(run.id)
+        await graphRunRegistry.add(run.id)
         try GraphStore.restartRunLog(id: run.id, at: instancePath)
         Task.detached {
             await executeSessionRun(SessionRunExecution(
@@ -1314,13 +1320,13 @@ private extension GraphHandler {
 
 // MARK: - Session execution payloads & detached engine
 
-struct SessionParent: Sendable, Equatable {
+private struct SessionParent: Sendable, Equatable {
     let id: String
     let text: String
 }
 
 /// The session's tip persona facts, captured before the run detaches.
-struct SessionTipContext: Sendable, Equatable {
+private struct SessionTipContext: Sendable, Equatable {
     let personaId: String
     /// "" when none resolved (the runner's project-bin-agent convention).
     let knowledgePath: String
@@ -1329,7 +1335,7 @@ struct SessionTipContext: Sendable, Equatable {
     let parents: [SessionParent]
 }
 
-struct SessionRunExecution: Sendable {
+private struct SessionRunExecution: Sendable {
     let log: GraphRunLog
     let tip: SessionTipContext
     let script: FilePath
@@ -1376,27 +1382,28 @@ private func executeSessionRun(_ run: SessionRunExecution) async {
     if let output = out, output.notEmpty {
         await summarizeSessionRun(run, output: output)
     }
-    await GraphRunRegistry.shared.remove(run.log.id)
+    await graphRunRegistry.remove(run.log.id)
     cleanupRunArtifacts(run.log.id, mcpPath: run.mcpPath)
 }
 
 private func execSessionRun(_ run: SessionRunExecution) async -> String? {
     let env = runEnv(mcpPath: run.mcpPath, runDir: GraphStore.contextRunDir(run.log.id))
-    return (try? await exec(
+    return try? await exec(
         run.script.string,
         args: sessionRunArgs(run),
         chroot: run.instancePath,
         env: env
-    )) ?? nil
+    )
 }
 
 /// Arg shapes mirror the runner's tip-persona invocation: real personas get
 /// root dir + knowledge path + prompt + about (system prompt); the
 /// synthesized bottom gets the node-RUN 3-arg shape (no persona context).
-private func sessionRunArgs(_ run: SessionRunExecution) -> [String] {
+private func sessionRunArgs(_ run: SessionRunExecution) throws -> [String] {
     let root = topInstanceDir(run.instancePath)
-    let prompt = sessionExecPrompt(run)
+    let prompt = try sessionExecPrompt(run)
     guard isRealSessionPersona(run.tip.personaId) else {
+        assert(run.tip.knowledgePath.isEmpty && run.tip.about.isEmpty, "synthesized personas carry no knowledge/about context")
         return [root, run.tip.personaId, prompt]
     }
     let knowledge = run.tip.knowledgePath.notEmpty ? run.tip.knowledgePath : noKnowledgeSentinel
@@ -1406,10 +1413,10 @@ private func sessionRunArgs(_ run: SessionRunExecution) -> [String] {
 /// The stored prompt stays clean for UI display; the exec prompt prefixes
 /// ctx.md/convo.md references (like node RUNs) plus one line referencing the
 /// parents' full-output files.
-private func sessionExecPrompt(_ run: SessionRunExecution) -> String {
+private func sessionExecPrompt(_ run: SessionRunExecution) throws -> String {
     var prefix = runFile(run.log.id, "ctx.md") != nil ? ctxFileLine : ""
     if runFile(run.log.id, "convo.md") != nil { prefix += convoFileLine }
-    let parents = parentContextFileNames(run.log.id)
+    let parents = try parentContextFileNames(run.log.id)
     if parents.notEmpty {
         let refs = parents
             .map { "@\(GraphStore.containerCtxDir)/\($0)" }
@@ -1419,9 +1426,10 @@ private func sessionExecPrompt(_ run: SessionRunExecution) -> String {
     return prefix + run.log.prompt
 }
 
-private func parentContextFileNames(_ runId: String) -> [String] {
+private func parentContextFileNames(_ runId: String) throws -> [String] {
     let dir = GraphStore.contextRunDir(runId)
-    return ((try? PathIO.contentsOfDirectory(atPath: dir.string)) ?? [])
+    guard PathIO.isDirectoryExistent(atPath: dir.string) else { return [] }
+    return try PathIO.contentsOfDirectory(atPath: dir.string)
         .filter { $0.hasPrefix("parent-") && $0.hasSuffix(".md") }
         .sorted()
 }
@@ -1452,13 +1460,13 @@ private func summarizeSeedRun(
     _ log: GraphRunLog, script: FilePath, instancePath: String
 ) async {
     defer { GraphStore.deleteContextRunDir(log.id) }
-    guard let prompt = qaSummaryPrompt(
-        question: log.prompt, answer: log.output ?? "", runId: log.id
-    ) else {
+    assert((log.output ?? "").notEmpty, "run-0 seeds carry the tip persona's non-empty output")
+    guard let output = log.output, output.notEmpty,
+          let prompt = qaSummaryPrompt(question: log.prompt, answer: output, runId: log.id) else {
         try? GraphStore.updateRunLog(
             id: log.id, status: "failed", output: log.output, took: log.took, at: instancePath
         )
-        await GraphRunRegistry.shared.remove(log.id)
+        await graphRunRegistry.remove(log.id)
         return
     }
     let summary = await runScript(
@@ -1473,5 +1481,5 @@ private func summarizeSeedRun(
             id: log.id, status: "failed", output: log.output, took: log.took, at: instancePath
         )
     }
-    await GraphRunRegistry.shared.remove(log.id)
+    await graphRunRegistry.remove(log.id)
 }

@@ -399,3 +399,112 @@ public extension Data {
     }
 
 }
+
+// MARK: -
+
+public extension PathIO {
+
+    static func isDescendantPath(_ decoded: String) -> Bool {
+        decoded.notEmpty && decoded.first != "/" && !decoded.split(separator: "/").contains("..")
+    }
+}
+
+// MARK: - Bounded tree walk
+
+public struct WalkedFile: Sendable, Equatable {
+    public let path: String
+    public let mtimeMs: Double?
+    public let sizeBytes: Int64?
+
+    public init(path: String, mtimeMs: Double? = nil, sizeBytes: Int64? = nil) {
+        self.path = path
+        self.mtimeMs = mtimeMs
+        self.sizeBytes = sizeBytes
+    }
+}
+
+public extension PathIO {
+
+    /// Dir symlinks are never followed (cycle safety); file symlinks are reported.
+    static func walkFiles(
+        atPath root: String,
+        maxDepth: Int,
+        maxEntries: Int,
+        maxEntriesPerDir: Int? = nil,
+        skippingDotFiles: Bool,
+        skippingDirs: Set<String>
+    ) throws -> (files: [WalkedFile], truncated: Bool) {
+        var state = WalkState(maxDepth: maxDepth, maxEntries: maxEntries,
+                              maxEntriesPerDir: maxEntriesPerDir)
+        try walkDir(FilePath(root), prefix: "", depth: 0,
+                    skipDot: skippingDotFiles, skipDirs: skippingDirs, state: &state)
+        return (state.files.sorted { $0.path < $1.path }, state.truncated)
+    }
+}
+
+private struct WalkState {
+    var files: [WalkedFile] = []
+    var truncated = false
+    let maxDepth: Int
+    let maxEntries: Int
+    let maxEntriesPerDir: Int?
+}
+
+private func walkDir(_ dir: FilePath, prefix: String, depth: Int,
+                     skipDot: Bool, skipDirs: Set<String>, state: inout WalkState) throws {
+    guard depth <= state.maxDepth else { state.truncated = true; return }
+    let names = try PathIO.contentsOfDirectory(atPath: dir.string).sorted()
+    try walkNames(dir, names: names, prefix: prefix, depth: depth,
+                  skipDot: skipDot, skipDirs: skipDirs, state: &state)
+}
+
+private func walkNames(_ dir: FilePath, names: [String], prefix: String, depth: Int,
+                       skipDot: Bool, skipDirs: Set<String>, state: inout WalkState) throws {
+    var emitted = 0
+    for name in names {
+        guard state.files.count < state.maxEntries else { state.truncated = true; return }
+        if try walkEntry(dir.appending(name), prefix: prefix, name: name, depth: depth,
+                         skipDot: skipDot, skipDirs: skipDirs,
+                         acceptingFiles: dirAcceptsFiles(emitted, state: state),
+                         state: &state) { emitted += 1 }
+    }
+}
+
+private func dirAcceptsFiles(_ emitted: Int, state: WalkState) -> Bool {
+    guard let maxEntriesPerDir = state.maxEntriesPerDir else { return true }
+    return emitted < maxEntriesPerDir
+}
+
+private func walkEntry(_ entry: FilePath, prefix: String, name: String, depth: Int, skipDot: Bool,
+                       skipDirs: Set<String>, acceptingFiles: Bool, state: inout WalkState) throws -> Bool {
+    guard !skippedEntry(name, entry: entry, skipDot: skipDot, skipDirs: skipDirs) else { return false }
+    let rel = prefix.isEmpty ? name : "\(prefix)/\(name)"
+    guard PathIO.isDirectoryExistent(atPath: entry.string) else {
+        return emitFile(entry, rel: rel, accepting: acceptingFiles, state: &state)
+    }
+    try walkDir(entry, prefix: rel, depth: depth + 1, skipDot: skipDot, skipDirs: skipDirs, state: &state)
+    return false
+}
+
+private func skippedEntry(_ name: String, entry: FilePath, skipDot: Bool, skipDirs: Set<String>) -> Bool {
+    (skipDot && name.hasPrefix(".")) || skipDirs.contains(name)
+        || (isSymlink(entry.string) && PathIO.isDirectoryExistent(atPath: entry.string))
+}
+
+private func emitFile(_ entry: FilePath, rel: String, accepting: Bool, state: inout WalkState) -> Bool {
+    guard PathIO.isFileExistent(atPath: entry.string) else { return false }
+    guard accepting else { state.truncated = true; return false }
+    state.files.append(walkedFile(entry.string, rel: rel))
+    return true
+}
+
+private func walkedFile(_ absPath: String, rel: String) -> WalkedFile {
+    WalkedFile(path: rel,
+               mtimeMs: PathIO.modificationDate(atPath: absPath).map { $0.timeIntervalSince1970 * 1000 },
+               sizeBytes: PathIO.fileSize(atPath: absPath))
+}
+
+private func isSymlink(_ path: String) -> Bool {
+    var s = stat()
+    return lstat(path, &s) == 0 && (s.st_mode & S_IFMT) == S_IFLNK
+}

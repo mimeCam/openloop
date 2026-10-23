@@ -5,8 +5,6 @@ import shared
 import Glibc
 #endif
 
-private let log = PrintLog(module: "instance-handler")
-
 struct InstanceHandler: Sendable {
 
     func getAll(req: Request) async throws -> InstanceListResponse {
@@ -34,7 +32,7 @@ struct InstanceHandler: Sendable {
             let manualActive = instanceManual.filter { $0.status == "running" }.count
             let manualCompleted = instanceManual.filter { $0.status == "completed" || $0.status == "failed" }.count
 
-            let svcStatus = InstanceHandler.computeServiceStatus(
+            let svcStatus = computeServiceStatus(
                 workingDirectory: path, state: state
             )
             let runningRuns = GraphStore.countRunningRunLogs(at: path)
@@ -70,9 +68,10 @@ struct InstanceHandler: Sendable {
             needsClean: globalDbSize >= LogManager.cleanThresholdBytes
         ))
 
-        let parentPaths = InstanceHandler.computeParentPaths(
+        let parentPaths = computeParentPaths(
             instances.map { $0.path }
         )
+        assert(parentPaths.count == instances.count, "computeParentPaths returns one parent per instance")
         for i in instances.indices {
             instances[i].parentPath = parentPaths[i]
         }
@@ -123,10 +122,7 @@ struct InstanceHandler: Sendable {
     }
 
     private func extractValidatedId(req: Request) throws -> String {
-        guard let rawId = req.parameters.get("id") else {
-            throw Abort(.badRequest, headers: [:])
-        }
-        let id = rawId.removingPercentEncoding ?? rawId
+        let id = try req.routeParam("id")
         guard PathIO.isDirectoryExistent(atPath: id) else {
             throw Abort(.notFound, headers: [:])
         }
@@ -141,26 +137,48 @@ struct InstanceHandler: Sendable {
         guard kill(p, 0) == 0 else { throw Abort(.gone) }
         kill(p, SIGTERM)
     }
+}
 
-    struct ServiceStatus: Content, Sendable {
-        var configEnabled: Bool
-        var processRunning: Bool
-    }
+// MARK: - instance-list derivations (file-local)
 
-    static func computeServiceStatus(
-        workingDirectory: String,
-        state: InstanceState?
-    ) -> ServiceStatus {
-        let enabled = Launcher.isWorkerEnabled(workingDirectory: workingDirectory)
-        let running: Bool
-        if let s = state {
-            let age = Date().timeIntervalSinceReferenceDate - s.lastLoopAt
-            running = age < 120
-        } else {
-            running = false
-        }
-        return ServiceStatus(configEnabled: enabled, processRunning: running)
+private struct ServiceStatus: Sendable {
+    var configEnabled: Bool
+    var processRunning: Bool
+}
+
+private let workerHeartbeatStaleSeconds = 120.0
+
+private func computeServiceStatus(
+    workingDirectory: String,
+    state: InstanceState?
+) -> ServiceStatus {
+    let enabled = Launcher.isWorkerEnabled(workingDirectory: workingDirectory)
+    let running: Bool
+    if let s = state {
+        let age = Date().timeIntervalSinceReferenceDate - s.lastLoopAt
+        running = age < workerHeartbeatStaleSeconds
+    } else {
+        running = false
     }
+    return ServiceStatus(configEnabled: enabled, processRunning: running)
+}
+
+// O(n²) on instance count — fine for typical n < 20
+private func computeParentPaths(_ paths: [String]) -> [String?] {
+    let sorted = paths.sorted { $0.count < $1.count }
+    return paths.map { path in findParent(for: path, among: sorted) }
+}
+
+private func findParent(for path: String, among candidates: [String]) -> String? {
+    candidates
+        .filter { isStrictParentPath($0, of: path) }
+        .max(by: { $0.count < $1.count })
+}
+
+private func isStrictParentPath(_ candidate: String, of path: String) -> Bool {
+    guard path.hasPrefix(candidate), candidate != path else { return false }
+    let idx = candidate.endIndex
+    return candidate.last == "/" || path[idx] == "/"
 }
 
 extension InstanceHandler {
@@ -194,31 +212,9 @@ extension InstanceHandler {
         var instances: [InstanceInfo]
     }
 
-    struct InstanceResponse: Content, Sendable {
-        var path: String
-    }
-
     struct InstanceStateInfo: Content, Sendable {
         var lastLoopAtUnixMs: Int64
         var activeRunningWorkflows: Int
         var inactiveWorkflows: Int
-    }
-
-    // O(n²) on instance count — fine for typical n < 20
-    static func computeParentPaths(_ paths: [String]) -> [String?] {
-        let sorted = paths.sorted { $0.count < $1.count }
-        return paths.map { path in findParent(for: path, among: sorted) }
-    }
-
-    static func findParent(for path: String, among candidates: [String]) -> String? {
-        candidates
-            .filter { isStrictParentPath($0, of: path) }
-            .max(by: { $0.count < $1.count })
-    }
-
-    static func isStrictParentPath(_ candidate: String, of path: String) -> Bool {
-        guard path.hasPrefix(candidate), candidate != path else { return false }
-        let idx = candidate.endIndex
-        return candidate.last == "/" || path[idx] == "/"
     }
 }
