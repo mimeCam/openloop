@@ -227,36 +227,44 @@
     }
 
     // — birds-eye view —
-    // One lane per root→leaf chain, ordered by root creation time so lanes
-    // keep their vertical position across refreshes; connectors are pure CSS;
-    // dot or caption tap → focusFromBirds. Named cells add a caption cascade
-    // under the rail (captionsHtml) — the rail stays the first thing you scan.
+    // Spine & branch: every node renders exactly once — a chain ends at its fork, branches continue below indented to the child's depth (--be-offset, graph.html).
 
-    function nodeIndex(nodes) {
-        return new Map(nodes.map(n => [n.id, n]));
+    function byCreated(a, b) {
+        return a.created_at - b.created_at || String(a.id).localeCompare(String(b.id));
     }
 
-    function chainsFrom(nodes) {
-        const byId = nodeIndex(nodes);
-        const parents = new Set(nodes.map(n => n.parent_id).filter(Boolean));
-        const leaves = nodes.filter(n => !parents.has(n.id));
-        return leaves.map(l => chainUp(l, byId)).sort(laneOrder);
+    function sortedKids(n, byParent) {
+        return (byParent.get(n.id) || []).slice().sort(byCreated);
     }
 
-    function laneOrder(a, b) {
-        return a[0].created_at - b[0].created_at || String(a[0].id).localeCompare(String(b[0].id));
-    }
-
-    function chainUp(node, byId) {
-        const chain = [];
+    function segmentsOf() {
+        const byParent = childrenMap();
         const seen = new Set();
-        let cur = node;
-        while (cur && !seen.has(cur.id)) {
-            seen.add(cur.id);
-            chain.unshift(cur);
-            cur = byId.get(cur.parent_id);
-        }
-        return chain;
+        const out = [];
+        rootNodes().sort(byCreated).forEach(r => emitSegment(r, byParent, 0, out, seen));
+        return out;
+    }
+
+    // DFS pre-order — grouping rides on DOM order: reading order is tab order.
+    function emitSegment(node, byParent, depth, out, seen) {
+        if (seen.has(node.id)) return;
+        const seg = extendSegment({ indent: depth, nodes: [], leaf: true }, node, byParent, seen);
+        out.push(seg);
+        forkKids(seg, byParent, seen).forEach(kid =>
+            emitSegment(kid, byParent, depth + seg.nodes.length, out, seen));
+    }
+
+    function extendSegment(seg, node, byParent, seen) {
+        seen.add(node.id); // visited guard: malformed parent links must never hang the walk
+        seg.nodes.push(node);
+        const kids = sortedKids(node, byParent).filter(k => !seen.has(k.id));
+        seg.leaf = !kids.length;
+        return kids.length === 1 ? extendSegment(seg, kids[0], byParent, seen) : seg;
+    }
+
+    function forkKids(seg, byParent, seen) {
+        const end = seg.nodes[seg.nodes.length - 1];
+        return seg.leaf ? [] : sortedKids(end, byParent).filter(k => !seen.has(k.id));
     }
 
     function render() {
@@ -304,7 +312,7 @@
     function renderBirdsEye() {
         const host = $('birds-eye');
         host.innerHTML = nodes.length
-            ? chainsFrom(nodes).map(laneHtml).join('')
+            ? segmentsOf().map(laneHtml).join('')
             : `<span id="empty-hint">${emptyHint()}</span>`;
         syncBirdsToggle();
         bindBirdsEye(host);
@@ -316,22 +324,24 @@
             : 'no runs yet — tap + to start';
     }
 
-    function laneHtml(chain) {
-        const last = chain.length - 1;
-        return `<div class="be-chain">` +
+    // Trails belong to outcomes (leaf segments only); .be-branch tags indent > 0 (P2 bracket hook, graph.html).
+    function laneHtml(seg) {
+        const last = seg.nodes.length - 1;
+        return `<div class="be-chain${seg.indent ? ' be-branch' : ''}" style="--be-offset:${seg.indent}">` +
             `<div class="be-lane">` +
-            chain.map((n, i) => slotHtml(n, chain[i + 1], i === last)).join('') +
-            personaTrail(chain[last]) + `</div>` +
-            captionsHtml(chain) + `</div>`;
+            seg.nodes.map((n, i) => slotHtml(n, seg.nodes[i + 1], i === last)).join('') +
+            (seg.leaf ? personaTrail(seg.nodes[last]) : '') + `</div>` +
+            captionsHtml(seg.nodes) + `</div>`;
     }
 
     // The caption cascade: one row per named cell, stacked under the rail in
-    // chain order — block flow, so two rows can never overlap, and each spans
+    // segment order — block flow, so two rows can never overlap, and each spans
     // the full remaining width. Row i indents to its cell's dot (geometry in
-    // .be-caption, graph.html); a braided root legitimately repeats in every
-    // lane it leads. Unnamed cells (or a fully unnamed chain) render nothing.
-    function captionsHtml(chain) {
-        const rows = chain.map(beCaptionHtml).join('');
+    // .be-caption, graph.html); a node's caption renders exactly once, under
+    // its own dot, in whichever segment owns it. Unnamed cells (or a fully
+    // unnamed chain) render nothing.
+    function captionsHtml(cells) {
+        const rows = cells.map(beCaptionHtml).join('');
         return rows ? `<div class="be-captions">${rows}</div>` : '';
     }
 
@@ -2411,6 +2421,7 @@
         checkBeCaptionColors();
         checkBeDeepChainIndent();
         checkBeNoNamesUnchanged();
+        checkBeForkNoDuplicates();
         checkDotTooltipNames();
         checkNameInputEveryNode();
         checkEditFieldGrammar();
@@ -2908,40 +2919,75 @@
         console.log('OK: edges drawn after title shift');
     }
 
-    // One caption row per NAMED cell, flowing after the rail in chain order;
-    // rows stack one under another (block flow — rect-proofed, never overlay),
-    // row i pins to its cell's dot left edge, wraps instead of clipping.
-    // Geometry is viewport-aware: 48/16px slots desktop, 40/12px ≤768px.
-    function checkBeCaptionCascade() {
-        nodes = [
+    // The cascade fixture: the 300-char spine name drives the wrap case; b3 is the unnamed tail.
+    function beCascadeNodes() {
+        return [
             { id: 'b1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'x'.repeat(300) },
             { id: 'b2', parent_id: 'b1', agent: 'a', prompt: 'p', status: 'progress', created_at: 2, name: 'second cell note' },
+            { id: 'b5', parent_id: 'b2', agent: 'a', prompt: 'p', status: 'success', created_at: 5, name: 'tail note' },
             { id: 'b3', parent_id: 'b1', agent: 'a', prompt: 'p', status: 'success', created_at: 3 },
             { id: 'b4', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 4, name: 'other chain note' }];
-        const m = beGeom(); // {slot, dotLeft} — matches the .be-caption CSS vars
-        document.body.classList.add('birds-eye'); // #birds-eye must be visible to measure
-        renderBirdsEye();
-        const chain = document.querySelector('.be-chain');
-        const rows = [...chain.querySelectorAll('.be-caption')];
-        const rr = rows.map(r => r.getBoundingClientRect());
-        console.assert(rows.length === 2, 'beCaptions: one row per NAMED cell — unnamed renders none');
-        console.assert(chain.querySelector('.be-lane').nextElementSibling.classList.contains('be-captions'),
-            'beCaptions: cascade flows after the rail');
-        // offsetLeft, not rects: the be-enter animation starts at scale(1.02),
-        // and getBoundingClientRect would measure that mid-flight transform
-        const lane = chain.querySelector('.be-lane');
-        console.assert(Math.abs(rows[0].offsetLeft - (lane.offsetLeft + m.dotLeft)) <= 1, `beCaptions: row 0 pins to cell 0 dot (${m.slot}·0+${m.dotLeft})`);
-        console.assert(Math.abs(rows[1].offsetLeft - (lane.offsetLeft + m.slot + m.dotLeft)) <= 1, `beCaptions: row 1 one slot deeper (${m.slot}·1+${m.dotLeft})`);
-        console.assert(rr[0].bottom <= rr[1].top + 0.5, 'beCaptions: rows stack one under another — never overlap');
-        console.assert(rows[0].offsetHeight > 16, 'beCaptions: a 300-char name wraps — no cut-off');
-        console.assert(rr[1].width >= 150, 'beCaptions: rows span the full remaining width');
-        console.assert(rows.every(r => r.classList.contains('clamp-10')), 'beCaptions: clamp-10 guards runaway height');
-        console.assert(rows.every(r => r.title === r.textContent), 'beCaptions: tooltip carries the full name');
+    }
+
+    // One caption row per named cell, flowing after the rail in segment order;
+    // rows stack (block flow — rect-proofed), row i pins to its cell's dot,
+    // measured chain-relative (the wrapper carries the branch indent), wraps
+    // instead of clipping. Geometry is viewport-aware: 48/16px desktop, 40/12px ≤768px.
+    function checkBeCaptionCascade() {
+        renderBeFixture(beCascadeNodes());
+        const rows = assertCascadeRows();
+        assertCascadeStackAndGrammar(rows);
+        assertCascadePins(rows, beGeom());
+        assertCascadeWraps();
         document.body.classList.remove('birds-eye');
         console.log('OK: birds-eye caption cascade');
     }
 
-    function beGeom() {
+    // Hidden hosts measure 0 — #birds-eye must be visible while a check measures it.
+    function renderBeFixture(fixtureNodes, persona) {
+        if (persona) personaIndex.set(persona.id, persona);
+        nodes = fixtureNodes;
+        document.body.classList.add('birds-eye');
+        renderBirdsEye();
+    }
+
+    function beChains() {
+        return [...document.querySelectorAll('.be-chain')];
+    }
+
+    function assertCascadeRows() {
+        const chains = beChains();
+        console.assert(chains.length === 4, 'beCaptions: one chain per segment — spine [b1], forked tails, root [b4]');
+        const tail = chains[1]; // [b2,b5] — the indented chain owning two rows
+        console.assert(tail.querySelector('.be-lane').nextElementSibling.classList.contains('be-captions'),
+            'beCaptions: cascade flows after the rail');
+        const rows = [...tail.querySelectorAll('.be-caption')];
+        console.assert(rows.length === 2, 'beCaptions: one row per NAMED cell — unnamed renders none');
+        return rows;
+    }
+
+    function assertCascadeStackAndGrammar(rows) {
+        const rr = rows.map(r => r.getBoundingClientRect());
+        console.assert(rr[0].bottom <= rr[1].top + 0.5, 'beCaptions: rows stack one under another — never overlap');
+        console.assert(rows.every(r => r.classList.contains('clamp-10')), 'beCaptions: clamp-10 guards runaway height');
+        console.assert(rows.every(r => r.title === r.textContent), 'beCaptions: tooltip carries the full name');
+    }
+
+    // offsetLeft, not rects: the be-enter animation starts at scale(1.02),
+    // and getBoundingClientRect would measure that mid-flight transform
+    function assertCascadePins(rows, m) {
+        const lane = rows[0].closest('.be-chain').querySelector('.be-lane');
+        console.assert(Math.abs(rows[0].offsetLeft - (lane.offsetLeft + m.dotLeft)) <= 1, `beCaptions: row 0 pins to cell 0 dot (${m.slot}·0+${m.dotLeft})`);
+        console.assert(Math.abs(rows[1].offsetLeft - (lane.offsetLeft + m.slot + m.dotLeft)) <= 1, `beCaptions: row 1 one slot deeper (${m.slot}·1+${m.dotLeft})`);
+    }
+
+    function assertCascadeWraps() {
+        const wide = document.querySelector('.be-chain .be-caption'); // the spine's 300-char row
+        console.assert(wide.offsetHeight > 16, 'beCaptions: a 300-char name wraps — no cut-off');
+        console.assert(wide.getBoundingClientRect().width >= 150, 'beCaptions: rows span the full remaining width');
+    }
+
+    function beGeom() { // {slot, dotLeft, cap} — mirrors the #birds-eye CSS vars (graph.html)
         return window.matchMedia('(max-width: 768px)').matches
             ? { slot: 40, dotLeft: 12, cap: '160px' }
             : { slot: 48, dotLeft: 16, cap: '192px' };
@@ -2994,6 +3040,64 @@
         renderBirdsEye();
         console.assert(!document.querySelector('.be-captions'), 'beNoNames: zero names → zero caption blocks (rails pixel-identical)');
         console.log('OK: birds-eye unchanged without names');
+    }
+
+    // The fork fixture: root r1 forks into c1 (which forks again) and c2.
+    function beForkNodes() {
+        return [
+            { id: 'r1', parent_id: null, agent: 'a', prompt: 'p', status: 'success', created_at: 1, name: 'fork root' },
+            { id: 'c1', parent_id: 'r1', agent: 'a', prompt: 'p', status: 'progress', created_at: 2 },
+            { id: 'c2', parent_id: 'r1', agent: 'a', prompt: 'p', status: 'success', created_at: 3, personas: ['p1'] },
+            { id: 'g1', parent_id: 'c1', agent: 'a', prompt: 'p', status: 'success', created_at: 4, personas: ['p1'], name: 'leaf g1' },
+            { id: 'g2', parent_id: 'c1', agent: 'a', prompt: 'p', status: 'success', created_at: 5, name: 'tail head' },
+            { id: 'h1', parent_id: 'g2', agent: 'a', prompt: 'p', status: 'success', created_at: 6, personas: ['p1'], name: 'tail leaf' }];
+    }
+
+    // The pinned regression for spine & branch — each invariant lives in its assert message below.
+    function checkBeForkNoDuplicates() {
+        renderBeFixture(beForkNodes(), { id: 'p1', name: 'Ann' });
+        const chains = beChains();
+        assertForkDotsOnce(chains);
+        assertForkIndents(chains, beGeom());
+        assertForkTrails(chains);
+        assertForkCaptionPins(beGeom());
+        assertForkRerenderStable();
+        document.body.classList.remove('birds-eye');
+        console.log('OK: fork graph renders each node exactly once');
+    }
+
+    function assertForkDotsOnce(chains) {
+        const ids = chains.flatMap(c => [...c.querySelectorAll('.be-dot')].map(d => d.dataset.id));
+        console.assert(ids.length === 6 && new Set(ids).size === 6, 'beFork: every node id renders in exactly one dot');
+    }
+
+    function assertForkIndents(chains, m) {
+        const rel = c => c.offsetLeft - chains[0].offsetLeft; // vs the un-indented spine
+        const expect = [0, 1, 2, 2, 1]; // [r1] [c1] [g1] [g2,h1] [c2]
+        console.assert(chains.length === expect.length &&
+            chains.every((c, i) => Math.abs(rel(c) - expect[i] * m.slot) <= 1),
+            'beFork: a branch chain indents by indent × slot — dots stay in depth columns');
+    }
+
+    function assertForkTrails(chains) {
+        console.assert(chains.slice(0, 2).every(c => c.querySelector('.be-slot.last') && !c.querySelector('.be-trail')),
+            'beFork: a spine ends AT its fork — last slot, no trail');
+        console.assert(chains.slice(2).every(c => c.querySelector('.be-trail')),
+            'beFork: a leaf segment carries its persona trail');
+    }
+
+    function assertForkCaptionPins(m) {
+        const tail = document.querySelectorAll('.be-chain')[3]; // [g2, h1] — two named cells at indent 2
+        console.assert(tail.innerHTML.includes('style="--i:0"') && tail.innerHTML.includes('style="--i:1"'),
+            'beFork: caption --i is segment-relative — the wrapper carries the indent');
+        console.assert(Math.abs(tail.querySelector('.be-caption').offsetLeft - (tail.querySelector('.be-lane').offsetLeft + m.dotLeft)) <= 1,
+            'beFork: a branch caption pins under its own dot — indent never double-counted');
+    }
+
+    function assertForkRerenderStable() {
+        const once = $('birds-eye').innerHTML;
+        renderBirdsEye();
+        console.assert($('birds-eye').innerHTML === once, 'beFork: re-render is order-stable (poll never shuffles lanes)');
     }
 
     // Every named cell's dot tooltip leads with the name; unnamed cells

@@ -24,6 +24,9 @@
     let sessionSuccess    = false;  // every session log row succeeded
     let threadMode        = false;  // panel shows the follow-up thread
     let threadAutoOpened  = false;  // auto-open fires once per page load
+    let threadAutoSeeded  = false;  // auto-seed fires once per page load (page open is the only trigger)
+    let seedInFlight      = false;  // a seed POST is airborne — the dock waits, never a CTA
+    const SEED_RACE_STATUS = 409;   // another tab seeded first — benign on the auto path
     let threadRows        = [];     // graph run logs anchored on the session
     let threadJson        = '';     // change guard for polling re-renders
     let threadFooterKey   = null;   // footer re-render guard (draft preserve)
@@ -573,7 +576,9 @@
         const res = await fetch(url, opts);
         if (!res.ok) {
             const body = (await res.text()).slice(0, 200);
-            throw new Error(body ? `HTTP ${res.status}: ${body}` : `HTTP ${res.status}`);
+            const err = new Error(body ? `HTTP ${res.status}: ${body}` : `HTTP ${res.status}`);
+            err.status = res.status; // callers gate on codes, never on message prose
+            throw err;
         }
         return res.json();
     }
@@ -616,7 +621,7 @@
             `</div>` +
             `<div class="detail-panel-footer" role="region" aria-label="Follow-up composer">` +
             `<div class="detail-panel-accent"></div>` +
-            `<div id="thread-footer"></div>` +
+            `<div id="thread-footer" aria-live="polite"></div>` +
             `</div>`;
     }
 
@@ -650,6 +655,7 @@
         try {
             const data = await threadFetchJson(threadUrl('/logs'));
             if (!threadMode) return; // closed while fetching
+            maybeAutoSeedThread(data.logs);
             const json = JSON.stringify(data.logs);
             if (json !== threadJson && !threadSummaryEditing) {
                 threadRows = data.logs || [];
@@ -665,6 +671,13 @@
         } catch (e) {
             showError(`Failed to load follow-up thread: ${e.message}`);
         }
+    }
+
+    // once per page load — the first loadThread observation decides, fire or not
+    function maybeAutoSeedThread(logs) {
+        if (threadAutoSeeded) return;
+        threadAutoSeeded = true;
+        if (sessionSuccess && !logs.length) submitThreadSeed(true);
     }
 
     function threadTip() {
@@ -811,12 +824,13 @@
     }
 
     function threadFooterKeyOf(tip) {
-        if (!threadRows.length) return 'empty';
+        if (!threadRows.length) return seedInFlight ? 'seeding' : 'empty';
         return tip ? `${tip.id}:${tip.status}:${tip.summary ? 1 : 0}` : 'empty';
     }
 
     function threadFooterHtml(tip) {
         if (!threadRows.length) {
+            if (seedInFlight) return `<div class="run-followup-hint">Summarizing the answer…</div>`;
             return `<div class="run-followup-hint">Seed the original answer to start the follow-up thread.` +
                 `<button class="regen-submit run-seed" id="thread-seed-btn">Seed original answer</button></div>`;
         }
@@ -859,7 +873,8 @@
 
     function bindThreadFooter() {
         const seed = document.getElementById('thread-seed-btn');
-        if (seed) seed.addEventListener('click', submitThreadSeed);
+        // arrow-wrapped: a bare handler would pass the click Event in as a truthy `auto`
+        if (seed) seed.addEventListener('click', () => submitThreadSeed(false));
         const retry = document.getElementById('thread-retry-btn');
         if (retry) retry.addEventListener('click', submitThreadRetry);
         const send = document.getElementById('thread-followup-send');
@@ -876,13 +891,23 @@
         }
     }
 
-    async function submitThreadSeed() {
+    async function submitThreadSeed(auto) {
+        if (seedInFlight) return; // one seed airborne at a time — double-taps die at the source
+        seedInFlight = true;
+        renderThreadFooter(); // the dock swaps to the waiting pose — the CTA leaves the DOM
         try {
             await threadFetchJson(threadUrl('/seed'), { method: 'POST' });
+            seedInFlight = false;
             refreshThread(true);
-        } catch (e) {
-            showError(`Failed to seed the original answer: ${e.message}`);
-        }
+        } catch (e) { landSeedFailure(e, auto); }
+    }
+
+    // the auto-path race loss resyncs silently; every other failure speaks and restores the CTA
+    function landSeedFailure(e, auto) {
+        seedInFlight = false;
+        if (auto === true && e.status === SEED_RACE_STATUS) { refreshThread(false); return; }
+        showError(`Failed to seed the original answer: ${e.message}`);
+        renderThreadFooter();
     }
 
     async function submitThreadRetry() {
@@ -1143,7 +1168,7 @@
     }
 
     // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
-    function runSanityChecks() {
+    async function runSanityChecks() {
         checkNodeCardBodyEmpty();
         checkBuildLogMap();
         checkFormatDuration();
@@ -1152,6 +1177,7 @@
         checkInnerPersonaFilter();
         checkThreadTip();
         checkThreadFooterStates();
+        await checkThreadAutoSeed();
         checkThreadEditFields();
         checkThreadDelete();
         checkDeepLinkBeacon();
@@ -1252,6 +1278,143 @@
         console.log('OK: threadFooterStates');
     }
 
+    // hermetic (stubbed fetch, zero network): the decision, the seeding pose, the failure paths
+    async function checkThreadAutoSeed() {
+        const inner = document.getElementById('detail-panel-inner');
+        inner.innerHTML = threadShellHtml();
+        await checkAutoSeedDecision();
+        checkSeedInFlightPose();
+        await checkSeedFailurePaths();
+        closeDetailPanel();
+        console.log('OK: thread auto-seed');
+    }
+
+    async function checkAutoSeedDecision() {
+        const saved = autoSeedStateSave();
+        const calls = stubSeedFetch(200);
+        assertSeedNeverFires(calls, false, []);            // a failed session never fires
+        assertSeedNeverFires(calls, true, [{ id: 'r1' }]); // rows exist — something already ran
+        resetSeedCaseState();
+        maybeAutoSeedThread([]); // the page-open state: successful session, empty thread
+        console.assert(threadAutoSeeded && seedInFlight, 'autoSeed: flags flip before the POST resolves');
+        maybeAutoSeedThread([]); // the 5s poll re-entering loadThread
+        console.assert(calls.seed === 1, 'autoSeed: exactly one POST across every observation');
+        await settleSeedCase(); // the success continuation lands before the restore
+        autoSeedStateRestore(saved);
+    }
+
+    function assertSeedNeverFires(calls, success, logs) {
+        resetSeedCaseState();
+        sessionSuccess = success;
+        maybeAutoSeedThread(logs);
+        console.assert(calls.seed === 0 && threadAutoSeeded,
+            'autoSeed: a failed session or existing rows never fire — the page-open decision is spent');
+    }
+
+    // 'seeding' must differ from 'empty' or the footer swap never re-renders
+    function checkSeedInFlightPose() {
+        const savedRows = threadRows, savedSeed = seedInFlight;
+        threadRows = [];
+        assertSeedingPose(true);
+        assertSeedingPose(false);
+        threadRows = savedRows; seedInFlight = savedSeed;
+    }
+
+    function assertSeedingPose(inFlight) {
+        seedInFlight = inFlight;
+        const pose = threadFooterHtml(null);
+        const key = threadFooterKeyOf(null);
+        console.assert(key === (inFlight ? 'seeding' : 'empty'),
+            `seedPose: footer key distinguishes ${inFlight ? 'seeding' : 'empty'}`);
+        console.assert(pose.includes(inFlight ? 'Summarizing the answer…' : 'Seed original answer') &&
+            !pose.includes(inFlight ? 'thread-seed-btn' : 'Summarizing the answer…'),
+            `seedPose: ${inFlight ? 'an airborne seed renders the waiting pose, never the CTA'
+                                   : 'the CTA returns once nothing is airborne'}`);
+    }
+
+    // the race loss is silent on the auto path (resync follows); a manual tap speaks — a human acted
+    async function checkSeedFailurePaths() {
+        const saved = autoSeedStateSave();
+        await runSeedCase(SEED_RACE_STATUS, true, false); // auto + race → silent, then resync
+        await runSeedCase(500, true, true);               // auto + server error → speaks
+        await runSeedCase(SEED_RACE_STATUS, false, true); // manual + race → speaks — a human acted
+        autoSeedStateRestore(saved);
+    }
+
+    async function runSeedCase(status, auto, expectError) {
+        const calls = stubSeedFetch(status);
+        resetSeedCaseState();
+        threadMode = true; // the race case's resync (refreshThread → loadThread) must be live
+        renderThreadFooter(); // the manual path taps the real, really-bound CTA
+        if (auto) maybeAutoSeedThread([]);
+        else document.getElementById('thread-seed-btn').click();
+        assertDockSwappedToWaiting();
+        await settleSeedCase();
+        assertSeedCase(calls, status, auto, expectError);
+    }
+
+    function settleSeedCase() {
+        // one macrotask: the POST outcome and the resync's fetch land before the timer fires
+        return new Promise(done => setTimeout(done, 0));
+    }
+
+    function assertDockSwappedToWaiting() {
+        const dock = document.getElementById('thread-footer').innerHTML;
+        console.assert(dock.includes('Summarizing the answer…') && !dock.includes('thread-seed-btn'),
+            'seedFail: the dock swaps to the waiting pose synchronously — the CTA leaves the DOM');
+    }
+
+    function assertSeedCase(calls, status, auto, expectError) {
+        const errored = document.getElementById('error-state').style.display === 'block';
+        console.assert(errored === expectError,
+            `seedFail ${status} ${auto ? 'auto' : 'manual'}: error banner ${expectError ? 'expected' : 'must not appear'}`);
+        console.assert(calls.seed === 1, `seedFail ${status}: exactly one seed POST — never a double-fire`);
+        console.assert(calls.logs === (auto && status === SEED_RACE_STATUS ? 1 : 0),
+            `seedFail ${status}: the race case resyncs, every other failure does not`);
+    }
+
+    // hermetic stub: /seed answers `status`, /logs answers empty; the counters record the hits
+    function stubSeedFetch(status) {
+        const calls = { seed: 0, logs: 0 };
+        window.fetch = async (url, opts = {}) => {
+            const isSeed = String(url).endsWith('/seed');
+            calls[isSeed ? 'seed' : 'logs']++;
+            return isSeed
+                ? { ok: status < 400, status, text: async () => 'reason phrase', json: async () => ({}) }
+                : { ok: true, status: 200, json: async () => ({ logs: [] }) };
+        };
+        return calls;
+    }
+
+    function resetSeedCaseState() {
+        threadRows = [];
+        threadJson = '';
+        threadFooterKey = null;
+        seedInFlight = false;
+        sessionSuccess = true; // the CTA and the auto-seed only exist for a successful session
+        threadAutoSeeded = false;
+        document.getElementById('error-state').style.display = 'none';
+    }
+
+    function autoSeedStateSave() {
+        return {
+            fetch: window.fetch, sessionSuccess, threadAutoSeeded, seedInFlight,
+            rows: threadRows, json: threadJson, key: threadFooterKey, mode: threadMode,
+        };
+    }
+
+    function autoSeedStateRestore(s) {
+        window.fetch = s.fetch;
+        sessionSuccess = s.sessionSuccess;
+        threadAutoSeeded = s.threadAutoSeeded;
+        seedInFlight = s.seedInFlight;
+        threadRows = s.rows;
+        threadJson = s.json;
+        threadFooterKey = s.key;
+        threadMode = s.mode;
+        document.getElementById('error-state').style.display = 'none';
+    }
+
     // Text→field conversions open a 7-line canvas — one grammar with
     // graph.html (see its checkEditFieldGrammar). The dock composer is NOT
     // one of them: it is a compact rows=3 capsule pinned at the panel bottom
@@ -1318,7 +1481,7 @@
             const body = inner.querySelector('.detail-panel-body');
             const spacer = document.createElement('div');
             spacer.style.height = '4000px';
-            body.insertBefore(spacer, row); // the row sinks below the fold
+            row.parentElement.insertBefore(spacer, row); // the row sinks below the fold (rows nest in #thread-messages)
             pendingThreadFocus = 'r1';
             focusPendingThreadRun();
             console.assert(centered === 1, 'deepLink: an off-view row centers itself — once');
@@ -1350,7 +1513,7 @@
         const text = document.getElementById('thread-followup-text');
         console.assert(text && text.closest('.detail-panel-footer') === footer, 'dock: the composer lives in the dock');
         const spacer = document.createElement('div');
-        spacer.style.height = '4000px';
+        spacer.style.flex = '0 0 4000px'; // flex-shrink would collapse a bare height — the body must actually overflow
         body.appendChild(spacer); // guarantee the body CAN scroll — else immovability is vacuous
         const top = footer.getBoundingClientRect().top;
         body.scrollTop = 60;

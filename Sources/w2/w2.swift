@@ -20,19 +20,48 @@ private let env = ProcessInfo.processInfo.environment
 private let ccAgentScript = env["W2_AGENT"] ?? "openloop_cc_docker"
 private let getsvenBase = env["GETSVEN_BASE"] ?? "https://personas.getsven.com"
 private let getsvenKey = env["GETSVEN_API_KEY"]
-private let maxRepairAttempts = Int(env["MAX_REPAIR_ATTEMPTS"] ?? "3") ?? 3
+private let defaultMaxRepairAttempts = 3
+private let maxRepairAttempts: Int = {
+    guard let raw = env["MAX_REPAIR_ATTEMPTS"] else { return defaultMaxRepairAttempts }
+    guard let value = Int(raw) else {
+        assertionFailure("MAX_REPAIR_ATTEMPTS must be an integer (got \"\(raw)\")")
+        return defaultMaxRepairAttempts
+    }
+    return value
+}()
+
+private let agentScriptPrefix = "openloop_"
+private let headlessPersonaArg = "_head_"
+private let planModeArg = "plan"
+private let runnerBinary = "openloop-runner"
+
+private let personasFolder = "personas"
+private let knowledgeFolder = "knowledge"
+private let workflowsFolder = "workflows"
+private let dataFileSuffix = ".\(shared.json)"
+
+private let jsonSentinelStart = "<<<W2JSON"
+private let jsonSentinelEnd = "W2JSON>>>"
+private let jsonFenceStart = "```json"
+private let jsonFenceEnd = "```"
+
+private let repairSnippetLimit = 8192
+private let httpOKStatuses = 200..<300
+private let oneShotEverySecs = 0
 
 private let derivedAgent: String = {
-    var a = ccAgentScript
-    if a.hasPrefix("openloop_") { a = String(a.dropFirst("openloop_".count)) }
-    return a
+    let stripped = ccAgentScript.hasPrefix(agentScriptPrefix)
+        ? String(ccAgentScript.dropFirst(agentScriptPrefix.count))
+        : ccAgentScript
+    assert(stripped.notEmpty, "W2_AGENT must not resolve to an empty agent name")
+    return stripped
 }()
 
 @main
 struct w2: ParsableCommand {
 
     @Argument(help: "Task / ask for the team to accomplish")
-    var ask: String
+    private var ask: String
 
     func run() throws {
         Task {
@@ -71,26 +100,34 @@ private func autopilot(ask: String, recorder: CleanupRecorder) async throws {
     let invPersonaIds = Set(inventory.flatMap(\.personas).map(\.id))
     let invWorkflowIds = Set(inventory.flatMap(\.workflows).map(\.id))
 
-    let prompt = buildPrompt(inventory: inventory, ask: ask)
+    let prompt = try buildPrompt(inventory: inventory, ask: ask)
 
+    assert(maxRepairAttempts > 0, "MAX_REPAIR_ATTEMPTS must be a positive integer")
     var plan: Plan?
     var repairContext = ""
     for attempt in 1...maxRepairAttempts {
         log.info("asking \(ccAgentScript) to design the team (attempt \(attempt)/\(maxRepairAttempts))...")
-        let fullPrompt = repairContext.notEmpty
-            ? "\(prompt)\n\nPREVIOUS ATTEMPT FAILED — the JSON you returned was malformed. Fix it and return ONLY the sentinel-wrapped JSON per the schema.\n\(repairContext)"
-            : prompt
+        let fullPrompt = repairContext.notEmpty ? """
+            \(prompt)
+
+            PREVIOUS ATTEMPT FAILED — the JSON you returned was malformed. Fix it and return ONLY the sentinel-wrapped JSON per the schema.
+            \(repairContext)
+            """ : prompt
 
         let raw = try await callCCdocker(prompt: fullPrompt, parent: parent)
         let block = extractBlock(raw)
         do {
-            let validated = try parseAndValidate(block: block, invPersonaIds: invPersonaIds, invWorkflowIds: invWorkflowIds)
-            plan = validated
+            plan = try parseAndValidate(block: block, invPersonaIds: invPersonaIds, invWorkflowIds: invWorkflowIds)
             break
         } catch {
             log.warn("validation failed: \(error)")
-            let snippet = String(block.prefix(8192))
-            repairContext = "Parser/validator error: \(error)\n\nYour previous (malformed) JSON:\n\(snippet)"
+            let snippet = String(block.prefix(repairSnippetLimit))
+            repairContext = """
+                Parser/validator error: \(error)
+
+                Your previous (malformed) JSON:
+                \(snippet)
+                """
             if attempt == maxRepairAttempts {
                 throw W2Error("\(ccAgentScript) did not produce valid JSON after \(maxRepairAttempts) attempts. Last error: \(error)")
             }
@@ -102,17 +139,17 @@ private func autopilot(ask: String, recorder: CleanupRecorder) async throws {
     }
 
     let workflowId = try await materialize(plan: plan, ask: ask, recorder: recorder)
-    log.info("workflow \(workflowId) ready — launching via openloop-runner...")
-    _ = try await runRunner(workflowId: workflowId, ask: ask)
+    log.info("workflow \(workflowId) ready — launching via \(runnerBinary)...")
+    try await runRunner(workflowId: workflowId, ask: ask)
 }
 
 // MARK: - Inventory
 
 private func ensureOpenloopDirs() {
     let base = Paths.curDir.appending(Paths.dataFolderName)
-    _ = PathIO.createDirectoryIfNotExists(atPath: base.string)
-    for sub in ["personas", "knowledge", "workflows"] {
-        _ = PathIO.createDirectoryIfNotExists(atPath: base.appending(sub).string)
+    for sub in [personasFolder, knowledgeFolder, workflowsFolder] {
+        let dir = base.appending(sub)
+        assert(PathIO.createDirectoryIfNotExists(atPath: dir.string), "failed to ensure \(dir)")
     }
 }
 
@@ -128,6 +165,7 @@ private func topMostOpenloopAncestor() -> FilePath {
 
 private func collectInventory() -> [InventoryDir] {
     let all = Paths.dirsToHome()
+    assert(all.first == Paths.curDir, "dirsToHome() starts at curDir — the 'parent' relation depends on it")
     var result: [InventoryDir] = []
     for (idx, dir) in all.enumerated() {
         let openloop = dir.appending(Paths.dataFolderName)
@@ -147,10 +185,13 @@ private func collectInventory() -> [InventoryDir] {
 }
 
 private func listPersonas(in openloop: FilePath) -> [InventoryPersona] {
-    let dir = openloop.appending("personas")
-    guard let names = try? PathIO.contentsOfDirectory(atPath: dir.string) else { return [] }
-    return names.filter { $0.hasSuffix(".\(shared.json)") }.compactMap { fname -> InventoryPersona? in
-        let id = String(fname.dropLast(".\(shared.json)".count))
+    let dir = openloop.appending(personasFolder)
+    guard let names = try? PathIO.contentsOfDirectory(atPath: dir.string) else {
+        log.warn("failed to list personas in \(dir.string) — reporting none")
+        return []
+    }
+    return names.filter { $0.hasSuffix(dataFileSuffix) }.map { fname in
+        let id = String(fname.dropLast(dataFileSuffix.count))
         let fp = dir.appending(fname)
         var name = ""
         var role = ""
@@ -162,16 +203,21 @@ private func listPersonas(in openloop: FilePath) -> [InventoryPersona] {
             role = p.role
             about = p.about
             task = p.task
+        } else {
+            log.warn("failed to parse \(fp.string) — including \(id) with empty metadata")
         }
         return InventoryPersona(id: id, name: name, role: role, about: about, task: task)
     }
 }
 
 private func listWorkflows(in openloop: FilePath) -> [InventoryWorkflow] {
-    let dir = openloop.appending("workflows")
-    guard let names = try? PathIO.contentsOfDirectory(atPath: dir.string) else { return [] }
-    return names.filter { $0.hasSuffix(".\(shared.json)") }.compactMap { fname -> InventoryWorkflow? in
-        let id = String(fname.dropLast(".\(shared.json)".count))
+    let dir = openloop.appending(workflowsFolder)
+    guard let names = try? PathIO.contentsOfDirectory(atPath: dir.string) else {
+        log.warn("failed to list workflows in \(dir.string) — reporting none")
+        return []
+    }
+    return names.filter { $0.hasSuffix(dataFileSuffix) }.map { fname in
+        let id = String(fname.dropLast(dataFileSuffix.count))
         let fp = dir.appending(fname)
         var name = ""
         var desc = ""
@@ -179,6 +225,8 @@ private func listWorkflows(in openloop: FilePath) -> [InventoryWorkflow] {
            let w = try? json5Decoder.decode(Workflow.self, from: data) {
             name = w.name
             desc = w.desc
+        } else {
+            log.warn("failed to parse \(fp.string) — including \(id) with empty metadata")
         }
         return InventoryWorkflow(id: id, name: name, desc: desc)
     }
@@ -186,13 +234,11 @@ private func listWorkflows(in openloop: FilePath) -> [InventoryWorkflow] {
 
 // MARK: - Prompt
 
-private func buildPrompt(inventory: [InventoryDir], ask: String) -> String {
-    let invJSON: String
-    do {
-        let data = try prettyEncoder.encode(inventory)
-        invJSON = String(data: data, encoding: .utf8) ?? "[]"
-    } catch {
-        invJSON = "[]"
+private func buildPrompt(inventory: [InventoryDir], ask: String) throws -> String {
+    let data = try snakeCaseEncoder.encode(inventory)
+    guard let invJSON = String(data: data, encoding: .utf8) else {
+        assertionFailure("JSONEncoder output is always valid UTF-8")
+        throw W2Error("failed to UTF-8 encode inventory JSON")
     }
 
     return """
@@ -229,9 +275,9 @@ RULES:
 5. You only provide id, name, desc, levels for each workflow. w2 sets the rest automatically: every_secs=0 (one-shot), agent="\(derivedAgent)", and ask (the user ask for the main workflow, "" for inner ones).
 
 OUTPUT: print ONLY a JSON object wrapped exactly between these sentinel lines, no prose, no markdown fences:
-<<<W2JSON
+\(jsonSentinelStart)
 { ... }
-W2JSON>>>
+\(jsonSentinelEnd)
 
 JSON SCHEMA:
 {
@@ -262,21 +308,23 @@ private func callCCdocker(prompt: String, parent: FilePath) async throws -> Stri
     guard PathIO.isFileExistent(atPath: script.string) else {
         throw W2Error("\(ccAgentScript) not found at \(script.string)")
     }
-    let res = try await exec(
+    guard let raw = try await exec(
         script.string,
-        args: [parent.string, "_head_", prompt, "", "plan"],
+        args: [parent.string, headlessPersonaArg, prompt, "", planModeArg],
         chroot: Paths.curDir.string
-    )
-    return res ?? ""
+    ) else {
+        throw W2Error("\(ccAgentScript) produced no output")
+    }
+    return raw
 }
 
 private func extractBlock(_ raw: String) -> String {
-    if let s = raw.range(of: "<<<W2JSON"),
-       let e = raw.range(of: "W2JSON>>>", range: s.upperBound..<raw.endIndex) {
+    if let s = raw.range(of: jsonSentinelStart),
+       let e = raw.range(of: jsonSentinelEnd, range: s.upperBound..<raw.endIndex) {
         return String(raw[s.upperBound..<e.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    if let s = raw.range(of: "```json"),
-       let e = raw.range(of: "```", range: s.upperBound..<raw.endIndex) {
+    if let s = raw.range(of: jsonFenceStart),
+       let e = raw.range(of: jsonFenceEnd, range: s.upperBound..<raw.endIndex) {
         return String(raw[s.upperBound..<e.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
     return raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -287,7 +335,7 @@ private func extractBlock(_ raw: String) -> String {
 private func parseAndValidate(block: String, invPersonaIds: Set<String>, invWorkflowIds: Set<String>) throws -> Plan {
     let plan: Plan
     do {
-        plan = try planDecoder.decode(Plan.self, from: Data(block.utf8))
+        plan = try snakeCaseDecoder.decode(Plan.self, from: Data(block.utf8))
     } catch {
         throw W2Error("Invalid JSON: \(error)")
     }
@@ -333,7 +381,7 @@ private func validate(plan: Plan, invPersonaIds: Set<String>, invWorkflowIds: Se
         }
     }
 
-    let fetchIds = Set(plan.personas ?? [])
+    let fetchIds = Set(plan.personaIds)
     let wfIdSet = Set(wfIds)
     for wf in wfs {
         let unknown = wf.levels.flatMap(\.self).filter { entry in
@@ -348,7 +396,7 @@ private func validate(plan: Plan, invPersonaIds: Set<String>, invWorkflowIds: Se
         }
     }
 
-    let pids = plan.personas ?? []
+    let pids = plan.personaIds
     guard Set(pids).count == pids.count else {
         throw W2Error("personas[] ids must be unique")
     }
@@ -356,61 +404,63 @@ private func validate(plan: Plan, invPersonaIds: Set<String>, invWorkflowIds: Se
 
 private func workflowFilePath(id: String) -> String {
     Paths.curDir
-        .appending(Paths.dataFolderName).appending("workflows")
-        .appending("\(id).\(shared.json)").string
+        .appending(Paths.dataFolderName).appending(workflowsFolder)
+        .appending(id + dataFileSuffix).string
 }
 
 // MARK: - Materialize
 
 private func materialize(plan: Plan, ask: String, recorder: CleanupRecorder) async throws -> String {
-    let personasDir = Paths.curDir.appending(Paths.dataFolderName).appending("personas")
-    let knowledgeDir = Paths.curDir.appending(Paths.dataFolderName).appending("knowledge")
-    _ = PathIO.createDirectoryIfNotExists(atPath: personasDir.string)
-    _ = PathIO.createDirectoryIfNotExists(atPath: knowledgeDir.string)
+    assert(plan.workflows.notEmpty, "validate() guarantees at least one workflow")
 
-    for pid in plan.personas ?? [] {
-        let personaFile = personasDir.appending("\(pid).\(shared.json)")
+    let personasDir = Paths.curDir.appending(Paths.dataFolderName).appending(personasFolder)
+    let knowledgeDir = Paths.curDir.appending(Paths.dataFolderName).appending(knowledgeFolder)
+    for dir in [personasDir, knowledgeDir] {
+        assert(PathIO.createDirectoryIfNotExists(atPath: dir.string), "failed to create \(dir)")
+    }
+
+    for pid in plan.personaIds {
+        let personaFile = personasDir.appending(pid + dataFileSuffix)
         if PathIO.isFileExistent(atPath: personaFile.string) {
             log.warn("persona \(pid) already exists locally — skipping fetch")
             continue
         }
         let kdir = knowledgeDir.appending(pid)
-        _ = PathIO.createDirectoryIfNotExists(atPath: kdir.string)
+        assert(PathIO.createDirectoryIfNotExists(atPath: kdir.string), "failed to create \(kdir)")
         try await fetchRemotePersona(remote: pid, outFile: personaFile, kdir: kdir)
         recorder.record(personaFile.string)
         recorder.record(kdir.string)
     }
 
     for (i, wf) in plan.workflows.enumerated() {
-        let isMain = (i == 0)
-        try await writeWorkflow(wf, ask: isMain ? ask : "", recorder: recorder)
+        try await writeWorkflow(wf, ask: i == 0 ? ask : "", recorder: recorder)
     }
 
     return plan.workflows[0].id
 }
 
 private func writeWorkflow(_ wf: PlanWorkflow, ask: String, recorder: CleanupRecorder) async throws {
-    let wfDir = Paths.curDir.appending(Paths.dataFolderName).appending("workflows")
-    _ = PathIO.createDirectoryIfNotExists(atPath: wfDir.string)
-    let wfFile = wfDir.appending("\(wf.id).\(shared.json)")
+    let wfDir = Paths.curDir.appending(Paths.dataFolderName).appending(workflowsFolder)
+    assert(PathIO.createDirectoryIfNotExists(atPath: wfDir.string), "failed to create \(wfDir)")
+    let wfFile = wfDir.appending(wf.id + dataFileSuffix)
     let workflow = Workflow(
-        name: wf.name ?? wf.id,
-        desc: wf.desc ?? "",
-        everySecs: 0,
+        name: wf.resolvedName,
+        desc: wf.resolvedDesc,
+        everySecs: oneShotEverySecs,
         agent: derivedAgent,
         ask: ask,
         levels: wf.levels
     )
-    try await writeJSON(workflow, to: wfFile, snakeCase: true)
+    try await writeJSON(workflow, to: wfFile)
     recorder.record(wfFile.string)
 }
 
-private func runRunner(workflowId: String, ask: String) async throws -> String? {
-    let runner = Paths.bin.appending("openloop-runner")
+private func runRunner(workflowId: String, ask: String) async throws {
+    let runner = Paths.bin.appending(runnerBinary)
     guard PathIO.isFileExistent(atPath: runner.string) else {
-        throw W2Error("openloop-runner not found at \(runner.string)")
+        throw W2Error("\(runnerBinary) not found at \(runner.string)")
     }
-    return try await exec(runner.string, args: [workflowId, ask], chroot: Paths.curDir.string)
+    _ = try await exec(runner.string, args: [workflowId, ask], chroot: Paths.curDir.string)
 }
 
 // MARK: - Marketplace
@@ -425,11 +475,13 @@ private func fetchRemotePersona(remote: String, outFile: FilePath, kdir: FilePat
         avatar: detail.avatar,
         agent: nil
     )
-    try await writeJSON(persona, to: outFile, snakeCase: true)
+    try await writeJSON(persona, to: outFile)
 
-    for kf in detail.knowledgeFiles ?? [] {
+    for kf in detail.knowledgeFileRefs {
+        assert(kf.filename.notEmpty, "knowledge file reference must carry a non-empty filename")
         guard let resp = try? await getJSON(KnowledgeFileResponse.self,
                                             url: "\(getsvenBase)/api/personas/\(remote)/knowledge/\(kf.filename)") else {
+            log.warn("failed to fetch knowledge file \(kf.filename) for \(remote) — skipping")
             continue
         }
         try await writeString(resp.file.contentMd, to: kdir.appending(kf.filename))
@@ -445,11 +497,11 @@ private func getJSON<T: Decodable>(_ type: T.Type, url urlString: String) async 
         headers["Authorization"] = "Bearer \(key)"
     }
     let (data, http) = try await Net.get(url, headers: headers)
-    guard (200..<300).contains(http.statusCode) else {
+    guard httpOKStatuses.contains(http.statusCode) else {
         throw W2Error("request failed (\(http.statusCode)): \(urlString)")
     }
     do {
-        return try getsvenDecoder.decode(T.self, from: data)
+        return try snakeCaseDecoder.decode(T.self, from: data)
     } catch {
         throw W2Error("failed to decode response from \(urlString): \(error)")
     }
@@ -457,13 +509,9 @@ private func getJSON<T: Decodable>(_ type: T.Type, url urlString: String) async 
 
 // MARK: - File writes
 
-private func writeJSON<T: Encodable>(_ value: T, to fp: FilePath, snakeCase: Bool = false) async throws {
-    let enc = JSONEncoder()
-    if snakeCase { enc.keyEncodingStrategy = .convertToSnakeCase }
-    enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
-    let data = try enc.encode(value)
-    let ok = await File(fp.string).write(data)
-    guard ok else {
+private func writeJSON<T: Encodable>(_ value: T, to fp: FilePath) async throws {
+    let data = try snakeCaseEncoder.encode(value)
+    guard await File(fp.string).write(data) else {
         throw W2Error("failed to write \(fp.string)")
     }
 }
@@ -479,13 +527,13 @@ private func writeString(_ s: String, to fp: FilePath) async throws {
 
 private final class CleanupRecorder {
     private var paths: [String] = []
-    func record(_ p: String) { paths.append(p) }
-    func cleanup() {
+    fileprivate func record(_ p: String) { paths.append(p) }
+    fileprivate func cleanup() {
         for p in paths {
             if PathIO.isFileExistent(atPath: p) {
-                try? FileManager.default.removeItem(atPath: p)
+                do { try FileManager.default.removeItem(atPath: p) } catch { log.warn("cleanup: failed to remove \(p): \(error)") }
             } else if PathIO.isDirectoryExistent(atPath: p) {
-                _ = PathIO.deleteDirectoryAndItsContents(atPath: p)
+                if !PathIO.deleteDirectoryAndItsContents(atPath: p) { log.warn("cleanup: failed to remove \(p)") }
             }
         }
     }
@@ -493,27 +541,43 @@ private final class CleanupRecorder {
 
 // MARK: - Models
 
-private struct InventoryDir: Codable {
+private struct InventoryDir: Encodable {
     let path: String
     let relation: String
     let personas: [InventoryPersona]
     let workflows: [InventoryWorkflow]
 }
-private struct InventoryPersona: Codable { let id: String; let name: String; let role: String; let about: String; let task: String }
-private struct InventoryWorkflow: Codable { let id: String; let name: String; let desc: String }
+private struct InventoryPersona: Encodable { let id: String; let name: String; let role: String; let about: String; let task: String }
+private struct InventoryWorkflow: Encodable { let id: String; let name: String; let desc: String }
 
-private struct Plan: Codable {
+private struct Plan: Decodable {
     let workflows: [PlanWorkflow]
     let personas: [String]?
 }
-private struct PlanWorkflow: Codable {
+private extension Plan {
+    var personaIds: [String] {
+        guard let personas else { return [] } // schema: personas[] may be omitted (reuse-only plan)
+        return personas
+    }
+}
+private struct PlanWorkflow: Decodable {
     let id: String
     let name: String?
     let desc: String?
     let levels: [[String]]
 }
+private extension PlanWorkflow {
+    var resolvedName: String {
+        guard let name else { return id } // schema: name is optional and defaults to the id
+        return name
+    }
+    var resolvedDesc: String {
+        guard let desc else { return "" } // schema: desc is optional and defaults to ""
+        return desc
+    }
+}
 
-private struct PersonaDetail: Codable {
+private struct PersonaDetail: Decodable {
     let name: String
     let role: String
     let about: String
@@ -521,13 +585,22 @@ private struct PersonaDetail: Codable {
     let avatar: String?
     let knowledgeFiles: [KFileRef]?
 }
-private struct KFileRef: Codable { let filename: String }
-private struct KnowledgeFileResponse: Codable { let file: KnowledgeFileContent }
-private struct KnowledgeFileContent: Codable { let filename: String?; let contentMd: String }
+private extension PersonaDetail {
+    var knowledgeFileRefs: [KFileRef] {
+        guard let knowledgeFiles else {
+            assertionFailure("persona detail without knowledge_files — the getsven contract always includes it")
+            return []
+        }
+        return knowledgeFiles
+    }
+}
+private struct KFileRef: Decodable { let filename: String }
+private struct KnowledgeFileResponse: Decodable { let file: KnowledgeFileContent }
+private struct KnowledgeFileContent: Decodable { let filename: String?; let contentMd: String }
 
 // MARK: - Codables
 
-private let planDecoder: JSONDecoder = {
+private let snakeCaseDecoder: JSONDecoder = {
     let d = JSONDecoder()
     d.keyDecodingStrategy = .convertFromSnakeCase
     return d
@@ -540,14 +613,9 @@ private let json5Decoder: JSONDecoder = {
     return d
 }()
 
-private let getsvenDecoder: JSONDecoder = {
-    let d = JSONDecoder()
-    d.keyDecodingStrategy = .convertFromSnakeCase
-    return d
-}()
-
-private let prettyEncoder: JSONEncoder = {
+private let snakeCaseEncoder: JSONEncoder = {
     let e = JSONEncoder()
+    e.keyEncodingStrategy = .convertToSnakeCase
     e.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
     return e
 }()

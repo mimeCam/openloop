@@ -9,15 +9,15 @@ import SQLite
 
 private let log = PrintLog(module: "Database")
 
-public struct LogManager {
+private func getConnection(_ dbPath: String) throws -> Connection {
+    let db = try Connection(dbPath)
+    db.busyTimeout = 3
+    try db.execute("PRAGMA journal_mode=WAL;")
+    try db.execute("PRAGMA synchronous=NORMAL;")
+    return db
+}
 
-    private static func getConnection(_ dbPath: String) throws -> Connection {
-        let db = try Connection(dbPath)
-        db.busyTimeout = 3
-        try db.execute("PRAGMA journal_mode=WAL;")
-        try db.execute("PRAGMA synchronous=NORMAL;")
-        return db
-    }
+public struct LogManager {
 
     public static func createTables(at instancePath: String) throws {
         let dbPath = FilePath(instancePath)
@@ -251,13 +251,10 @@ public struct LogManager {
 
         let finalQuery = baseQuery + ";"
 
-        let count: Int64
-        if binds.count == 2 {
-            count = try db.scalar(finalQuery, binds[0], binds[1]) as? Int64 ?? 0
-        } else {
-            count = try db.scalar(finalQuery, binds[0]) as? Int64 ?? 0
+        guard let count = try db.scalar(finalQuery, binds) as? Int64 else {
+            assertionFailure("countLogs: COUNT(*) must return one integer row")
+            return 0
         }
-
         let resultCount = Int(count)
         log.info("Complete. Count: \(resultCount)")
         return resultCount
@@ -636,6 +633,39 @@ public struct LogManager {
             .string
     }
 
+    // MARK: - DB size & clean (home-page gauge + "clean old logs")
+
+    public static let cleanThresholdBytes: Int64 = 1_073_741_824 // 1 GiB
+
+    public static func dbFilesSize(at instancePath: String) -> Int64 {
+        guard let base = try? logsDbPath(at: instancePath) else {
+            assertionFailure("logsDbPath threw for \(instancePath)")
+            return 0
+        }
+        return dbSidecarSuffixes.reduce(Int64(0)) { $0 + sidecarSize(base + $1) }
+    }
+
+    public struct CleanOutcome: Sendable, Equatable {
+        public let sizeBefore: Int64
+        public let sizeAfter: Int64
+        public let vacuumed: Bool
+        public var bytesReclaimed: Int64 { sizeBefore - sizeAfter }
+    }
+
+    public static func cleanOldLogs(at instancePath: String) throws -> CleanOutcome {
+        let before = dbFilesSize(at: instancePath)
+        guard let path = try existingDbPath(at: instancePath) else {
+            return CleanOutcome(sizeBefore: before, sizeAfter: before, vacuumed: true)
+        }
+        try createTables(at: instancePath) // idempotent
+        let vacuumed = try purgeAndCompact(path: path, instancePath: instancePath)
+        return CleanOutcome(
+            sizeBefore: before,
+            sizeAfter: dbFilesSize(at: instancePath),
+            vacuumed: vacuumed
+        )
+    }
+
     private static func insertLog(
         _ runLog: RunLog, messageId: Int64, logId: String, on db: Connection
     ) throws {
@@ -659,3 +689,172 @@ public struct LogManager {
         )
     }
 }
+
+private let cleanWindowSecs: TimeInterval = 30 * 24 * 3600
+private let dbSidecarSuffixes = ["", "-wal", "-shm"]
+
+// Absent -wal/-shm sidecars are normal quiescence — they count as 0.
+private func sidecarSize(_ path: String) -> Int64 {
+    switch PathIO.fileSize(atPath: path) {
+    case .some(let bytes): return bytes
+    case nil: return 0
+    }
+}
+
+// getConnection CREATES a missing db — this path must stay stat-only.
+private func existingDbPath(at instancePath: String) throws -> String? {
+    let path = try LogManager.logsDbPath(at: instancePath)
+    return PathIO.isFileExistent(atPath: path) ? path : nil
+}
+
+private func purgeRows(on db: Connection, at instancePath: String) throws {
+    let cutoff = cleanCutoff()
+    try purgeLogRows(db, cutoff: cutoff)
+    try purgeRunEndRows(db, cutoff: cutoff)
+    try GraphStore.purgeOldRunLogs(olderThan: cutoff, at: instancePath)
+}
+
+// reference-date base — logs.created_at is UNIX epoch, never compare against it.
+private func cleanCutoff() -> Double {
+    Date().timeIntervalSinceReferenceDate - cleanWindowSecs
+}
+
+// messages.log_id holds the WORKFLOW id despite its name — the cascade walks logs.message_id -> messages.id.
+private func purgeLogRows(_ db: Connection, cutoff: Double) throws {
+    try db.transaction {
+        try db.run("""
+            DELETE FROM parents WHERE message_id IN
+                (SELECT message_id FROM logs WHERE started_at < ?);
+            """, cutoff)
+        try db.run("""
+            DELETE FROM messages WHERE id IN
+                (SELECT message_id FROM logs WHERE started_at < ?)
+                AND id NOT IN (SELECT message_id FROM logs WHERE started_at >= ?);
+            """, cutoff, cutoff)
+        try db.run("DELETE FROM logs WHERE started_at < ?;", cutoff)
+    }
+}
+
+private func purgeRunEndRows(_ db: Connection, cutoff: Double) throws {
+    try db.run("""
+        DELETE FROM notification_reads WHERE kind = 'workflow' AND ref_id IN
+            (SELECT session FROM run_ends WHERE ended_at < ?);
+        """, cutoff)
+    try db.run("DELETE FROM run_ends WHERE ended_at < ?;", cutoff)
+}
+
+// close (not defer) settles the -wal/-shm sidecars before the caller measures.
+private func purgeAndCompact(
+    path: String, instancePath: String
+) throws -> Bool {
+    let db = try getConnection(path)
+    try purgeRows(on: db, at: instancePath)
+    return finishClean(on: db)
+}
+
+// WAL parks VACUUM's compacted image in -wal — the post-vacuum TRUNCATE checkpoint is what actually shrinks the file set.
+private func finishClean(on db: Connection) -> Bool {
+    _ = try? db.run("PRAGMA wal_checkpoint(TRUNCATE);")
+    let vacuumed = (try? db.run("VACUUM;")) != nil
+    _ = try? db.run("PRAGMA wal_checkpoint(TRUNCATE);")
+    return vacuumed
+}
+
+#if ISOLATED_RUN_DBSIZE
+// Isolated sanity run — toggle the (normally commented) ISOLATED_RUN_DBSIZE define in Package.swift.
+public func testDbSizeFeature() throws {
+    let dir = try isolatedDbSizeSetup()
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    try isolatedDbSizeCheckSize(dir)
+    try isolatedDbSizeCheckPurge(dir)
+    try isolatedDbSizeCheckThreshold(dir)
+    print("OK. ISOLATED_RUN_DBSIZE completed.")
+}
+
+private func isolatedDbSizeSetup() throws -> String {
+    print("OK. ISOLATED_RUN_DBSIZE started.")
+    let dir = NSTemporaryDirectory() + "openloop-isolated-dbsize-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(
+        atPath: dir + "/.openloop", withIntermediateDirectories: true
+    )
+    try LogManager.createTables(at: dir)
+    print("OK. ISOLATED_RUN_DBSIZE C0: temp instance + tables.")
+    return dir
+}
+
+private func isolatedDbSizeCheckSize(_ dir: String) throws {
+    let base = try LogManager.logsDbPath(at: dir)
+    try Data(repeating: 1, count: 4096).write(to: URL(fileURLWithPath: base + "-wal"))
+    let size = LogManager.dbFilesSize(at: dir)
+    guard let wal = PathIO.fileSize(atPath: base + "-wal"),
+          let dbBytes = PathIO.fileSize(atPath: base) else {
+        assertionFailure("the files this check just created must stat (\(base))")
+        return
+    }
+    assert(size > 0 && size >= wal + dbBytes)
+    print("OK. ISOLATED_RUN_DBSIZE C1: size \(size)B, incl. wal sidecar \(wal)B.")
+}
+
+private func isolatedInsertLog(_ dir: String, _ startedAt: Double) throws {
+    try LogManager.saveLog(
+        RunLog(
+            success: true, took: 1, startedAt: startedAt, endedAt: startedAt + 1,
+            workflowId: "wf", personaId: nil, agent: "a",
+            msg: RunLog.Message(
+                input: "i", output: "o",
+                parents: [RunLog.Message.Parent(id: "p", text: "t")]
+            )
+        ),
+        at: dir
+    )
+}
+
+private func isolatedSeedRows(_ dir: String, _ ref: Double) throws {
+    let old = ref - cleanWindowSecs - 10 * 24 * 3600
+    try isolatedInsertLog(dir, old)
+    try isolatedInsertLog(dir, ref)
+    try LogManager.insertRunEnd(
+        RunEnd(session: "s", workflowId: "wf", success: true, took: 1,
+               startedAt: old, endedAt: old),
+        at: dir
+    )
+    try GraphStore.createTables(at: dir)
+    try GraphStore.insertRunLog(
+        GraphRunLog(id: "r", nodeId: "n", prompt: "p", status: "success",
+                    output: "o", took: 1, createdAt: old, completedAt: old),
+        at: dir
+    )
+}
+
+private func isolatedDbSizeCheckPurge(_ dir: String) throws {
+    let ref = Date().timeIntervalSinceReferenceDate
+    try isolatedSeedRows(dir, ref)
+    let before = LogManager.dbFilesSize(at: dir)
+    let outcome = try LogManager.cleanOldLogs(at: dir)
+    try isolatedAssertPurgeOutcome(dir, outcome: outcome, before: before)
+    print("OK. ISOLATED_RUN_DBSIZE C2+C3: 1 fresh log left, reclaimed \(outcome.bytesReclaimed)B.")
+}
+
+private func isolatedAssertPurgeOutcome(
+    _ dir: String, outcome: LogManager.CleanOutcome, before: Int64
+) throws {
+    let logs = try LogManager.countLogs(instancePath: dir)
+    assert(logs == 1, "fresh log must survive (count \(logs))")
+    assert(outcome.vacuumed, "VACUUM must succeed on a quiescent db")
+    assert(
+        outcome.sizeAfter <= before,
+        "sizeAfter \(outcome.sizeAfter)B > before \(before)B"
+    )
+}
+
+private func isolatedDbSizeCheckThreshold(_ dir: String) throws {
+    assert(LogManager.dbFilesSize(at: dir) < LogManager.cleanThresholdBytes)
+    let base = try LogManager.logsDbPath(at: dir)
+    _ = FileManager.default.createFile(atPath: base + "-wal", contents: nil)
+    let fh = try FileHandle(forWritingTo: URL(fileURLWithPath: base + "-wal"))
+    try fh.truncate(atOffset: UInt64(LogManager.cleanThresholdBytes + 1024))
+    try fh.close()
+    assert(LogManager.dbFilesSize(at: dir) >= LogManager.cleanThresholdBytes)
+    print("OK. ISOLATED_RUN_DBSIZE C4: threshold verdicts at small / >1 GiB.")
+}
+#endif

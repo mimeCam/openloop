@@ -708,6 +708,75 @@ body {
     border: 1px solid rgba(34, 197, 94, 0.12);
 }
 
+/* DB size gauge — a standing condition: gray machine-fact, amber at 500 MB, danger trio + Clean at the 1 GB server verdict; hue-only escalation, no motion */
+.db-size-cluster {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px; /* tighter than the row's 10px: measurement + remedy, one thought */
+    flex-shrink: 0;
+}
+
+.db-size {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 12px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-light);
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    flex-shrink: 0;
+}
+
+.db-size .db-size-label {
+    font-family: var(--font-body);
+    color: var(--text-faint);
+}
+
+.db-size .db-size-value {
+    font-family: var(--font-mono); /* mono is the register for measured facts */
+}
+
+/* amber-700 on the amber-500 tints — the -700 text doctrine (#f59e0b is below AA at this size) */
+.db-size.watch {
+    color: #b45309;
+    background: rgba(245, 158, 11, 0.10);
+    border-color: rgba(245, 158, 11, 0.35);
+}
+
+.db-size.over {
+    color: var(--danger-text);
+    background: var(--danger-fill-rest);
+    border-color: var(--danger-border-rest);
+}
+
+/* delete-family grammar: solid red pill = asks before it acts */
+.instance-action-btn.clean-btn:disabled {
+    cursor: default;
+    animation: clean-busy-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes clean-busy-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.instance-action-btn.clean-btn:focus-visible {
+    outline: 2px solid var(--danger-text); /* red rings for the delete family */
+    outline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+    /* a destructive double-tap target must never be 28px tall */
+    .instance-action-btn.clean-btn { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .instance-action-btn.clean-btn:disabled { animation: none; opacity: 0.7; }
+}
+
 
 .expanded-content {
     display: flex;

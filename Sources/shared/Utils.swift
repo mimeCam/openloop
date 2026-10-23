@@ -257,6 +257,13 @@ public extension PathIO {
         return attrs?[.modificationDate] as? Date
     }
 
+    // internal (not the extension's public default): shared-module only — Database's db-size gauge.
+    internal static func fileSize(atPath path: String) -> Int64? {
+        var s = stat()
+        guard stat(path, &s) == 0 else { return nil }
+        return Int64(s.st_size)
+    }
+
     static func deleteDirectoryAndItsContents(atPath inputPath: String) -> Bool {
         let path = removingFileProtocolPrefix(path: inputPath)
 

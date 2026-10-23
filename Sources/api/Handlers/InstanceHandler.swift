@@ -38,6 +38,7 @@ struct InstanceHandler: Sendable {
                 workingDirectory: path, state: state
             )
             let runningRuns = GraphStore.countRunningRunLogs(at: path)
+            let dbSize = LogManager.dbFilesSize(at: path)
 
             instances.append(InstanceInfo(
                 path: path,
@@ -50,18 +51,23 @@ struct InstanceHandler: Sendable {
                 processRunning: svcStatus.processRunning,
                 graphMcpAuthMissing: GraphStore.mcpAuthMissingCount(at: path),
                 runningGraphRuns: runningRuns.node,
-                runningSessionRuns: runningRuns.session
+                runningSessionRuns: runningRuns.session,
+                dbSizeBytes: dbSize,
+                needsClean: dbSize >= LogManager.cleanThresholdBytes
             ))
         }
 
         // Synthetic instance for user-global shared personas/workflows
+        let globalDbSize = LogManager.dbFilesSize(at: Paths.globalOpenloop.string)
         instances.append(InstanceInfo(
             path: Paths.globalOpenloop.string,
             parentPath: nil,
             state: nil,
             manualActive: 0,
             manualCompleted: 0,
-            isGlobalShare: true
+            isGlobalShare: true,
+            dbSizeBytes: globalDbSize,
+            needsClean: globalDbSize >= LogManager.cleanThresholdBytes
         ))
 
         let parentPaths = InstanceHandler.computeParentPaths(
@@ -104,6 +110,16 @@ struct InstanceHandler: Sendable {
         let id = try extractValidatedId(req: req)
         try await Launcher.deleteWorker(workingDirectory: id)
         return Response(status: .ok)
+    }
+
+    func clean(req: Request) async throws -> CleanResponse {
+        let id = try extractValidatedId(req: req)
+        let outcome = try LogManager.cleanOldLogs(at: id)
+        return CleanResponse(
+            dbSizeBytes: outcome.sizeAfter,
+            vacuumed: outcome.vacuumed,
+            bytesReclaimed: outcome.bytesReclaimed
+        )
     }
 
     private func extractValidatedId(req: Request) throws -> String {
@@ -164,6 +180,14 @@ extension InstanceHandler {
         var graphMcpAuthMissing: Int = 0
         var runningGraphRuns: Int = 0
         var runningSessionRuns: Int = 0
+        var dbSizeBytes: Int64 = 0
+        var needsClean: Bool = false
+    }
+
+    struct CleanResponse: Content, Sendable {
+        var dbSizeBytes: Int64
+        var vacuumed: Bool
+        var bytesReclaimed: Int64
     }
 
     struct InstanceListResponse: Content, Sendable {

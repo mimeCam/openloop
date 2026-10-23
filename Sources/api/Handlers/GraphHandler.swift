@@ -647,7 +647,7 @@ private func executeRunLog(_ log: GraphRunLog, script: FilePath, instancePath: S
     let took = Int(tb.intervalSinceInitialized)
     try? GraphStore.updateRunLog(id: log.id, status: out?.notEmpty == true ? "summarizing" : "failed", output: out, took: took, at: instancePath)
     if let output = out, output.notEmpty {
-        await summarizeRunLog(log, output: output, script: script, instancePath: instancePath, mcpPath: mcpPath)
+        await summarizeRunLog(log, output: output, script: script, instancePath: instancePath)
     }
     await GraphRunRegistry.shared.remove(log.id)
     cleanupRunArtifacts(log.id, mcpPath: mcpPath)
@@ -669,8 +669,9 @@ private func runFile(_ runId: String, _ name: String) -> String? {
     return PathIO.isFileExistent(atPath: file.string) ? file.string : nil
 }
 
-private func summarizeRunLog(_ log: GraphRunLog, output: String, script: FilePath, instancePath: String, mcpPath: String?) async {
-    let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(log.id))
+private func summarizeRunLog(_ log: GraphRunLog, output: String, script: FilePath, instancePath: String) async {
+    // Summaries are text filtering — MCP-free by decision (no MCP_CONFIG_PATH).
+    let env = runEnv(mcpPath: nil, runDir: GraphStore.contextRunDir(log.id))
     guard let prompt = qaSummaryPrompt(question: log.prompt, answer: output, runId: log.id) else {
         try? GraphStore.finishRunSummary(id: log.id, summary: nil, at: instancePath)
         return
@@ -772,26 +773,19 @@ private func maybeSummarize(id: String, runId: String, script: FilePath, instanc
 }
 
 private func summarize(_ node: GraphNode, runId: String, script: FilePath, instancePath: String) async {
-    let mcpPath = mcpConfigFor(node, runId: runId, at: instancePath)
-    defer { deleteMcpConfig(mcpPath) }
     guard let prompt = qaSummaryPrompt(question: node.prompt, answer: node.output ?? "", runId: runId) else {
         await GraphRunRegistry.shared.remove(node.id)
         return
     }
-    await runSummary(node, runId: runId, prompt: prompt, mcpPath: mcpPath, script: script, instancePath: instancePath)
-}
-
-private func mcpConfigFor(_ node: GraphNode, runId: String, at instancePath: String) -> String? {
-    let nodes = (try? GraphStore.fetchNodes(at: instancePath)) ?? []
-    let chain = GraphStore.chain(of: node, in: nodes)
-    return GraphStore.writeMcpConfig(GraphStore.chainMcpEndpoints(chain, at: instancePath), runId: runId)
+    await runSummary(node, runId: runId, prompt: prompt, script: script, instancePath: instancePath)
 }
 
 private func runSummary(
-    _ node: GraphNode, runId: String, prompt: String, mcpPath: String?,
+    _ node: GraphNode, runId: String, prompt: String,
     script: FilePath, instancePath: String
 ) async {
-    let env = runEnv(mcpPath: mcpPath, runDir: GraphStore.contextRunDir(runId))
+    // Summaries are text filtering — MCP-free by decision (no MCP_CONFIG_PATH).
+    let env = runEnv(mcpPath: nil, runDir: GraphStore.contextRunDir(runId))
     let run = await runScript(script, args: runArgs(prompt, instancePath), chroot: instancePath, env: env)
     let trimmed = run.out?.trimmingCharacters(in: .whitespacesAndNewlines)
     try? GraphStore.finishSummary(
@@ -800,16 +794,25 @@ private func runSummary(
     await GraphRunRegistry.shared.remove(node.id)
 }
 
-private let summaryInstruction = "You are turning the QUESTION and ANSWER below into knowledge notes: plain text, terse and dense, each bit of information for a later reuse. Capture the subject itself — facts with their specifics (names, paths, numbers) and the reasoning that matters. Where a choice is still open, list each option with its trade-offs and leave the pick to the reader. End with the open threads: what is still unverified and which questions are worth pursuing next."
+// Filter, not narrate: the output is the answer's own reply at the ask's depth — a plain-wording rule only, facts and depth stay.
+private let summaryInstruction = """
+    You are filtering the ANSWER below, with the QUESTION's ask as the filter: keep what serves that ask, at the depth the ask needs, and drop the rest of the ANSWER — other topics, unrelated repo changes, detail beyond the ask.
+    The output is the filtered answer itself, written as the direct reply to the QUESTION — the answering agent's own reply at that depth, in its voice and stance: plain text, terse and dense, written for a 12-year-old reader — everyday words, short sentences, every technical term explained in plain words at first use; the wording simplifies, the facts and their names stay as they are.
+    The first line is the most reusable sentence of the reply: its key fact or decision point.
+    """
 // Delta vs convo.md — without it the summarizer re-compresses each turn's recap into the next convo.md, compounding every turn.
-private let deltaSummaryInstruction = " @\(GraphStore.containerCtxDir)/convo.md is the previous conversation summary — read it first and treat its facts as already stated. Write only what THIS turn adds on top of it: new facts, shifted trade-offs, movement on the open threads. If this turn adds nothing new, drive towards dynamic information discovery instead of reiterating already known facts."
+// Change-driven: an item recurs only together with its change; an empty delta stores nil — no summary beats filler.
+private let deltaSummaryInstruction = """
+    @\(GraphStore.containerCtxDir)/convo.md is the previous conversation summary — read it first and treat its facts as already stated, filtered out just like the off-ask material.
+    Write only what THIS turn's answer adds on top of it: new facts and state changes — an item already stated in convo.md returns only together with its change (unresolved became resolved, working became broken, scope grew or shrank); its unchanged state stays recorded in convo.md - do not reiterate.
+    """
 
 private func qaSummaryPrompt(question: String, answer: String, runId: String) -> String? {
     guard (try? writeQa(question, answer, id: runId)) != nil else { return nil }
     let c = GraphStore.containerCtxDir
     let hasConvo = runFile(runId, "convo.md") != nil
     let files = "Context files (absolute paths at filesystem root, outside the working directory, read-only): @\(c)/question.md\(hasConvo ? ", @\(c)/convo.md and" : " and") @\(c)/answer.md\n"
-    let instruction = summaryInstruction + (hasConvo ? deltaSummaryInstruction : "")
+    let instruction = hasConvo ? summaryInstruction + "\n" + deltaSummaryInstruction : summaryInstruction
     return files + "\(instruction)\n\nQUESTION: @\(c)/question.md\n\nANSWER: @\(c)/answer.md"
 }
 
@@ -1096,6 +1099,20 @@ private extension GraphHandler {
         return GraphStore.PersonaContext(texts: texts, mcps: mcps)
     }
 
+    /// The session's full MCP surface: union over ALL its personas (outer + inner), collected across the instance → home chain.
+    func sessionMcpUnion(session: String, at instancePath: String) throws -> Set<GraphMcpEndpoint> {
+        let personaIds = Set(
+            try LogManager.fetchLogsBySession(instancePath: instancePath, session: session)
+                .compactMap(\.personaId)
+                .filter(isRealSessionPersona)
+        )
+        var mcps = Set<GraphMcpEndpoint>()
+        for id in personaIds {
+            mcps.formUnion(sessionPersonaContext(personaId: id, instancePath: instancePath).mcps)
+        }
+        return mcps
+    }
+
     // MARK: thread bookkeeping
 
     /// The latest session thread row nobody continues.
@@ -1173,7 +1190,10 @@ private extension GraphHandler {
         let personaCtx = sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
         let logId = UUID().uuidString
         try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: logId)
-        let mcpPath = GraphStore.writeMcpConfig(personaCtx.mcps, runId: logId)
+        // MCP scope = union over ALL session personas; ctx.md stays tip-persona-only — swap the argument, never the whole context.
+        let mcpPath = GraphStore.writeMcpConfig(
+            try sessionMcpUnion(session: session, at: instancePath), runId: logId
+        )
         let log = newRunLog(
             id: logId, nodeId: session, prompt: prompt,
             parentRunId: parent?.id, rootRunId: parent?.rootRunId ?? parent?.id ?? logId
@@ -1216,8 +1236,8 @@ private extension GraphHandler {
         let logId = UUID().uuidString
         // completed_at is set at insert: while the summarization runs the row
         // stays invisible to notifications (status filter), and the moment
-        // the summary lands the completion surfaces — feedback for an
-        // explicit user action.
+        // the summary lands the completion surfaces — feedback for the action
+        // that requested it (an explicit tap, or the log page's auto-seed).
         let log = GraphRunLog(
             id: logId, nodeId: session, prompt: ask, status: "summarizing",
             output: tipLog.msg.output, took: tipLog.took,
@@ -1265,7 +1285,10 @@ private extension GraphHandler {
         let personaCtx = sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
         let parent = run.parentRunId.flatMap { pid in logs.first { $0.id == pid } }
         try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: run.id)
-        let mcpPath = GraphStore.writeMcpConfig(personaCtx.mcps, runId: run.id)
+        // Same union scope as sessionRunLog — retry must not regress it.
+        let mcpPath = GraphStore.writeMcpConfig(
+            try sessionMcpUnion(session: session, at: instancePath), runId: run.id
+        )
         await GraphRunRegistry.shared.add(run.id)
         try GraphStore.restartRunLog(id: run.id, at: instancePath)
         Task.detached {
@@ -1404,7 +1427,8 @@ private func parentContextFileNames(_ runId: String) -> [String] {
 }
 
 private func summarizeSessionRun(_ run: SessionRunExecution, output: String) async {
-    let env = runEnv(mcpPath: run.mcpPath, runDir: GraphStore.contextRunDir(run.log.id))
+    // Summaries are text filtering (question.md → answer.md) — MCP-free by decision; tools serve the answer phase only.
+    let env = runEnv(mcpPath: nil, runDir: GraphStore.contextRunDir(run.log.id))
     guard let prompt = qaSummaryPrompt(
         question: run.log.prompt, answer: output, runId: run.log.id
     ) else {

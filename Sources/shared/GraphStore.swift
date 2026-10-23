@@ -573,6 +573,17 @@ public struct GraphStore {
         return rows.compactMap { $0[0] as? String }
     }
 
+    static func purgeOldRunLogs(olderThan cutoff: Double, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        guard try sqliteMasterHas("graph_run_logs", db) else { return }
+        let ids = try oldRunIds(cutoff, db)
+        try db.transaction {
+            try db.run("DELETE FROM graph_run_logs WHERE created_at < ?;", cutoff)
+            for runId in ids { dropRunMarkerRows(db, runId: runId) }
+            repairRootRunIds(db)
+        }
+    }
+
     private static func deepestFirst(_ ids: Set<String>, at instancePath: String) -> [String] {
         let parentOf = NodeStore.list(at: instancePath)
             .reduce(into: [:]) { $0[$1.id] = $1.parentId }
@@ -981,4 +992,9 @@ public struct GraphStore {
             parentRunId: row[8] as? String, summary: row[9] as? String, rootRunId: row[10] as? String
         )
     }
+}
+
+private func oldRunIds(_ cutoff: Double, _ db: Connection) throws -> [String] {
+    let sql = "SELECT id FROM graph_run_logs WHERE created_at < ?;"
+    return try db.prepare(sql, cutoff).compactMap { $0[0] as? String }
 }

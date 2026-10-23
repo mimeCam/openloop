@@ -1085,6 +1085,10 @@
             min-width: 100%;
             box-sizing: border-box;
             padding: 76px 24px 96px 48px; /* same top clearance as the grid */
+            /* rail geometry, defined once — .be-chain indent, .be-caption pin and the suite's beGeom() mirror these (mobile overrides below) */
+            --slot: 48px;     /* one rail slot of indent per chain step */
+            --dot-left: 16px; /* dot left edge inside its slot */
+            --cap: 192px;     /* indent ceiling — deep cells keep readable width */
         }
         body.birds-eye #birds-eye {
             display: flex;
@@ -1095,23 +1099,28 @@
         }
         #birds-eye #empty-hint { align-self: center; }
 
+        /* --be-offset = the segment's tree depth (set per chain in graph.js) — on the wrapper, not the lane, so the captions' width:0 containment rides along */
         .be-chain {
             display: flex;
             flex-direction: column;
+            margin-left: calc(var(--slot) * var(--be-offset, 0));
         }
+        /* TODO: P2 bracket — dashed elbow on .be-branch (pure garnish, ships behind visual sign-off) */
 
         /* — caption cascade: the chain explains itself under its rail —
-           One row per named cell, stacked in chain order (block flow: two
+           One row per named cell, stacked in segment order (block flow: two
            rows can never overlap), each spanning the full remaining width.
            Row i's left edge pins to its cell's dot left edge — slot 48px,
            dot 16px wide, center x=24 → left edge x=16 (mobile: 40/12) — the
            dot sits atop the bubble's left corner like a timeline marker
-           pinning its own note. The indent caps (--cap) so deep chains keep
-           ≥ half the row for text. Skin: the cell's status hue at whisper
-           volume (.wl-bubble tint grammar) — dot, border and fill agree;
-           text stays --text-primary (≈14:1 on the tinted canvas). Tap = its
-           dot's tap (focusFromBirds). clamp-10 + tooltip carry the worst
-           case; unnamed chains render no cascade at all. */
+           pinning its own note. --i is segment-relative — the wrapper's
+           --be-offset already carries the branch indent (never double-count).
+           The indent caps (--cap) so deep chains keep ≥ half the row for
+           text. Skin: the cell's status hue at whisper volume (.wl-bubble
+           tint grammar) — dot, border and fill agree; text stays
+           --text-primary (≈14:1 on the tinted canvas). Tap = its dot's tap
+           (focusFromBirds). clamp-10 + tooltip carry the worst case; unnamed
+           chains render no cascade at all. */
         .be-captions {
             display: flex;
             flex-direction: column;
@@ -1127,10 +1136,7 @@
             min-width: 100%;
             box-sizing: border-box;
         }
-        .be-caption {
-            --slot: 48px;     /* one rail slot of indent per chain step */
-            --dot-left: 16px; /* dot left edge inside its slot */
-            --cap: 192px;     /* indent ceiling — deep cells keep readable width */
+        .be-caption { /* --slot/--dot-left/--cap inherited from #birds-eye */
             margin-left: min(calc(var(--slot) * var(--i, 0) + var(--dot-left)), var(--cap));
             border-radius: 8px;
             padding: 4px 10px;
@@ -1269,9 +1275,8 @@
             .be-slot { width: 40px; }
             .be-slot::after { left: 28px; width: 24px; }
             .be-dot::before { inset: -16px; }
-            /* 40px slot → dot left edge at x=12; tighter cap keeps ≥ half a
-               phone width for text (tooltip + panel carry the full name) */
-            .be-caption { --slot: 40px; --dot-left: 12px; --cap: 160px; }
+            /* one override for the whole rail: 40px slot → dot x=12; tighter cap keeps ≥ half a phone width for text */
+            #birds-eye { --slot: 40px; --dot-left: 12px; --cap: 160px; }
         }
         @media (prefers-reduced-motion: reduce) {
             body.birds-eye #birds-eye { animation: none; }

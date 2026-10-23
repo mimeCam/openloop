@@ -80,6 +80,10 @@ func configure(_ app: Application) async throws {
     instances.delete(":id", "delete") { req async throws in
         try await InstanceHandler().delete(req: req)
     }
+    // Old-log purge + VACUUM — the db-size gauge's remedy
+    instances.post(":id", "clean") { req async throws in
+        try await InstanceHandler().clean(req: req)
+    }
 
     // Workflows endpoints
     instances.grouped(":id", "workflows").get { req async throws in

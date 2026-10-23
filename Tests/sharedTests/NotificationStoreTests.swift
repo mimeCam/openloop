@@ -19,7 +19,7 @@ final class NotificationStoreTests: XCTestCase {
         )
     }
 
-    func runEnd(_ session: String, endedAt: Double) throws {
+    private func runEnd(_ session: String, endedAt: Double) throws {
         try LogManager.insertRunEnd(
             RunEnd(
                 session: session, workflowId: "wf", success: true, took: 3,
@@ -63,7 +63,7 @@ final class NotificationStoreTests: XCTestCase {
         XCTAssertEqual(items.first?.prompt, nil)
     }
 
-    func seedMessage(session: String, input: String, startedAt: Double) throws {
+    private func seedMessage(session: String, input: String, startedAt: Double) throws {
         try LogManager.saveLog(
             RunLog(
                 success: true, took: 1, startedAt: startedAt, endedAt: startedAt + 1,
@@ -103,12 +103,13 @@ final class NotificationStoreTests: XCTestCase {
         XCTAssertEqual(items[0].prompt, "p")
     }
 
-    func completedNodeRun(id: String, status: String = "success") throws {
+    private func completedNodeRun(id: String, root: String? = nil, status: String = "success") throws {
         try GraphStore.createTables(at: instanceDir)
         try GraphStore.insertRunLog(
             GraphRunLog(
                 id: id, nodeId: "n1", prompt: "p", status: "progress",
-                output: nil, took: nil, createdAt: 50, completedAt: nil
+                output: nil, took: nil, createdAt: 50, completedAt: nil,
+                rootRunId: root
             ),
             at: instanceDir
         )
@@ -122,7 +123,7 @@ final class NotificationStoreTests: XCTestCase {
     // follow-up turns) carry a notification_kinds marker; kind comes from
     // the marker, never from the id.
 
-    func completedSessionRun(id: String, session: String, status: String = "success") throws {
+    private func completedSessionRun(id: String, session: String, status: String = "success") throws {
         try GraphStore.createTables(at: instanceDir)
         try GraphStore.insertSessionRunLog(
             GraphRunLog(
@@ -184,5 +185,98 @@ final class NotificationStoreTests: XCTestCase {
         XCTAssertEqual(items.count, 1)
         XCTAssertTrue(items[0].read)
         XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 0)
+    }
+
+    // MARK: "Latest wins" collapse — one card per conversation / per Run
+    // Seeds carry explicit completedAt — updateRunLog would stamp the wall clock.
+
+    private func sessionTurn(
+        _ id: String, session: String, createdAt: Double, completedAt: Double
+    ) throws {
+        try GraphStore.createTables(at: instanceDir)
+        try GraphStore.insertSessionRunLog(
+            GraphRunLog(
+                id: id, nodeId: session, prompt: "p-\(id)", status: "success",
+                output: "ok", took: 1, createdAt: createdAt, completedAt: completedAt
+            ),
+            session: session, workflowId: "wf", at: instanceDir
+        )
+    }
+
+    func testSessionTurnsCollapseToOneLatestWins() throws {
+        try sessionTurn("t1", session: "s1", createdAt: 10, completedAt: 11)
+        try sessionTurn("t2", session: "s1", createdAt: 20, completedAt: 21)
+        try sessionTurn("t3", session: "s1", createdAt: 30, completedAt: 31)
+        let items = try Notifications.list(at: instanceDir)
+        XCTAssertEqual(items.map(\.refId), ["t3"])
+        XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 1)
+    }
+
+    func testCollapseWinnerIsMaxEndedAtNotLastRow() throws {
+        // out-of-order completion: t2 inserted last, t1 ended later — t1 wins
+        try sessionTurn("t1", session: "s1", createdAt: 100, completedAt: 500)
+        try sessionTurn("t2", session: "s1", createdAt: 200, completedAt: 300)
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["t1"])
+    }
+
+    // Node-run seeds use the production seam — insertRunLog does not persist completed_at.
+
+    func testDistinctRunsOfOneNodeStaySeparate() throws {
+        try completedNodeRun(id: "r1", root: "r1")
+        try completedNodeRun(id: "r2", root: "r2")
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["r2", "r1"])
+    }
+
+    func testTurnsWithinOneRunCollapseToOnePerRun() throws {
+        try completedNodeRun(id: "r1", root: "r1")
+        try completedNodeRun(id: "r1a", root: "r1")
+        try completedNodeRun(id: "r1b", root: "r1")
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["r1b"])
+    }
+
+    func testLegacyNullRootRunsDoNotMerge() throws {
+        // pre-root-era rows: NULL root keys alone — never an accidental merge
+        try completedNodeRun(id: "r1")
+        try completedNodeRun(id: "r2")
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["r2", "r1"])
+    }
+
+    func testLimitAppliesAfterCollapse() throws {
+        for s in 1...3 {
+            for t in 1...4 {
+                try sessionTurn(
+                    "s\(s)t\(t)", session: "s\(s)",
+                    createdAt: Double(s * 10 + t), completedAt: Double(s * 10 + t)
+                )
+            }
+        }
+        let items = try Notifications.list(limit: 2, at: instanceDir)
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(Set(items.map(\.nodeId)).count, 2) // 2 conversations, not 2 turns
+    }
+
+    func testSeededRunZeroFoldsIntoConversation() throws {
+        try GraphStore.createTables(at: instanceDir)
+        try GraphStore.insertSessionRunLog( // run-0: born completed, still summarizing
+            GraphRunLog(
+                id: "sr0", nodeId: "s1", prompt: "p", status: "summarizing",
+                output: "o", took: 1, createdAt: 5, completedAt: 6
+            ),
+            session: "s1", workflowId: "wf", at: instanceDir
+        )
+        try sessionTurn("t1", session: "s1", createdAt: 10, completedAt: 11)
+        try sessionTurn("t2", session: "s1", createdAt: 20, completedAt: 21)
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["t2"])
+    }
+
+    func testNewTurnReDingsAndMarkAllHolds() throws {
+        try sessionTurn("t1", session: "s1", createdAt: 10, completedAt: 11)
+        try Notifications.markRead(kind: "session_run", refId: "t1", at: instanceDir)
+        XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 0)
+        try sessionTurn("t2", session: "s1", createdAt: 20, completedAt: 21)
+        XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 1) // re-ding
+        try Notifications.markAllRead(at: instanceDir)
+        XCTAssertEqual(Notifications.unreadCount(at: instanceDir), 0)
+        XCTAssertEqual(try Notifications.list(at: instanceDir).map(\.refId), ["t2"])
     }
 }

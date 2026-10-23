@@ -3,7 +3,7 @@ MAINTAINER — keep in sync with the route table in Sources/api/api.swift
 (configure(_:)). Response SHAPES live in Sources/api/Handlers/*.swift,
 NOT the route registration. Re-verify this checklist if you touch routing
 or a handler's Content struct:
-  [ ] /api/instances + :id launch|stop|disable|delete|unload (InstanceHandler)
+  [ ] /api/instances + :id launch|stop|disable|delete|unload|clean (InstanceHandler)
   [ ] personas CRUD (PersonaHandler)
   [ ] workflows CRUD + runs (WorkflowHandler, RunHandler)
   [ ] manual-workflows (ManualWorkflowHandler — validate/launch/get/delete, RAM-only)
@@ -45,7 +45,7 @@ Instances — list & lifecycle
   GET    /api/instances               → { instances:[{ path, parentPath?, state?,
                                   manualActive, manualCompleted, configEnabled?,
                                   processRunning?, isGlobalShare,
-                                  graphMcpAuthMissing }] }
+                                  graphMcpAuthMissing, dbSizeBytes, needsClean }] }
                                   state = { lastLoopAtUnixMs, activeRunningWorkflows,
                                             inactiveWorkflows }
                                   (configEnabled/processRunning are absent on the
@@ -56,11 +56,29 @@ Instances — list & lifecycle
                                   the home page badges the instance cell, and
                                   /graph.html shows the same fact in its header
                                   and on the cells)
+                                  dbSizeBytes = combined size of the instance's
+                                  logs.db + logs.db-wal + logs.db-shm (0 = no db
+                                  yet; the home page shows it as the DB pill);
+                                  needsClean = dbSizeBytes >= the 1 GiB clean
+                                  threshold — the server-owned verdict behind the
+                                  Clean button
   POST   /api/instances/:id/launch    → start the worker for a folder   (200)
   POST   /api/instances/:id/stop      → kill the running process        (200)
   POST   /api/instances/:id/disable   → stop auto-loading on boot       (200)
   DELETE /api/instances/:id/delete    → remove service registration     (200)
   DELETE /api/instances/:id           → unload                          (200)
+  POST   /api/instances/:id/clean     → { dbSizeBytes, vacuumed, bytesReclaimed }
+                                  Deletes every record/log older than 1 month
+                                  (logs + their messages/parents, run_ends + their
+                                  read markers, old graph run logs + markers),
+                                  then VACUUMs. Old sessions lose follow-up
+                                  ability (their run_ends row is gone — the
+                                  follow-up gate 409s): intended, not a bug.
+                                  A run started >1 mo ago that is still writing
+                                  loses its log rows — accepted per contract.
+                                  vacuumed=false = purge ok but the file couldn't
+                                  compact while the instance was writing (partial
+                                  clean; size settles on a later clean).
 
 Personas — CRUD
   GET    /api/instances/:id/personas        → { personas:[{ id, name, role, avatar? }] }
@@ -186,7 +204,9 @@ Graph — node graph per instance (powers /graph.html)
            completed_at?, parent_run_id?, root_run_id?, summary? }
            status: progress → summarizing → success | failed (answered =
            finished with no summary). Every successful run is summarized
-           right after completion, like node creation.
+           right after completion, like node creation. Summaries run
+           MCP-free (no MCP_CONFIG_PATH) — MCP servers serve the answer
+           phase only, everywhere.
 
 Graph sessions — workflow follow-up conversations (the right panel of
 /workflow-log.html). After a session finishes successfully, its bottom-most
@@ -203,7 +223,10 @@ notification_kinds marker row written in the same transaction as the insert
        user local bin; unresolvable → 400). Gating mirrors node runs:
        parent must be the thread tip with a summary (409 already-continued /
        400 no-summary), thread empty → 409 seed first. Session must have a
-       successful run_ends row (409 otherwise).
+       successful run_ends row (409 otherwise). MCP scope = the union of
+       ALL the session's personas' assigned MCP servers (outer + inner
+       workflows, live from the graph at turn time); ctx.md knowledge stays
+       the tip persona's only.
   POST /api/instances/:id/graph/sessions/:sid/seed  → Run. Opt-in run 0:
        materializes the original answer (prompt = the session's original
        ask, output = tip persona output) and summarizes it. Empty/failed
@@ -211,7 +234,8 @@ notification_kinds marker row written in the same transaction as the insert
   POST /api/instances/:id/graph/sessions/:sid/runs/:rid/retry → Run.
        Failed tips only (400), no children (409), not in flight (409).
        A failed run that still holds output (seed / interrupted summary)
-       retries the summarization only.
+       retries the summarization only. Re-executed turns get the same
+       union MCP scope as the run route above.
   DELETE /api/instances/:id/graph/sessions/:sid/runs/:rid → { logs:[…] }
        One turn splices out with the same semantics as the node-route DELETE
        above (follow-ups move up to the deleted run's parent; an emptied
@@ -259,6 +283,10 @@ Notifications — per instance, derived from its own logs.db
                      node_id = session UUID, title = workflow name)
   Read state changes ONLY through the two POSTs above — opening a deep link
   never marks read. No poller, no separate db — everything reads logs.db live.
+  Collapsing ("latest wins"): follow-up turns on one conversation and turns
+  within one node Run collapse into a single notification per parent — one
+  item per conversation (session) / per Run, always the latest turn's row
+  (id deep-links to the newest turn; read-it-then-new-turn re-dings once).
 
 ## Core models
 - Persona : { name, role, about(=system prompt), task, avatar?, agent? }

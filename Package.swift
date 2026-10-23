@@ -31,12 +31,22 @@ let package = Package(
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
             .product(name: "Vapor", package: "vapor"),
             .product(name: "SQLite", package: "SQLite.swift"),
+        ],
+        // Isolated-run sanity flags — uncomment, `swift run openloop`, check checkpoints, comment back.
+        swiftSettings: [
+//            .define("ISOLATED_RUN_DBSIZE", .when(configuration: .debug)),
+//            .define("ISOLATED_RUN_NOTIF", .when(configuration: .debug)),
         ]
     ),
         .executableTarget(
             name: "openloop",
             dependencies: [
                 "shared",
+            ],
+            swiftSettings: [
+//                .define("ISOLATED_RUN_DBSIZE", .when(configuration: .debug)),
+//                .define("ISOLATED_RUN_NOTIF", .when(configuration: .debug)),
+//                .define("ISOLATED_RUN", .when(configuration: .debug)),
             ]
         ),
         .executableTarget(

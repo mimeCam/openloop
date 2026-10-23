@@ -340,6 +340,40 @@ document.addEventListener('DOMContentLoaded', function() {
         catch (e) { alert(`Could not ${action} instance — ${e.message}. Refreshing...`); fetchInstances(); }
     };
 
+    // ── DB size gauge + Clean old logs ──
+    const dbFilesHint = 'logs.db + logs.db-wal + logs.db-shm';
+    const dbWatchBytes = 500 * 1024 * 1024; // amber heads-up at half the 1 GB clean threshold
+    let cleaningPaths = new Set();
+
+    const cleanConfirmMessage = (sizeLabel) =>
+        `Clean old logs? All records and logs older than 1 month will be permanently deleted from this database (${sizeLabel}). This cannot be undone.`;
+
+    function cleanResultMessage(data) {
+        if (data.vacuumed === false) {
+            return 'Old logs were deleted, but the database file couldn’t be compacted while the instance was writing. Its size will settle on the next clean.';
+        }
+        if (typeof data.bytesReclaimed === 'number' && data.bytesReclaimed > 0) {
+            return `Old logs cleaned — reclaimed ${formatBytes(data.bytesReclaimed)}.`;
+        }
+        return 'Old logs cleaned.';
+    }
+
+    window.cleanOldLogs = async function(encodedPath, bytes) {
+        if (cleaningPaths.has(encodedPath)) return;
+        if (!confirm(cleanConfirmMessage(formatBytes(bytes)))) return;
+        cleaningPaths.add(encodedPath);
+        try {
+            const res = await fetch(`/api/instances/${encodedPath}/clean`, { method: 'POST' });
+            if (!res.ok) throw new Error(`Server responded ${res.status}`);
+            alert(cleanResultMessage(await res.json()));
+        } catch (e) {
+            alert(`Could not clean instance — ${e.message}. Refreshing...`);
+        } finally {
+            cleaningPaths.delete(encodedPath);
+            fetchInstances();
+        }
+    };
+
     function buildTreeFromPaths(instancesData) {
         // Build a map of path -> parentPath from API data
         const parentMap = {};
@@ -391,6 +425,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 manualCompleted: instanceData.manualCompleted || 0,
                 unreadNotifications: instanceData.unreadNotifications || 0,
                 graphMcpAuthMissing: instanceData.graphMcpAuthMissing || 0,
+                dbSizeBytes: instanceData.dbSizeBytes || 0,
+                needsClean: instanceData.needsClean === true,
                 depth: depth,
                 rootPath: rootPath,
                 parentPath: parentMap[path] || null,
@@ -580,14 +616,16 @@ document.addEventListener('DOMContentLoaded', function() {
             childCountHtml = `<span class="parent-child-count">${label}</span>`;
         }
 
+        const dbSizeHtml = getDbSizeHtml(instance);
+
         if (instance.expanded) {
             const personasHtml = renderPersonasHtml(instance.personas, instance.fullPath);
             const workflowsHtml = renderWorkflowsHtml(instance.workflows, instance.fullPath);
             expandedContentHtml = renderExpandedContentHtml(instance.fullPath, personasHtml, workflowsHtml);
         }
 
-        const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml || mcpWarnHtml)
-            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${mcpWarnHtml}${getNotificationsBadgeHtml(instance.fullPath, instance.unreadNotifications)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}</div>`
+        const badgesRowHtml = (personaCountHtml || workflowCountHtml || manualBadgesHtml || childCountHtml || mcpWarnHtml || dbSizeHtml)
+            ? `<div class="instance-badges">${getGraphLinkHtml(instance.fullPath)}${mcpWarnHtml}${getNotificationsBadgeHtml(instance.fullPath, instance.unreadNotifications)}${personaCountHtml}${workflowCountHtml}${manualBadgesHtml}${childCountHtml}${dbSizeHtml}</div>`
             : '';
 
         const iconSaturation = Math.max(25, 50 - depth * 8);
@@ -1496,6 +1534,41 @@ updates with the instance list, every ${instancePollSeconds} s`;
         if (completed > 0)
             html += '<span class="manual-count-done">Manual: ' + completed + ' done</span>';
         return html;
+    }
+
+    // 1024-based units — matches the server's 1 GiB threshold
+    function formatBytes(bytes) {
+        if (!bytes) return '';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0, n = bytes;
+        while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+        const decimals = i === 0 || n >= 10 ? 0 : 1;
+        return n.toFixed(decimals) + ' ' + units[i];
+    }
+
+    function dbSizeTooltip(bytes, needsClean) {
+        if (needsClean) return `${dbFilesHint} — over 1 GB; Clean removes logs older than 1 month`;
+        if (bytes >= dbWatchBytes) return `${dbFilesHint} — over half the 1 GB clean threshold`;
+        return dbFilesHint;
+    }
+
+    function getDbSizeHtml(instance) {
+        const bytes = instance.dbSizeBytes;
+        if (!bytes) return '';
+        const state = instance.needsClean ? 'over' : (bytes >= dbWatchBytes ? 'watch' : '');
+        const label = formatBytes(bytes);
+        const pill = `<span class="db-size ${state}" title="${escapeHtml(dbSizeTooltip(bytes, instance.needsClean))}"
+            aria-label="Database size ${label}"><span class="db-size-label">DB:</span><span class="db-size-value">${label}</span></span>`;
+        return `<span class="db-size-cluster">${pill}${getCleanBtnHtml(instance, bytes)}</span>`;
+    }
+
+    function getCleanBtnHtml(instance, bytes) {
+        if (!instance.needsClean) return '';
+        const enc = encodeURIComponent(instance.fullPath);
+        const inFlight = cleaningPaths.has(enc);
+        return `<button class="instance-action-btn danger clean-btn"${inFlight ? ' disabled' : ''}
+            aria-label="Clean logs older than 1 month"
+            onclick="event.stopPropagation(); cleanOldLogs('${enc}', ${bytes})">${inFlight ? 'Cleaning…' : 'Clean'}</button>`;
     }
 
     async function fetchPersonaLogs(path, personaId = null, offset = 0, count = 5) {

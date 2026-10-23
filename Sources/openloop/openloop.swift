@@ -15,6 +15,15 @@ private let log = PrintLog(module: "openloop")
 struct openloop: ParsableCommand {
 
     func run() throws {
+#if ISOLATED_RUN_DBSIZE
+        try testDbSizeFeature()
+#endif
+#if ISOLATED_RUN_NOTIF
+        try testNotificationCollapseFeature()
+#endif
+#if ISOLATED_RUN
+        Foundation.exit(0) // sanity check done — never start the launcher
+#endif
         Task.detached {
             do {
                 try await prepare()
