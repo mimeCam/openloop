@@ -185,15 +185,47 @@
         });
     }
 
+    // ── Duration grammar (shared by graph.js + workflow-log.js) ──────────────
+    // s is SECONDS — never ms, never a timestamp diff (that span includes the post-answer summarization pass).
+    const SECONDS_PER_MINUTE = 60;
+    const MINUTES_PER_HOUR = 60;
+    const MINUTES_ONLY_AFTER = 2 * SECONDS_PER_MINUTE;
+
+    function fmtDur(s) {
+        if (s == null || isNaN(s) || s < 0) return '';
+        if (s < SECONDS_PER_MINUTE) return s % 1 ? s.toFixed(1) + 's' : Math.round(s) + 's';
+        if (s < MINUTES_ONLY_AFTER) {
+            const r = Math.round(s % SECONDS_PER_MINUTE);
+            return r === SECONDS_PER_MINUTE ? '2m' : (r ? '1m ' + r + 's' : '1m'); // carry — never "1m 60s"
+        }
+        const m = Math.round(s / SECONDS_PER_MINUTE);
+        if (m < MINUTES_PER_HOUR) return m + 'm';
+        return m % MINUTES_PER_HOUR ? Math.floor(m / MINUTES_PER_HOUR) + 'h ' + (m % MINUTES_PER_HOUR) + 'm'
+            : Math.floor(m / MINUTES_PER_HOUR) + 'h';
+    }
+
     // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
     function runPanelSanityChecks() {
         checkClampPanelWidth();
         checkRestoreGuard();
         checkRevealOpts();
+        checkFmtDur();
         checkArmedButton();
         checkBindCmdEnterSubmit();
         checkBeaconIntoView();
         console.log('All panel sanity checks passed.');
+    }
+
+    // The duration grammar is pinned once here — the pages only pin their wiring.
+    function checkFmtDur() {
+        const f = fmtDur;
+        console.assert(f(null) === '' && f(undefined) === '' && f(-1) === '', 'fmtDur: in-flight/invalid guard → empty segment');
+        console.assert(f(3) === '3s' && f(59) === '59s' && f(2.5) === '2.5s', 'fmtDur: measurement regime — seconds, one decimal when fractional');
+        console.assert(f(60) === '1m' && f(90) === '1m 30s' && f(119) === '1m 59s', 'fmtDur: the 1m band keeps its seconds');
+        console.assert(f(119.6) === '2m' && f(119.9) === '2m', 'fmtDur: rounded r=60 carries into the next minute');
+        console.assert(f(120) === '2m' && f(125) === '2m' && f(150) === '3m', 'fmtDur: past 2m — rounded whole minutes, no seconds');
+        console.assert(f(3600) === '1h' && f(3660) === '1h 1m' && f(5400) === '1h 30m', 'fmtDur: hour tier always present');
+        console.log('OK: fmtDur');
     }
 
     function checkBindCmdEnterSubmit() {
@@ -309,6 +341,7 @@
         focusEditor: focusEditor,
         armedButton: armedButton,
         bindCmdEnterSubmit: bindCmdEnterSubmit,
+        fmtDur: fmtDur,
         runPanelSanityChecks: runPanelSanityChecks
     };
 

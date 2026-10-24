@@ -364,7 +364,7 @@
     // chain-head-only gate is gone (head == i === 0 died with it).
     function dotLabel(n) {
         const k = (n.personas || []).length;
-        const took = n.took != null ? ` · ${fmtDur(n.took)}` : '';
+        const took = n.took != null ? ` · ${OpenLoopPanel.fmtDur(n.took)}` : '';
         const name = n.name ? `${n.name} · ` : '';
         return `${name}${n.agent} · ${n.status}${took}${k ? ` · ${k} persona${k > 1 ? 's' : ''}` : ''}`;
     }
@@ -591,9 +591,9 @@
     }
 
     function headerDur(n) {
-        if (n.took != null) return fmtDur(n.took);
+        if (n.took != null) return OpenLoopPanel.fmtDur(n.took);
         if (n.status === 'progress') {
-            return fmtDur(Math.max(0, Math.round((Date.now() - n.created_at) / 1000)));
+            return OpenLoopPanel.fmtDur(Math.max(0, Math.round((Date.now() - n.created_at) / 1000)));
         }
         return '–';
     }
@@ -1074,7 +1074,7 @@
     }
 
     function panelHeader(n) {
-        const took = n.took != null ? ` · took ${fmtDur(n.took)}` : '';
+        const took = n.took != null ? ` · took ${OpenLoopPanel.fmtDur(n.took)}` : '';
         return `<div class="detail-panel-header">` +
             `<div class="detail-panel-accent"></div>` +
             panelTitleHtml(n, took) +
@@ -1351,7 +1351,7 @@
     }
 
     function runMeta(l) {
-        const took = l.took != null ? ` · took ${fmtDur(l.took)}` : '';
+        const took = l.took != null ? ` · took ${OpenLoopPanel.fmtDur(l.took)}` : '';
         return `${esc(l.status)}${took} · ${ago(l.created_at)}`;
     }
 
@@ -2381,12 +2381,6 @@
         return new Date(ms).toTimeString().slice(0, 8);
     }
 
-    function fmtDur(s) {
-        if (s == null) return '';
-        if (s < 60) return s + 's';
-        return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
-    }
-
     // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
     function runSanityChecks() {
         checkFmtDur();
@@ -2433,11 +2427,15 @@
         console.log('All sanity checks passed.');
     }
 
+    // The RULE lives in panel.js (checkFmtDur pins the full table — this page once carried a drifted twin); here we pin the wiring only.
     function checkFmtDur() {
-        console.assert(fmtDur(3)    === '3s',     'fmtDur: 3s');
-        console.assert(fmtDur(90)   === '1m 30s', 'fmtDur: 1m 30s');
-        console.assert(fmtDur(null) === '',       'fmtDur: null');
-        console.log('OK: fmtDur');
+        console.assert(OpenLoopPanel.fmtDur(90) === '1m 30s' && OpenLoopPanel.fmtDur(150) === '3m',
+            'fmtDur wiring: durations render via the shared OpenLoopPanel.fmtDur');
+        console.assert(headerDur({ took: null, status: 'progress', created_at: Date.now() - 190000 }).endsWith('3m'),
+            'fmtDur wiring: a running node older than 2m shows live rounded minutes');
+        console.assert(runMeta({ status: 'success', took: 150, created_at: Date.now() }).includes('took 3m'),
+            'fmtDur wiring: a >2m turn renders "took 3m" in the thread meta');
+        console.log('OK: fmtDur wiring');
     }
 
     function checkRunLogHtml() {

@@ -93,7 +93,7 @@ private func autopilot(ask: String, recorder: CleanupRecorder) async throws {
         throw W2Error("must run inside $HOME (got: \(cur.string))")
     }
 
-    ensureOpenloopDirs()
+    try ensureOpenloopDirs()
 
     let parent = topMostOpenloopAncestor()
     let inventory = collectInventory()
@@ -145,11 +145,14 @@ private func autopilot(ask: String, recorder: CleanupRecorder) async throws {
 
 // MARK: - Inventory
 
-private func ensureOpenloopDirs() {
+// real I/O — side effects must not hide inside assert() (debug-only)
+private func ensureOpenloopDirs() throws {
     let base = Paths.curDir.appending(Paths.dataFolderName)
     for sub in [personasFolder, knowledgeFolder, workflowsFolder] {
         let dir = base.appending(sub)
-        assert(PathIO.createDirectoryIfNotExists(atPath: dir.string), "failed to ensure \(dir)")
+        guard PathIO.createDirectoryIfNotExists(atPath: dir.string) else {
+            throw W2Error("failed to ensure \(dir.string)")
+        }
     }
 }
 
@@ -416,7 +419,9 @@ private func materialize(plan: Plan, ask: String, recorder: CleanupRecorder) asy
     let personasDir = Paths.curDir.appending(Paths.dataFolderName).appending(personasFolder)
     let knowledgeDir = Paths.curDir.appending(Paths.dataFolderName).appending(knowledgeFolder)
     for dir in [personasDir, knowledgeDir] {
-        assert(PathIO.createDirectoryIfNotExists(atPath: dir.string), "failed to create \(dir)")
+        guard PathIO.createDirectoryIfNotExists(atPath: dir.string) else {
+            throw W2Error("failed to create \(dir.string)")
+        }
     }
 
     for pid in plan.personaIds {
@@ -426,7 +431,9 @@ private func materialize(plan: Plan, ask: String, recorder: CleanupRecorder) asy
             continue
         }
         let kdir = knowledgeDir.appending(pid)
-        assert(PathIO.createDirectoryIfNotExists(atPath: kdir.string), "failed to create \(kdir)")
+        guard PathIO.createDirectoryIfNotExists(atPath: kdir.string) else {
+            throw W2Error("failed to create \(kdir.string)")
+        }
         try await fetchRemotePersona(remote: pid, outFile: personaFile, kdir: kdir)
         recorder.record(personaFile.string)
         recorder.record(kdir.string)
@@ -441,7 +448,9 @@ private func materialize(plan: Plan, ask: String, recorder: CleanupRecorder) asy
 
 private func writeWorkflow(_ wf: PlanWorkflow, ask: String, recorder: CleanupRecorder) async throws {
     let wfDir = Paths.curDir.appending(Paths.dataFolderName).appending(workflowsFolder)
-    assert(PathIO.createDirectoryIfNotExists(atPath: wfDir.string), "failed to create \(wfDir)")
+    guard PathIO.createDirectoryIfNotExists(atPath: wfDir.string) else {
+        throw W2Error("failed to create \(wfDir.string)")
+    }
     let wfFile = wfDir.appending(wf.id + dataFileSuffix)
     let workflow = Workflow(
         name: wf.resolvedName,

@@ -88,6 +88,8 @@ Personas — CRUD
                                                    avatar?, agent? }
   PUT    /api/instances/:id/personas/:pid   body: any subset (partial merge)
   DELETE /api/instances/:id/personas/:pid   → 204
+  POST also creates the persona's (empty) knowledge folder at
+  <instance>/.openloop/knowledge/<pid> — runs require it.
 
 Workflows — CRUD
   GET    /api/instances/:id/workflows       → { workflows:[{ id, name, desc, ask }] }
@@ -242,15 +244,17 @@ notification_kinds marker row written in the same transaction as the insert
   GET  /api/instances/:id/graph/sessions/:sid/logs → { logs:[Run…] }
        (sid = workflow session UUID; run 0 is the seeded original answer)
   POST /api/instances/:id/graph/sessions/:sid/run   body { prompt, parent_run_id }
-       → Run. Follow-up turn; re-executes the session's bottom-most persona
-       (agent re-resolved from its recorded name: project bin first, then
-       user local bin; unresolvable → 400). Gating mirrors node runs:
-       parent must be the thread tip with a summary (409 already-continued /
-       400 no-summary), thread empty → 409 seed first. Session must have a
-       successful run_ends row (409 otherwise). MCP scope = the union of
-       ALL the session's personas' assigned MCP servers (outer + inner
-       workflows, live from the graph at turn time); ctx.md knowledge stays
-       the tip persona's only.
+       → Run. Follow-up turn — a fully generic RUN item, the exact shape
+       node RUNs use: persona-free `_bottom_` args, agent = the workflow's
+       own (recorded on its run row, resolved like any graph agent;
+       unresolvable → 400). No persona knowledge or system prompt reaches
+       the turn — context = convo.md (thread summaries) + the workflow
+       parents' full outputs. Gating mirrors node runs: parent must be the
+       thread tip with a summary (409 already-continued / 400 no-summary),
+       thread empty → 409 seed first. Session must have a successful
+       run_ends row (409 otherwise). MCP scope = the union of ALL the
+       session's personas' assigned MCP servers (outer + inner workflows,
+       live from the graph at turn time).
   POST /api/instances/:id/graph/sessions/:sid/seed  → Run. Opt-in run 0:
        materializes the original answer (prompt = the session's original
        ask, output = tip persona output) and summarizes it. Empty/failed
@@ -259,7 +263,8 @@ notification_kinds marker row written in the same transaction as the insert
        Failed tips only (400), no children (409), not in flight (409).
        A failed run that still holds output (seed / interrupted summary)
        retries the summarization only. Re-executed turns get the same
-       union MCP scope as the run route above.
+       union MCP scope and the same generic `_bottom_` shape as the run
+       route above.
   DELETE /api/instances/:id/graph/sessions/:sid/runs/:rid → { logs:[…] }
        One turn splices out with the same semantics as the node-route DELETE
        above (follow-ups move up to the deleted run's parent; an emptied

@@ -9,6 +9,14 @@
     let items = [];
     const ISOLATED_RUN = false; // flip to true to run sanity checks in DevTools
 
+    // ── list filter — multi-word AND over title / instance_path / ask ──
+    const FETCH_LIMIT = 100;
+    const ANNOUNCE_DELAY_MS = 400;
+    // TODO: filter — no ?q= URL persistence yet
+    let query = '';
+    let fetchCapReached = false;
+    let announceTimer = 0;
+
     // ── prompt disclosure (grammar cloned from graph.js renderBubble) ──
     const PROMPT_THRESHOLD = 300; // ≈3 wrapped lines at 12px — same figure as graph.js renderBubble default
     // expandKeys the user opened, kept outside the DOM so rows survive the
@@ -24,6 +32,58 @@
         const d = document.createElement('div');
         d.textContent = s ?? '';
         return d.innerHTML.replace(/"/g, '&quot;');
+    }
+
+    // ── filter helpers ──
+    // TODO: filter — scoped mode (?instance=) drops the path chip, so a path-only match shows no highlight
+    const queryTokens = q => q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+
+    const notifText = n => `${n.title} ${n.instance_path} ${n.prompt || ''}`.toLowerCase();
+
+    const matches = (n, tokens) => {
+        if (!tokens.length) return true;
+        const hay = notifText(n);
+        return tokens.every(t => hay.includes(t));
+    };
+
+    // earliest hit of any token at/after pos — greedy left-to-right, so overlapping tokens never nest
+    function firstHit(s, pos, tokens) {
+        let best = null;
+        for (const t of tokens) {
+            const i = s.indexOf(t, pos);
+            if (i !== -1 && (best === null || i < best.i)) best = { i, t };
+        }
+        return best;
+    }
+
+    // escape-first: split on hits, esc() every chunk — hostile text stays inert
+    // TODO: promote hl()/esc() to a shared asset the day a second page needs it
+    function hl(text, tokens) {
+        const low = text.toLowerCase();
+        let out = '', pos = 0;
+        for (;;) {
+            const hit = firstHit(low, pos, tokens);
+            if (!hit) return out + esc(text.slice(pos));
+            out += esc(text.slice(pos, hit.i)) +
+                `<mark class="hl">${esc(text.slice(hit.i, hit.i + hit.t.length))}</mark>`;
+            pos = hit.i + hit.t.length;
+        }
+    }
+
+    const chipHidesHit = (n, tokens) => {
+        const short = shortPath(n.instance_path).toLowerCase();
+        return tokens.some(t => n.instance_path.toLowerCase().includes(t) && !short.includes(t));
+    };
+
+    // mirrors isLongPrompt's clamp clauses
+    const clampHead = p => p.split('\n').slice(0, 3).join('\n').slice(0, PROMPT_THRESHOLD);
+
+    function promptHitState(p, tokens) {
+        if (!tokens.length) return 'none';
+        const low = p.toLowerCase();
+        if (!tokens.some(t => low.includes(t))) return 'none';
+        const head = clampHead(p).toLowerCase();
+        return tokens.some(t => head.includes(t)) ? 'visible' : 'below-fold';
     }
 
     const instBase = inst => `/api/instances/${encodeURIComponent(inst)}/notifications`;
@@ -47,17 +107,17 @@
     }
 
     async function loadOne(inst) {
-        return (await fetchJson(`${instBase(inst)}?limit=100`)).items || [];
+        const list = (await fetchJson(`${instBase(inst)}?limit=${FETCH_LIMIT}`)).items;
+        console.assert(Array.isArray(list), 'loadOne: .items is contract-guaranteed (NotificationsResponse)');
+        if (list.length >= FETCH_LIMIT) fetchCapReached = true;
+        return list;
     }
 
     async function loadAll() {
         const data = await fetchJson('/api/instances');
+        console.assert(Array.isArray(data.instances), 'loadAll: .instances is contract-guaranteed (InstanceListResponse)');
         const lists = await Promise.all(
-            (data.instances || []).map(i =>
-                fetchJson(`${instBase(i.path)}?limit=100`)
-                    .then(r => r.items || [])
-                    .catch(() => [])
-            )
+            data.instances.map(i => loadOne(i.path).catch(() => []))
         );
         return lists.flat().sort((a, b) => b.ended_at - a.ended_at);
     }
@@ -69,7 +129,8 @@
     let lastRunningTotal = 0;
 
     function scopedInstances(data, param) {
-        const all = data.instances || [];
+        console.assert(Array.isArray(data.instances), 'scopedInstances: .instances is contract-guaranteed (InstanceListResponse)');
+        const all = data.instances;
         return param ? all.filter(i => i.path === param) : all;
     }
 
@@ -118,12 +179,33 @@
 
     function render() {
         renderHeader();
-        if (!items.length) {
-            $('list').innerHTML = emptyHtml();
-            return;
-        }
-        $('list').innerHTML = items.map(rowHtml).join('');
+        const tokens = queryTokens(query);
+        const visible = tokens.length ? items.filter(n => matches(n, tokens)) : items;
+        renderFilterChrome(visible, tokens);
+        $('list').innerHTML = listHtml(visible, tokens);
         bindRows();
+    }
+
+    function listHtml(visible, tokens) {
+        if (!items.length) return emptyHtml();
+        if (!visible.length) return noMatchHtml(tokens);
+        return (tokens.length ? statusHtml(visible) : '') + visible.map(rowHtml).join('');
+    }
+
+    function renderFilterChrome(visible, tokens) {
+        $('filter-input').disabled = !items.length && !tokens.length;
+        announceFilter(visible, tokens);
+    }
+
+    function announceFilter(visible, tokens) {
+        clearTimeout(announceTimer);
+        announceTimer = setTimeout(announce, ANNOUNCE_DELAY_MS, visible, tokens);
+    }
+
+    function announce(visible, tokens) {
+        const q = tokens.join(' ');
+        $('filter-live').textContent = !tokens.length ? '' :
+            visible.length ? `${visible.length} results for “${q}”` : `No results for “${q}”`;
     }
 
     function emptyHtml() {
@@ -132,6 +214,35 @@
             `<div class="empty-title">All caught up</div>` +
             `<div class="empty-hint">Finished workflows, follow-ups and node runs land here. Updates every ${POLL_SECONDS} s.</div>` +
             `</div>`;
+    }
+
+    function statusHtml(visible) {
+        const set = new Set(visible);
+        const hiddenUnread = items.filter(n => !n.read && !set.has(n)).length;
+        return `<div class="filter-status">Showing ${visible.length} of ${items.length}` +
+            (hiddenUnread ? ` · ${hiddenUnread} unread hidden` : '') +
+            ` · <button class="filter-clear" type="button">clear</button></div>`;
+    }
+
+    function noMatchHtml(tokens) {
+        return `<div class="empty">` +
+            `<div class="empty-icon" aria-hidden="true">${searchXIcon()}</div>` +
+            `<div class="empty-title">No matches for “${esc(tokens.join(' '))}”</div>` +
+            `<div class="empty-hint">Every word must appear in the workflow or node name, the project path, or your ask.</div>` +
+            noMatchNotes() +
+            `<button class="mark-all-btn visible filter-clear" type="button">Clear filter</button>` +
+            `</div>`;
+    }
+
+    function noMatchNotes() {
+        const unread = items.filter(n => !n.read).length;
+        const cap = fetchCapReached ? `Only the newest ${FETCH_LIMIT} items per instance are loaded — older items aren't searched.` : '';
+        return (cap ? `<div class="empty-hint">${cap}</div>` : '') +
+            (unread ? `<div class="empty-hint">${unread} unread hidden by this filter.</div>` : '');
+    }
+
+    function searchXIcon() {
+        return '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m13.5 8.5-5 5"/><path d="m8.5 8.5 5 5"/><path d="m21 21-4.3-4.3"/></svg>';
     }
 
     function bellIcon() {
@@ -155,11 +266,14 @@
     }
 
     function headHtml(n, scoped = !!instanceParam) {
+        const tokens = queryTokens(query);
+        const full = !scoped && tokens.length && chipHidesHit(n, tokens);
+        const label = full ? n.instance_path : shortPath(n.instance_path);
         const chip = scoped ? '' :
-            `<span class="notif-path" title="${esc(n.instance_path)}">${esc(shortPath(n.instance_path))}</span>` +
+            `<span class="notif-path" title="${esc(n.instance_path)}">${hl(label, tokens)}</span>` +
             `<span class="notif-sep" aria-hidden="true">·</span>`;
         return `<div class="notif-head">${chip}` +
-            `<span class="notif-title"><a href="${deepLink(n)}" target="_blank" rel="noopener">${esc(n.title)}</a></span>` +
+            `<span class="notif-title"><a href="${deepLink(n)}" target="_blank" rel="noopener">${hl(n.title, tokens)}</a></span>` +
             `</div>`;
     }
 
@@ -188,12 +302,16 @@
 
     // Sole render site of the user's ask. The clamp is CSS-only — the full
     // text always ships in the markup (screen readers get everything); JS
-    // never substrings user text.
+    // never substrings user text. Clamp math stays on the raw string —
+    // highlighted HTML is longer than the text it wraps.
     function promptHtml(n) {
         if (!n.prompt) return '';
-        if (expanded.has(expandKey(n))) return `<div class="notif-prompt expanded">${esc(n.prompt)}</div>`;
-        if (!isLongPrompt(n.prompt)) return `<div class="notif-prompt">${esc(n.prompt)}</div>`;
-        return `<div class="notif-prompt truncated" title="${esc(n.prompt)}">${esc(n.prompt)}</div>` +
+        const tokens = queryTokens(query);
+        if (expanded.has(expandKey(n))) return `<div class="notif-prompt expanded">${hl(n.prompt, tokens)}</div>`;
+        if (!isLongPrompt(n.prompt)) return `<div class="notif-prompt">${hl(n.prompt, tokens)}</div>`;
+        if (promptHitState(n.prompt, tokens) === 'below-fold')
+            return `<div class="notif-prompt expanded">${hl(n.prompt, tokens)}</div>`;
+        return `<div class="notif-prompt truncated" title="${esc(n.prompt)}">${hl(n.prompt, tokens)}</div>` +
             `<button class="notif-more" data-key="${esc(expandKey(n))}">show more</button>`;
     }
 
@@ -261,17 +379,21 @@
     }
 
     function bindRows() {
-        $('list').querySelectorAll('.mark-read-btn').forEach(btn =>
+        const root = $('list');
+        root.querySelectorAll('.mark-read-btn').forEach(btn =>
             btn.addEventListener('click', () => markRead(btn.dataset)));
-        // "open ↗" doubles as the read receipt — target="_blank" lets the mark POST ride along with navigation.
-        $('list').querySelectorAll('.notif-open').forEach(a =>
-            a.addEventListener('click', () => {
-                const n = items.find(x => x.id === a.dataset.ref && x.instance_path === a.dataset.inst);
-                if (n && !n.read) markRead(a.dataset);
-            }));
-        $('list').querySelectorAll('.notif-more').forEach(btn =>
+        root.querySelectorAll('.notif-open').forEach(bindOpenMarksRead);
+        root.querySelectorAll('.notif-more').forEach(btn =>
             btn.addEventListener('click', () => expandPrompt(btn)));
+        root.querySelectorAll('.filter-clear').forEach(btn =>
+            btn.addEventListener('click', clearFilter));
         $('mark-all').onclick = markAllRead;
+    }
+
+    // "open ↗" doubles as the read receipt — target="_blank" lets the mark POST ride along with navigation.
+    function bindOpenMarksRead(a) {
+        const n = items.find(x => x.id === a.dataset.ref && x.instance_path === a.dataset.inst);
+        if (n && !n.read) markRead(a.dataset);
     }
 
     // One-way reveal: remember the key (so the next poll re-render keeps it
@@ -310,6 +432,61 @@
         }
     }
 
+    // ── filter wiring ──
+    function bindFilter() {
+        const input = $('filter-input');
+        // FETCH_LIMIT owns the cap — the tooltip must never hardcode it
+        input.title = `Searches loaded notifications — newest ${FETCH_LIMIT} per instance.
+Multiple words: every word must match somewhere.
+Press / to focus · Esc to clear`;
+        input.addEventListener('input', () => { applyQuery(input.value); trimFilter(input); });
+        input.addEventListener('keydown', onFilterKey);
+        $('filter-x').addEventListener('click', clearFilter);
+        document.addEventListener('keydown', onGlobalKey);
+    }
+
+    function applyQuery(q) {
+        if (q === query) return;
+        const was = queryTokens(query).length > 0, now = queryTokens(q).length > 0;
+        query = q;
+        if (!was && now) scrollTop();
+        $('list').classList.toggle('fade-in', was && !now);
+        render();
+    }
+
+    function trimFilter(input) {
+        input.closest('.filter-wrap').classList.toggle('armed', input.value !== '');
+    }
+
+    function onFilterKey(e) {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        if (e.target.value) { e.target.value = ''; applyQuery(''); trimFilter(e.target); }
+        else e.target.blur();
+    }
+
+    function clearFilter() {
+        const input = $('filter-input');
+        input.value = '';
+        input.focus();
+        applyQuery('');
+        trimFilter(input);
+    }
+
+    function onGlobalKey(e) {
+        if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+        const tag = document.activeElement?.tagName;
+        if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
+        e.preventDefault();
+        const input = $('filter-input');
+        if (!input.disabled) { input.focus(); input.select(); }
+    }
+
+    function scrollTop() {
+        const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+        window.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+    }
+
     // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
     function runSanityChecks() {
         checkDeepLink();
@@ -317,6 +494,9 @@
         checkOpenMarksRead();
         checkRunningBadge();
         checkHeroLayout();
+        checkFilterMatch();
+        checkFilterHighlight();
+        checkFilterRender();
         console.log('All sanity checks passed.');
     }
 
@@ -448,6 +628,76 @@
         console.log('OK: hero layout');
     }
 
+    // ── filter sanity (the 5 checks above must stay green UNMODIFIED) ──
+    function checkFilterMatch() {
+        const n = { title: 'Deploy Migration', instance_path: '/x/y/Demo', prompt: 'fix the C++ build' };
+        const t = q => queryTokens(q);
+        console.assert(JSON.stringify(t('  Fix  DIGEST ')) === '["fix","digest"]',
+            'queryTokens: split on whitespace, lowercase, drop empties');
+        console.assert(matches(n, t('fix build')) && matches(n, t('DEMO MIGRATION')),
+            'matches: multi-word AND across fields, case-insensitive both directions');
+        console.assert(!matches(n, t('digest')) && !matches(n, t('(deploy)?')),
+            'matches: absent word (or regex-shaped literal) filters the row out');
+        console.assert(matches(n, t('C++')),
+            'matches: literal text, never a RegExp — C++ finds C++');
+        console.assert(matches(n, []),
+            'matches: [] ⇒ filter off — old render path byte-identical');
+        console.assert(notifText({ title: 'A', instance_path: 'B', prompt: null }) === 'a b ',
+            'notifText: null prompt tolerated');
+        console.log('OK: filter match');
+    }
+
+    function checkFilterHighlight() {
+        const mark = s => `<mark class="hl">${esc(s)}</mark>`;
+        const t = q => queryTokens(q);
+        console.assert(hl('Fix the deploy', t('fix DEPLOY')) === `${mark('Fix')} the ${mark('deploy')}`,
+            'hl: hits marked, source casing kept, query case ignored');
+        console.assert(hl('abc', []) === esc('abc') && hl('', t('x')) === '',
+            'hl: identity hl(s,[])===esc(s) — the regression pin; empty text safe');
+        const both = hl('deploy ploy', t('deploy ploy'));
+        console.assert(both === `${mark('deploy')} ${mark('ploy')}`,
+            'hl: overlapping tokens never nest — greedy left-to-right');
+        const hostile = hl('<script>x</script> deploy', t('script'));
+        const stripped = hostile.replace(/<\/?mark[^>]*>/g, '');
+        console.assert(!hostile.includes('<script') && stripped === esc('<script>x</script> deploy'),
+            'hl: hostile item text stays escaped inside and around marks');
+        const hostileQuery = hl('a<b>c', t('<b>'));
+        console.assert(!hostileQuery.includes('<b>'),
+            'hl: html-shaped query treated as literal text, rendered inert');
+        console.log('OK: filter highlight');
+    }
+
+    function checkFilterRender() {
+        const savedItems = items, savedQuery = query;
+        const base = { kind: 'node_run', node_id: 'n1', success: true, took: 1, ended_at: 1, read: false };
+        items = [
+            { ...base, id: 'r1', instance_path: '/x/deep/project', title: 'deploy-migration', prompt: 'x'.repeat(301) },
+            { ...base, id: 'r2', instance_path: '/x/y/other', title: 'unrelated', read: true, prompt: 'a'.repeat(301) + ' deploy' }
+        ];
+        query = 'deep';
+        const tokens = queryTokens(query);
+        console.assert(chipHidesHit(items[0], tokens) && !chipHidesHit(items[1], tokens),
+            'render: path hit hidden by the short chip detected');
+        const row = rowHtml(items[0]);
+        console.assert(!row.includes('>…/project<') && row.includes('<mark class="hl">deep</mark>'),
+            'render: hidden path hit reveals full path, glowing');
+        console.assert(row.includes('notif-prompt truncated') && row.includes('data-key="/x/deep/project/r1"'),
+            'render: clamp math untouched — hitless prompt keeps show-more + same key');
+        query = 'deploy';
+        const row2 = rowHtml(items[1]);
+        console.assert(row2.includes('<mark class="hl">deploy</mark>') &&
+            row2.includes('notif-prompt expanded') && !row2.includes('notif-more') &&
+            !expanded.has('/x/y/other/r2'),
+            'render: hit below the fold auto-expands (derived; expanded Set untouched)');
+        query = 'zzz';
+        const no = noMatchHtml(queryTokens(query));
+        console.assert(no.includes('No matches for “zzz”') && no.includes('Clear filter'),
+            'render: no-match state echoes the query and offers the escape hatch');
+        query = savedQuery;
+        items = savedItems;
+        console.log('OK: filter render');
+    }
+
     if (ISOLATED_RUN) runSanityChecks();
-    else { renderScope(); load(); setInterval(load, POLL_SECONDS * 1000); }
+    else { renderScope(); bindFilter(); load(); setInterval(load, POLL_SECONDS * 1000); }
 })();

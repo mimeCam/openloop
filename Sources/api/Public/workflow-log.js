@@ -138,7 +138,7 @@
         renderToolbar(data);
         const { tiers, avg } = computeSpeedTiers(logs);
         currentTiers = tiers;
-        document.getElementById('wl-avg-duration').textContent = `avg: ${formatDuration(avg)}`;
+        document.getElementById('wl-avg-duration').textContent = `avg: ${OpenLoopPanel.fmtDur(avg)}`;
         placeNodes(data.levels, logs, tiers);
         const nodeMap = buildNodeMap();
         currentLogs = logs;
@@ -226,7 +226,7 @@
         return `<div class="node-card-header">` +
             personaAvatar(name) +
             `<span class="node-card-name">${escHtml(name)}</span>` +
-            `<div class="node-card-meta"><span class="node-card-dur">${formatDuration(log.took)}</span></div>` +
+            `<div class="node-card-meta"><span class="node-card-dur">${OpenLoopPanel.fmtDur(log.took)}</span></div>` +
             `</div>`;
     }
 
@@ -314,7 +314,7 @@
                personaAvatar(log.personaId) +
                `<div class="detail-panel-title">` +
                `<div class="detail-panel-name">${name}</div>` +
-               `<div class="detail-panel-meta">${formatDuration(log.took)}</div>` +
+               `<div class="detail-panel-meta">took ${OpenLoopPanel.fmtDur(log.took)}</div>` +
                `</div>` +
                `<button class="detail-panel-close" aria-label="Close details">\u2715</button>` +
                `</div>`;
@@ -723,7 +723,7 @@
     }
 
     function threadRunMeta(l) {
-        const took = l.took != null ? ` · took ${formatDuration(l.took)}` : '';
+        const took = l.took != null ? ` · took ${OpenLoopPanel.fmtDur(l.took)}` : '';
         return `${l.status}${took} · ${ago(l.created_at)}`;
     }
 
@@ -1081,15 +1081,7 @@
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-    function formatDuration(s) {
-        if (s < 60) return s % 1 === 0 ? `${Math.round(s)}s` : `${s.toFixed(1)}s`;
-        const m = Math.floor(s / 60);
-        const r = Math.round(s % 60);
-        if (m < 60) return r ? `${m}m ${r}s` : `${m}m`;
-        const h = Math.floor(m / 60);
-        const rm = m % 60;
-        return rm ? `${h}h ${rm}m` : `${h}h`;
-    }
+    // duration formatting lives in panel.js (OpenLoopPanel.fmtDur) — the two pages' private twins drifted apart once
 
     function computeSpeedTiers(logs) {
         if (!logs.length) return { tiers: new Map(), avg: 0 };
@@ -1207,14 +1199,13 @@
         console.log('OK: renderDetailHeader');
     }
 
+    // The RULE lives in panel.js (checkFmtDur pins the full table); this pins the wiring only.
     function checkFormatDuration() {
-        console.assert(formatDuration(3)     === '3s',     'formatDuration: 3s');
-        console.assert(formatDuration(2.5)   === '2.5s',   'formatDuration: 2.5s');
-        console.assert(formatDuration(60)    === '1m',     'formatDuration: 1m');
-        console.assert(formatDuration(90)    === '1m 30s', 'formatDuration: 1m 30s');
-        console.assert(formatDuration(3600)  === '1h',     'formatDuration: 1h');
-        console.assert(formatDuration(3720)  === '1h 2m',  'formatDuration: 1h 2m');
-        console.log('OK: formatDuration');
+        console.assert(OpenLoopPanel.fmtDur(2.5) === '2.5s',
+            'formatDuration wiring: shared helper reachable, decimals keep one place');
+        console.assert(threadRunMeta({ status: 'success', took: 150, created_at: Date.now() }).includes('took 3m'),
+            'formatDuration wiring: a >2m turn renders "took 3m" in the thread meta');
+        console.log('OK: formatDuration wiring');
     }
 
     function checkRenderDetailBubbles() {

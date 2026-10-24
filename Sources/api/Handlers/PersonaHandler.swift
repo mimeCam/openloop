@@ -149,7 +149,9 @@ struct PersonaHandler: Sendable {
         let knowledgeDir = Paths.objectsRoot(forInstance: instancePath)
             .appending("knowledge")
             .appending(personaId)
-        _ = PathIO.createDirectoryIfNotExists(atPath: knowledgeDir.string)
+        guard PathIO.createDirectoryIfNotExists(atPath: knowledgeDir.string) else {
+            throw Abort(.internalServerError, reason: "failed to create knowledge folder: \(knowledgeDir.string)")
+        }
         
         return PersonaResponse(
             instance_id: instancePath,

@@ -9,7 +9,6 @@ import shared
 
 private let runnerEnvSidecarSuffix = ".env"
 private let baseScriptVariants: Set<String> = ["base", "swift", "swiftbridge"]
-private let noKnowledgeSentinel = "_bottom_"
 private let agentBinaryPrefix = "openloop_"
 
 private actor GraphRunRegistry {
@@ -308,11 +307,6 @@ private extension GraphHandler {
         guard file.hasPrefix(agentBinaryPrefix), !file.hasSuffix(runnerEnvSidecarSuffix) else { return false }
         guard let variant = dockerVariant(of: file.dropFirst(agentBinaryPrefix.count)) else { return false }
         return !baseScriptVariants.contains(variant)
-    }
-
-    func isBaseScript(_ bare: String) -> Bool {
-        guard let variant = dockerVariant(of: bare[...]) else { return false }
-        return baseScriptVariants.contains(variant)
     }
 
     func dockerVariant(of bare: Substring) -> String? {
@@ -1007,9 +1001,9 @@ private extension GraphHandler {
 
     /// The session's bottom-most persona log — the synthesized `_bottom_`
     /// completion or the single persona of the last level (max by level,
-    /// then start time). Follow-ups re-execute this persona, so agent,
-    /// about, knowledge and parents are all derived from this row. Exactly
-    /// one such row exists per successful session.
+    /// then start time). Follow-ups derive only the parent context (and the
+    /// seed run's output) from this row — the agent comes from the workflow.
+    /// Exactly one such row exists per successful session.
     func sessionTip(_ session: String, at instancePath: String) throws -> RunLog {
         let personaLogs = try LogManager.fetchLogsBySession(
             instancePath: instancePath, session: session
@@ -1022,22 +1016,6 @@ private extension GraphHandler {
         return tip
     }
 
-    func sessionTipContext(_ tip: RunLog, instancePath: String) async -> SessionTipContext {
-        let personaId = tip.personaId ?? "_bottom_"
-        let parents = sessionParents(tip)
-        guard isRealSessionPersona(personaId) else {
-            return SessionTipContext(
-                personaId: personaId, knowledgePath: "", about: "", parents: parents
-            )
-        }
-        return SessionTipContext(
-            personaId: personaId,
-            knowledgePath: sessionKnowledgePath(personaId, instancePath: instancePath),
-            about: (await sessionPersona(personaId, instancePath: instancePath))?.about ?? "",
-            parents: parents
-        )
-    }
-
     /// The tip persona's direct graph parents' full outputs, as recorded by
     /// the runner — the same facts a fresh workflow run feeds the persona,
     /// materialized as parent-<id>.md context files.
@@ -1047,62 +1025,29 @@ private extension GraphHandler {
         }
     }
 
-    func sessionPersona(_ id: String, instancePath: String) async -> Persona? {
-        guard let fp = FileLoader.resolvePersonaFile(id: id, from: FilePath(instancePath)) else {
-            return nil
+    /// The workflow's own agent, from its run row (not the workflow file) — sessions must outlive workflow edits and deletions.
+    func sessionWorkflowAgent(_ end: RunEnd, session: String, at instancePath: String) throws -> String {
+        guard let agent = try LogManager.fetchLogsBySession(instancePath: instancePath, session: session)
+            .first(where: { $0.personaId == nil && $0.workflowId == end.workflowId })?
+            .agent,
+            agent.notEmpty else {
+            throw Abort(.conflict, reason: "No workflow row for this session")
         }
-        return try? await FileLoader.loadPersonaAtPath(fp)
+        return agent
     }
 
-    /// Knowledge dir resolution mirroring the runner's resolveKnowledgePath,
-    /// anchored at the instance. "" when none exists — the runner's own
-    /// convention for project-bin-agent personas.
-    func sessionKnowledgePath(_ personaId: String, instancePath: String) -> String {
-        FileLoader.resolveKnowledgeDir(id: personaId, from: FilePath(instancePath))?.string ?? ""
-    }
-
-    /// The tip's recorded agent name is whichever form the runner resolved
-    /// at run time: a bare project-bin name ("cc_docker"), or an "openloop_x"
-    /// user-local-bin / workflow-fallback name. Normalize to the bare name
-    /// and resolve with the runner's tier order — project bin first, then
-    /// user local bin. No workflow fallback: an unresolvable agent is a 400,
-    /// not a silent wrong-agent run.
-    func resolveSessionScript(for recordedAgent: String, instancePath: String) throws -> FilePath {
-        let bare = recordedAgent.hasPrefix(agentBinaryPrefix)
-            ? String(recordedAgent.dropFirst(agentBinaryPrefix.count))
-            : recordedAgent
-        guard bare.notEmpty else {
-            throw Abort(.badRequest, reason: "Unknown agent: \(recordedAgent)")
-        }
-        guard !isBaseScript(bare) else {
-            throw Abort(
-                .badRequest,
-                reason: "Agent \(recordedAgent) is a base container script (needs image/suffix args) — set the persona's agent to a variant script"
-            )
-        }
-        for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            let project = dir.appending(Paths.dataFolderName).appending("bin").appending(bare)
-            if PathIO.isFileExistent(atPath: project.string) { return project }
-        }
-        let user = Paths.bin.appending("\(agentBinaryPrefix)\(bare)")
-        if PathIO.isFileExistent(atPath: user.string) { return user }
-        throw Abort(.badRequest, reason: "Unknown agent: \(recordedAgent)")
-    }
-
-    /// Persona knowledge + MCPs collected across the instance → home chain,
-    /// like the runner's collectContext (parent-instance nodes count).
-    func sessionPersonaContext(
+    /// Persona MCPs collected across the instance → home chain, like the
+    /// runner's collectContext (parent-instance nodes count). Texts are
+    /// dropped on purpose — follow-up turns are knowledge-free.
+    func sessionPersonaMcps(
         personaId: String, instancePath: String
-    ) throws -> GraphStore.PersonaContext {
-        guard isRealSessionPersona(personaId) else { return .empty }
-        var texts: [String] = []
+    ) throws -> Set<GraphMcpEndpoint> {
+        guard isRealSessionPersona(personaId) else { return [] }
         var mcps = Set<GraphMcpEndpoint>()
         for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            let ctx = try GraphStore.personaContext(personaId: personaId, at: dir.string)
-            texts.append(contentsOf: ctx.texts)
-            mcps.formUnion(ctx.mcps)
+            mcps.formUnion(try GraphStore.personaContext(personaId: personaId, at: dir.string).mcps)
         }
-        return GraphStore.PersonaContext(texts: texts, mcps: mcps)
+        return mcps
     }
 
     /// The session's full MCP surface: union over ALL its personas (outer + inner), collected across the instance → home chain.
@@ -1114,7 +1059,7 @@ private extension GraphHandler {
         )
         var mcps = Set<GraphMcpEndpoint>()
         for id in personaIds {
-            mcps.formUnion(try sessionPersonaContext(personaId: id, instancePath: instancePath).mcps)
+            mcps.formUnion(try sessionPersonaMcps(personaId: id, instancePath: instancePath))
         }
         return mcps
     }
@@ -1154,27 +1099,23 @@ private extension GraphHandler {
         return run
     }
 
-    /// Seeds the run's context dir: ctx.md (persona knowledge via
-    /// personaContext — a virtual session anchor has no assigned-node chain
-    /// of its own), convo.md (thread summaries up to the parent), and one
-    /// parent-<persona>.md per parent with its full output, referenced via @
-    /// from the exec prompt.
+    /// Seeds the run's context dir: convo.md (thread summaries up to the
+    /// parent) and one parent-<persona>.md per parent with its full output,
+    /// referenced via @ from the exec prompt. No ctx.md — turns are
+    /// knowledge-free by decision: the tip persona's summaries would steer
+    /// the follow-up reasoning the user is trying to redirect.
     func writeSessionContext(
-        _ tip: SessionTipContext,
-        personaCtx: GraphStore.PersonaContext,
+        parents: [SessionParent],
         parent: GraphRunLog?,
         logs: [GraphRunLog],
         id: String
     ) throws {
         let dir = try runDir(id)
-        _ = try writeIfNotEmpty(
-            personaCtx.texts.joined(separator: "\n\n---\n\n"), in: dir, name: "ctx.md"
-        )
         if let parent {
             let text = GraphStore.runSummaries(GraphStore.runChain(of: parent, in: logs))
             _ = try writeIfNotEmpty(text, in: dir, name: "convo.md")
         }
-        for parentOutput in tip.parents {
+        for parentOutput in parents {
             _ = try GraphStore.writeContextFile(
                 parentOutput.text, in: dir, fileName: "parent-\(fileSafeId(parentOutput.id)).md"
             )
@@ -1191,12 +1132,14 @@ private extension GraphHandler {
         let tipLog = try sessionTip(session, at: instancePath)
         let logs = try GraphStore.fetchRunLogs(nodeId: session, at: instancePath)
         let parent = try sessionParentRun(parentRunId, logs: logs)
-        let script = try resolveSessionScript(for: tipLog.agent, instancePath: instancePath)
-        let tip = await sessionTipContext(tipLog, instancePath: instancePath)
-        let personaCtx = try sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
+        let script = try resolveScript(
+            for: try sessionWorkflowAgent(end, session: session, at: instancePath)
+        )
         let logId = UUID().uuidString
-        try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: logId)
-        // MCP scope = union over ALL session personas; ctx.md stays tip-persona-only — swap the argument, never the whole context.
+        try writeSessionContext(
+            parents: sessionParents(tipLog), parent: parent, logs: logs, id: logId
+        )
+        // MCP scope = union over ALL session personas — the persona-free `_bottom_` run's only tool surface.
         let mcpPath = GraphStore.writeMcpConfig(
             try sessionMcpUnion(session: session, at: instancePath), runId: logId
         )
@@ -1210,7 +1153,7 @@ private extension GraphHandler {
         )
         Task.detached {
             await executeSessionRun(SessionRunExecution(
-                log: log, tip: tip, script: script,
+                log: log, script: script,
                 instancePath: instancePath, mcpPath: mcpPath, resumeOutput: false
             ))
         }
@@ -1238,7 +1181,9 @@ private extension GraphHandler {
         guard tipLog.msg.output.notEmpty else {
             throw Abort(.conflict, reason: "Tip persona log has no output")
         }
-        let script = try resolveSessionScript(for: tipLog.agent, instancePath: instancePath)
+        let script = try resolveScript(
+            for: try sessionWorkflowAgent(end, session: session, at: instancePath)
+        )
         let logId = UUID().uuidString
         // completed_at is set at insert: while the summarization runs the row
         // stays invisible to notifications (status filter), and the moment
@@ -1263,15 +1208,15 @@ private extension GraphHandler {
 
     /// Session-scoped retry — the node route 404s on session UUIDs
     /// (findNode). Mirrors the node-retry contract (failed tips only, no
-    /// children, not in flight); the agent is re-derived from the session's
-    /// tip persona log (GraphRunLog stores no agent). A failed run that
-    /// still holds its output (a seeded run-0, or a summarization the sweep
-    /// interrupted) retries the summarization only — the answer exists.
+    /// children, not in flight); the agent is the workflow's own
+    /// (sessionWorkflowAgent — GraphRunLog stores no agent). A failed run
+    /// that still holds its output (a seeded run-0, or a summarization the
+    /// sweep interrupted) retries the summarization only — the answer exists.
     func retrySessionRunLog(
         session: String, runId: String, at instancePath: String
     ) async throws -> GraphRunLogContent {
         try GraphStore.createTables(at: instancePath)
-        _ = try sessionRunEnd(session, at: instancePath)
+        let end = try sessionRunEnd(session, at: instancePath)
         let tipLog = try sessionTip(session, at: instancePath)
         let logs = try GraphStore.fetchRunLogs(nodeId: session, at: instancePath)
         guard let run = logs.first(where: { $0.id == runId }) else {
@@ -1286,11 +1231,13 @@ private extension GraphHandler {
         if await graphRunRegistry.isLive(runId) {
             throw Abort(.conflict, reason: "Restart already in flight")
         }
-        let script = try resolveSessionScript(for: tipLog.agent, instancePath: instancePath)
-        let tip = await sessionTipContext(tipLog, instancePath: instancePath)
-        let personaCtx = try sessionPersonaContext(personaId: tip.personaId, instancePath: instancePath)
+        let script = try resolveScript(
+            for: try sessionWorkflowAgent(end, session: session, at: instancePath)
+        )
         let parent = run.parentRunId.flatMap { pid in logs.first { $0.id == pid } }
-        try writeSessionContext(tip, personaCtx: personaCtx, parent: parent, logs: logs, id: run.id)
+        try writeSessionContext(
+            parents: sessionParents(tipLog), parent: parent, logs: logs, id: run.id
+        )
         // Same union scope as sessionRunLog — retry must not regress it.
         let mcpPath = GraphStore.writeMcpConfig(
             try sessionMcpUnion(session: session, at: instancePath), runId: run.id
@@ -1299,7 +1246,7 @@ private extension GraphHandler {
         try GraphStore.restartRunLog(id: run.id, at: instancePath)
         Task.detached {
             await executeSessionRun(SessionRunExecution(
-                log: run, tip: tip, script: script,
+                log: run, script: script,
                 instancePath: instancePath, mcpPath: mcpPath,
                 resumeOutput: (run.output ?? "").notEmpty
             ))
@@ -1325,19 +1272,8 @@ private struct SessionParent: Sendable, Equatable {
     let text: String
 }
 
-/// The session's tip persona facts, captured before the run detaches.
-private struct SessionTipContext: Sendable, Equatable {
-    let personaId: String
-    /// "" when none resolved (the runner's project-bin-agent convention).
-    let knowledgePath: String
-    /// System prompt — real personas only.
-    let about: String
-    let parents: [SessionParent]
-}
-
 private struct SessionRunExecution: Sendable {
     let log: GraphRunLog
-    let tip: SessionTipContext
     let script: FilePath
     let instancePath: String
     let mcpPath: String?
@@ -1357,8 +1293,9 @@ private func fileSafeId(_ id: String) -> String {
     })
 }
 
-/// The session RUN engine — executeRunLog with session-specific arg shape
-/// (persona fidelity) and prompt prefix (ctx/convo/parent file refs).
+/// The session RUN engine — executeRunLog with the SAME generic `_bottom_`
+/// arg shape node RUNs use (runArgs); only the prompt prefix differs
+/// (convo/parent file refs).
 private func executeSessionRun(_ run: SessionRunExecution) async {
     let tb = TimedBenchmark()
     let out = run.resumeOutput
@@ -1390,32 +1327,18 @@ private func execSessionRun(_ run: SessionRunExecution) async -> String? {
     let env = runEnv(mcpPath: run.mcpPath, runDir: GraphStore.contextRunDir(run.log.id))
     return try? await exec(
         run.script.string,
-        args: sessionRunArgs(run),
+        args: runArgs(try sessionExecPrompt(run), run.instancePath),
         chroot: run.instancePath,
         env: env
     )
 }
 
-/// Arg shapes mirror the runner's tip-persona invocation: real personas get
-/// root dir + knowledge path + prompt + about (system prompt); the
-/// synthesized bottom gets the node-RUN 3-arg shape (no persona context).
-private func sessionRunArgs(_ run: SessionRunExecution) throws -> [String] {
-    let root = topInstanceDir(run.instancePath)
-    let prompt = try sessionExecPrompt(run)
-    guard isRealSessionPersona(run.tip.personaId) else {
-        assert(run.tip.knowledgePath.isEmpty && run.tip.about.isEmpty, "synthesized personas carry no knowledge/about context")
-        return [root, run.tip.personaId, prompt]
-    }
-    let knowledge = run.tip.knowledgePath.notEmpty ? run.tip.knowledgePath : noKnowledgeSentinel
-    return [root, knowledge, prompt, run.tip.about]
-}
-
 /// The stored prompt stays clean for UI display; the exec prompt prefixes
-/// ctx.md/convo.md references (like node RUNs) plus one line referencing the
-/// parents' full-output files.
+/// the convo.md reference (like node RUNs) plus one line referencing the
+/// parents' full-output files. No ctx.md — turns are knowledge-free by
+/// decision.
 private func sessionExecPrompt(_ run: SessionRunExecution) throws -> String {
-    var prefix = runFile(run.log.id, "ctx.md") != nil ? ctxFileLine : ""
-    if runFile(run.log.id, "convo.md") != nil { prefix += convoFileLine }
+    var prefix = runFile(run.log.id, "convo.md") != nil ? convoFileLine : ""
     let parents = try parentContextFileNames(run.log.id)
     if parents.notEmpty {
         let refs = parents
