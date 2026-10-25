@@ -230,6 +230,7 @@ INNER_CMD="$CLAUDE_CMD > /tmp/_cc_out 2>/dev/null; [ -s \"$ROOT/_my/report.md\" 
 if [ "$use_tier" = true ]; then
     $DOCKER run --rm \
         --init --pids-limit=500 \
+        -p 53714:53714 \
         -v /etc/localtime:/etc/localtime:ro \
         -e ANTHROPIC_LOG=error \
         -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
@@ -248,6 +249,7 @@ if [ "$use_tier" = true ]; then
 else
     $DOCKER run --rm \
         --init --pids-limit=500 \
+        -p 53714:53714 \
         -v /etc/localtime:/etc/localtime:ro \
         -e ANTHROPIC_LOG=error \
         -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \

@@ -13,7 +13,14 @@
   "personas" : [
   "isolated_run",
   "designer",
-  "architect"
+  "architect",
+  "fun_jason_cohen",
+  "fun_jason_fried",
+  "fun_elon_critique",
+  "fun_sid_coder",
+  "code_other",
+  "code_cleaner",
+  "code_safe"
 ],
   "mcp" : null,
   "mcp_requires_auth" : false,

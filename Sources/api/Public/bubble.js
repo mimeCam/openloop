@@ -1,5 +1,10 @@
 // bubble.js — shared text-reveal grammar (graph.html + workflow-log.html)
 //
+// Owns the bubble markup (text + fold door + copy button) AND its two
+// delegated behaviors: the door (bindExpand) and the copy tap (bindCopy —
+// clipboard API with an execCommand fallback, so copy works on insecure
+// origins too). Pages bind both once at init; every re-render is covered.
+//
 // The rule is visual, not typographic: a text that paints in FREE_LINES
 // (10) lines or fewer where it lives is shown in full, no chrome; one that
 // paints in more folds to CLAMP_LINES (3) lines and offers one quiet
@@ -52,6 +57,12 @@
         return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
             `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
             `<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>` +
+            `</svg>`;
+    }
+
+    function checkIcon() {
+        return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">` +
+            `<path d="M20 6L9 17l-5-5"/>` +
             `</svg>`;
     }
 
@@ -123,6 +134,62 @@
         (root || document).addEventListener('click', onDoorTap, true);
     }
 
+    // ── Copy ──────────────────────────────────────────────────────────────────
+    // bubbleHtml() renders the copy button, so bubble.js owns its tap too —
+    // one delegated binding per page (same contract as bindExpand: capture
+    // phase, survives every innerHTML rewrite, covers every surface that
+    // ever emits a bubble, including sub-section swaps that re-render in
+    // place). Both pages once carried private twins here and they drifted:
+    // graph.js had the clipboard fallback + error surface, workflow-log.js
+    // called navigator.clipboard.writeText bare — which THROWS on any
+    // insecure origin (http on a LAN IP/hostname: navigator.clipboard is
+    // undefined there) and every copy button on the page dies silently.
+
+    function bindCopy(root, onError) {
+        (root || document).addEventListener('click', e => onCopyTap(e, onError), true);
+    }
+
+    function onCopyTap(e, onError) {
+        const btn = e.target.closest ? e.target.closest('.wl-bubble-copy') : null;
+        if (!btn) return;
+        e.stopPropagation(); // a copy tap copies — it must never also select the card/open the panel behind it
+        const text = btn.closest('.wl-bubble')?.querySelector('.wl-bubble-text')?.textContent;
+        if (text == null) return;
+        flashCopyState(btn, copyText(text), onError);
+    }
+
+    function flashCopyState(btn, write, onError) {
+        btn.innerHTML = checkIcon();
+        clearTimeout(btn.copyTimer);
+        write.then(
+            () => { btn.copyTimer = setTimeout(() => { btn.innerHTML = copyIcon(); }, 2000); },
+            () => {
+                btn.innerHTML = copyIcon();
+                if (onError) onError('Copy failed — clipboard unavailable');
+            }
+        );
+    }
+
+    // Clipboard API when the context has it (https / localhost), execCommand
+    // textarea fallback when it doesn't — the API object simply does not
+    // exist on insecure origins, and the fallback is the only copy dialect
+    // that works there.
+    function copyText(text) {
+        if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+        return legacyCopy(text);
+    }
+
+    function legacyCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
+    }
+
     function onDoorTap(e) {
         const btn = e.target.closest ? e.target.closest('.wl-expand-btn') : null;
         if (!btn || btn.hidden) return;
@@ -184,6 +251,7 @@
         }
         checkLineGate();
         checkDoorOpens();
+        checkCopyTap();
         checkSnapshotMemory();
         console.log('All bubble sanity checks passed.');
     }
@@ -273,6 +341,37 @@
         console.log('OK: door opens in place, is consumed, hands focus off');
     }
 
+    // The copy tap: delegated + capture-phase, so it writes the bubble's
+    // text and never reaches a click-target card behind it. writeText is
+    // stubbed for determinism (DevTools); the promise rejection path is
+    // exercised by hand on an insecure origin.
+    function checkCopyTap() {
+        const host = probeHost();
+        const errors = [];
+        bindCopy(host, msg => errors.push(msg));
+        let cardTaps = 0;
+        const card = document.createElement('div');
+        card.addEventListener('click', () => cardTaps++); // the cell's selectNode stand-in
+        card.innerHTML = bubbleHtml('output', 'copy me');
+        host.appendChild(card);
+        const btn = card.querySelector('.wl-bubble-copy');
+        let wrote = null;
+        try {
+            Object.defineProperty(navigator, 'clipboard', {
+                configurable: true,
+                value: { writeText: t => { wrote = t; return Promise.resolve(); } }
+            });
+            btn.click();
+        } finally {
+            delete navigator.clipboard; // own property gone → prototype getter (or absence) restored
+        }
+        console.assert(wrote === 'copy me', 'copy: the tap writes the bubble text');
+        console.assert(cardTaps === 0, 'copy: the tap never reaches the card');
+        console.assert(errors.length === 0, 'copy: a successful write reports no error');
+        host.remove();
+        console.log('OK: copy tap (delegated, silent to the card, writes the text)');
+    }
+
     function checkSnapshotMemory() {
         const host = probeHost();
         bindExpand(host);
@@ -301,6 +400,8 @@
         isOverLimit: isOverLimit,
         gateBubbles: gateBubbles,
         bindExpand: bindExpand,
+        bindCopy: bindCopy,
+        copyText: copyText,
         snapshotExpansion: snapshotExpansion,
         restoreExpansion: restoreExpansion,
         expansionKey: expansionKey,

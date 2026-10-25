@@ -6,7 +6,7 @@
   "took" : 11,
   "completed_at" : 813838119.879342,
   "name" : "what is openloop",
-  "summary" : "openloop is an open-source Swift-based AI agent orchestrator (shared on GitHub) with three core components — openloop, runner, and api — plus a shared library, enabling repeatable multi-agent workflows that mix agents like claude-code, opencode, mistral-vibe.",
+  "summary" : "openloop is an open-source Swift-based AI agent orchestrator (shared on GitHub) with three core components — openloop, runner, and api — plus a shared library, enabling repeatable multi-agent workflows that mix agents like claude-code, opencode, mistral-vibe.\n\n(Very) Important note on the execution state: personas, knowledge, workflows, nodes, secrets.json5 are all input, while `logs.db` is execution state and always sits in the running project's `.openloop` — the share is never a running project. \nGood to remember caveat: input state also has special global source: `~/.local/share/openloop`, this folder is treated differently - it can never contain db or mutation state there - execution logs are always saved to project's `.openloop/*` folder, independently of where the workflow/persona/node coming from, whether it is current project or parent or even global `share/openloop`.\nDo not make a mistake and make code write to `~/.local/share/openloop`.",
   "prompt" : "Hey this is `openloop` project folder, it is also shared on github and is open.",
   "status" : "success",
   "active" : true,

@@ -622,7 +622,6 @@
         bindCards(grid);
         bindRunButtons(grid);
         bindInsertButtons(grid);
-        bindCopyButtons(grid);
         bindAvatarFallbacks(grid);
         markSelectedCard(grid);
     }
@@ -864,7 +863,6 @@
         bindRetryButton(n);
         bindNewRunButtons(n);
         bindDeleteButtons();
-        bindCopyButtons($('detail-panel-inner'));
         bindAvatarFallbacks($('detail-panel-inner'));
         loadLogs(n.id);
     }
@@ -1321,7 +1319,6 @@
         el.innerHTML = notice + (roots.length
             ? roots.map(l => runLogHtml(l, logs)).join('')
             : '<div class="summary-missing">no runs yet</div>');
-        bindCopyButtons(el);
         bindRunFocusButtons(el);
         bindRunThreadDelete(el);
         OpenLoopBubble.restoreExpansion(el, snap);
@@ -1535,7 +1532,6 @@
 
     function bindThreadMessages(el) {
         if (!el) return;
-        bindCopyButtons(el);
         bindSummaryEdit(el);
         bindRunDelete(el);
     }
@@ -1664,6 +1660,9 @@
             section.innerHTML = summarySectionInner(updated);
             OpenLoopBubble.gateBubbles(section); // the swapped-in bubble needs its gate
             bindSummaryEdit(section);
+            // no bindCopyButtons here by design: the delegated copy tap
+            // (bubble.js bindCopy, bound once at init) covers swapped-in
+            // bubbles — this swap once left a dead copy button behind
         }
     }
 
@@ -2322,60 +2321,11 @@
             OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', n.output || '(empty)') + again + `</div>`;
     }
 
-    // The bubble grammar (markup, the line gate, the door, expansion memory)
-    // lives in bubble.js, shared with workflow-log.html — the char-gated
-    // renderBubble this file used to carry is gone.
-
-    function bindCopyButtons(container) {
-        container.querySelectorAll('.wl-bubble-copy').forEach(btn => {
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                const text = btn.closest('.wl-bubble').querySelector('.wl-bubble-text').textContent;
-                flashCopyState(btn, copyText(text));
-            });
-        });
-    }
-
-    function flashCopyState(btn, write) {
-        btn.innerHTML = checkIcon();
-        clearTimeout(btn.copyTimer);
-        write.then(
-            () => { btn.copyTimer = setTimeout(() => { btn.innerHTML = copyIcon(); }, 2000); },
-            () => {
-                btn.innerHTML = copyIcon();
-                showError('Copy failed — clipboard unavailable');
-            }
-        );
-    }
-
-    function copyText(text) {
-        if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
-        return legacyCopy(text);
-    }
-
-    function legacyCopy(text) {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.cssText = 'position:fixed;opacity:0';
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand('copy');
-        ta.remove();
-        return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
-    }
-
-    function copyIcon() {
-        return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
-            `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
-            `<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>` +
-            `</svg>`;
-    }
-
-    function checkIcon() {
-        return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">` +
-            `<path d="M20 6L9 17l-5-5"/>` +
-            `</svg>`;
-    }
+    // The bubble grammar (markup, the line gate, the door, expansion memory,
+    // and the copy tap) lives in bubble.js, shared with workflow-log.html —
+    // the char-gated renderBubble and the per-render bindCopyButtons this
+    // file used to carry are gone. Copy is bound ONCE at init
+    // (OpenLoopBubble.bindCopy), delegation covering every surface.
 
     function fmtTime(ms) {
         return new Date(ms).toTimeString().slice(0, 8);
@@ -3301,6 +3251,10 @@
             // delegation — see bubble.js: a cell's door must open the fold,
             // not the panel).
             OpenLoopBubble.bindExpand();
+            // One copy listener, same contract: bubble.js renders the copy
+            // button, so it owns the tap — including the execCommand fallback
+            // for insecure origins and every re-rendered/swapped-in bubble.
+            OpenLoopBubble.bindCopy(null, showError);
             bindCanvasDismiss();
             // Panel physics (clamp, drag, mobile sheet) live in panel.js,
             // shared with workflow-log.html. Shared width memory:

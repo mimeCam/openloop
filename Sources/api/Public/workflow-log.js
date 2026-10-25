@@ -51,6 +51,9 @@
         // One door listener for both panel modes (persona view + follow-up
         // thread), bound once — the old per-open handlers stacked.
         OpenLoopBubble.bindExpand();
+        // One copy listener, same contract — with the execCommand fallback
+        // for insecure origins and the error surface this page never had.
+        OpenLoopBubble.bindCopy(null, showError);
         // Width and webfont arrival change how many lines a text paints —
         // re-gate the panel once geometry settles (never mid-drag).
         document.addEventListener('openloop:panel-resized', regatePanelBubbles);
@@ -183,7 +186,6 @@
     }
 
     function bindCards(grid) {
-        bindCopyButtons(grid);
         bindCardHover(grid);
         bindCardClick(grid);
         bindAvatarFallbacks(grid);
@@ -234,18 +236,10 @@
         return '';
     }
 
-    function bindCopyButtons(container) {
-        container.querySelectorAll('.wl-bubble-copy').forEach(btn => {
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                const text = btn.closest('.wl-bubble').querySelector('.wl-bubble-text').textContent;
-                navigator.clipboard.writeText(text).then(() => {
-                    btn.innerHTML = checkIcon();
-                    setTimeout(() => { btn.innerHTML = copyIcon(); }, 1500);
-                });
-            });
-        });
-    }
+    // Copy buttons: markup AND behavior live in bubble.js (bindCopy, bound
+    // once at init) — this file's per-render twin called
+    // navigator.clipboard.writeText bare, which throws on insecure origins
+    // (http on a LAN IP/hostname) and left every copy button dead.
 
     function bindCardHover(container) {
         container.querySelectorAll('.node-card').forEach(card => {
@@ -285,7 +279,6 @@
         panel.classList.add('open');
         document.getElementById('graph-canvas').classList.add('panel-open');
         panel.querySelector('.detail-panel-close').addEventListener('click', closeDetailPanel);
-        bindCopyButtons(panel);
         bindAvatarFallbacks(panel);
     }
 
@@ -697,7 +690,6 @@
             : '<div class="summary-missing">No follow-up turns yet.</div>';
         OpenLoopBubble.restoreExpansion(el, snap);
         OpenLoopBubble.gateBubbles(el);
-        bindCopyButtons(el);
         el.querySelectorAll('.summary-edit-btn').forEach(btn =>
             btn.addEventListener('click', () => startThreadSummaryEdit(btn.dataset.runId)));
         bindThreadDelete(el);
@@ -1133,19 +1125,6 @@
         });
     }
 
-
-    function copyIcon() {
-        return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">` +
-            `<rect x="9" y="9" width="13" height="13" rx="2"/>` +
-            `<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>` +
-            `</svg>`;
-    }
-
-    function checkIcon() {
-        return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">` +
-            `<path d="M20 6L9 17l-5-5"/>` +
-            `</svg>`;
-    }
 
     function sendIcon() {
         return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
