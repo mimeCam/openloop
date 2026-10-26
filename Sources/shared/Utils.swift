@@ -56,17 +56,18 @@ public struct Paths {
     public static let share = local
         .appending("share")
 
-    public static let globalShare = share
+    /// The machine-wide openloop share folder: the global input library, and
+    /// a perfectly normal project folder when a worker is registered there.
+    public static let globalShareRoot = share.appending("openloop")
 
-    // User-global (system-wide) objects root, last-resort lookup — no `.openloop` wrapper inside it.
-    public static let globalOpenloop = share.appending("openloop")
+    /// User-global (system-wide) objects root, last-resort lookup — the
+    /// share's own `.openloop`, the same wrapper rule as every project.
+    public static let globalOpenloop = globalShareRoot.appending(dataFolderName)
 
-    // `<instance>/.openloop` for projects; the root itself for the synthetic global-share instance.
+    /// `<instance>/.openloop` — one rule for projects and the share alike.
     public static func objectsRoot(forInstance instancePath: String) -> FilePath {
         assert(instancePath.notEmpty)
-        return FilePath(instancePath) == globalOpenloop
-            ? globalOpenloop
-            : FilePath(instancePath).appending(dataFolderName)
+        return FilePath(instancePath).appending(dataFolderName)
     }
 
     public static let tmpRoot = local
@@ -129,6 +130,21 @@ public struct Paths {
             cur = parent
         }
         return result
+    }
+
+    /// Instance-folder ladder for persona-context lookups: the start folder,
+    /// its parents toward home, then the user-global share folder LAST —
+    /// nearest wins. The share is appended only when the walk did not
+    /// already reach it: a worker registered at the share (the walk starts
+    /// there) or a project nested under it must not read the global content
+    /// twice. All entries are INSTANCE folders — no `.openloop` suffix; each
+    /// consumer appends the wrapper itself (same units as `dirsToHome`).
+    public static func contextLookupDirs(
+        from start: FilePath,
+        globalRoot: FilePath = Paths.globalShareRoot
+    ) -> [FilePath] {
+        let walked = dirsToHome(from: start)
+        return walked.contains(globalRoot) ? walked : walked + [globalRoot]
     }
 }
 

@@ -15,7 +15,10 @@ extension Request {
     func validatedInstancePath() async throws -> String {
         let id = try routeParam("id")
         var known = try await Launcher.listWorkers()
-        known.append(Paths.globalOpenloop.string)
+        // The share folder is a legal instance even with no worker
+        // registered there (bookmarked graph/persona editing) — as an
+        // INSTANCE dir, not its `.openloop` (handlers append the wrapper).
+        known.append(Paths.globalShareRoot.string)
         guard known.contains(id), PathIO.isDirectoryExistent(atPath: id) else { throw Abort(.notFound) }
         return id
     }

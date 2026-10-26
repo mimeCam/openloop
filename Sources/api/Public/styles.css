@@ -375,6 +375,36 @@ body {
     box-shadow: var(--shadow-md);
 }
 
+/* ── Create-global cell (home page, last slot) ──
+   Amber to match the Global (system-wide) sections; dashed + hollow icon
+   because the share doesn't exist yet — it's an offer, not an instance. */
+.create-global-row {
+    cursor: default;
+    border-style: dashed;
+    border-color: hsl(38, 45%, 74%);
+    background: hsl(38, 40%, 97%);
+}
+
+.create-global-row:hover {
+    transform: none;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Two classes so this beats the later-defined .instance-icon gradient. */
+.instance-icon.create-global-icon {
+    background: none;
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    color: hsl(38, 55%, 58%);
+    -webkit-text-fill-color: hsl(38, 55%, 58%);
+}
+
+.create-global-hint {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
 .instance-header {
     display: flex;
     align-items: center;

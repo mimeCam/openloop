@@ -84,6 +84,12 @@ private func configure(_ app: Application) async throws {
     instances.post(":id", "clean") { req async throws in
         try await InstanceHandler().clean(req: req)
     }
+    // Global-share provisioning — the home page's create cell POSTs here
+    // when no worker is registered at the share (the handler re-checks and
+    // 409s otherwise, so the route is safe to call blind).
+    instances.post("global", "create") { req async throws in
+        try await InstanceHandler().createGlobalShare(req: req)
+    }
 
     // Workflows endpoints
     instances.grouped(":id", "workflows").get { req async throws in

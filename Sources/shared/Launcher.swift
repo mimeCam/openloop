@@ -48,12 +48,20 @@ public extension Launcher {
         let serviceName = Naming.apiServiceName
         let stdout = Paths.share
             .appending("openloop")
-//            .appending(dataFolderName)
+//            .appending(Paths.dataFolderName)
             .appending("api-stdout.log")
         let stderr = Paths.share
             .appending("openloop")
-//            .appending(dataFolderName)
+//            .appending(Paths.dataFolderName)
             .appending("api-stderr.log")
+
+        // The plist/unit points Standard{Out,Error} at files inside the
+        // share folder — launchd silently drops output and systemd fails
+        // the service when that folder is missing, so it must exist BEFORE
+        // the service config is written.
+        _ = PathIO.createDirectoryIfNotExists(
+            atPath: Paths.globalShareRoot.string
+        )
 
         #if os(macOS)
         try await registerLaunchAgent(

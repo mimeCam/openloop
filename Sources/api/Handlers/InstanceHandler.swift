@@ -1,6 +1,11 @@
 import Vapor
 import Foundation
 import shared
+#if canImport(System)
+@preconcurrency import System
+#else
+@preconcurrency import SystemPackage
+#endif
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -38,6 +43,12 @@ struct InstanceHandler: Sendable {
             let runningRuns = GraphStore.countRunningRunLogs(at: path)
             let dbSize = LogManager.dbFilesSize(at: path)
 
+            // A worker registered AT the share IS the global instance — it
+            // carries the flag (other projects' home-page views render it as
+            // the "Global (system-wide)" section; its own cell renders like
+            // any other project) instead of the dropped synthetic row.
+            let isGlobalShare = FilePath(path) == Paths.globalShareRoot
+
             instances.append(InstanceInfo(
                 path: path,
                 parentPath: nil,
@@ -45,6 +56,7 @@ struct InstanceHandler: Sendable {
                 manualActive: manualActive,
                 manualCompleted: manualCompleted,
                 unreadNotifications: Notifications.unreadCount(at: path),
+                isGlobalShare: isGlobalShare,
                 configEnabled: svcStatus.configEnabled,
                 processRunning: svcStatus.processRunning,
                 graphMcpAuthMissing: GraphStore.mcpAuthMissingCount(at: path),
@@ -54,19 +66,6 @@ struct InstanceHandler: Sendable {
                 needsClean: dbSize >= LogManager.cleanThresholdBytes
             ))
         }
-
-        // Synthetic instance for user-global shared personas/workflows
-        let globalDbSize = LogManager.dbFilesSize(at: Paths.globalOpenloop.string)
-        instances.append(InstanceInfo(
-            path: Paths.globalOpenloop.string,
-            parentPath: nil,
-            state: nil,
-            manualActive: 0,
-            manualCompleted: 0,
-            isGlobalShare: true,
-            dbSizeBytes: globalDbSize,
-            needsClean: globalDbSize >= LogManager.cleanThresholdBytes
-        ))
 
         let parentPaths = computeParentPaths(
             instances.map { $0.path }
@@ -82,6 +81,47 @@ struct InstanceHandler: Sendable {
     func launch(req: Request) async throws -> Response {
         let id = try extractValidatedId(req: req)
         try await Launcher.launchWorker(workingDirectory: id)
+        return Response(status: .ok)
+    }
+
+    /// The home page's create cell (shown when no worker sits at the share):
+    /// makes the machine-wide share a real project. The api only creates the
+    /// empty share folder (service configs refuse a missing working
+    /// directory) and registers + starts the worker — the `openloop` binary
+    /// the service manager starts, exactly like the launch route's Start
+    /// button, does the provisioning itself: the `.openloop` skeleton, then
+    /// the worker loop. Nothing else ever manufactures the share.
+    func createGlobalShare(req: Request) async throws -> Response {
+        let workers = try await Launcher.listWorkers()
+        let alreadyRegistered = workers.contains { FilePath($0) == Paths.globalShareRoot }
+        guard !alreadyRegistered else {
+            throw Abort(.conflict, reason: "Global share worker is already registered")
+        }
+
+        // A pre-rename leftover makes the worker exit at boot with migration
+        // steps nobody would ever see (its stderr log cannot even exist yet)
+        // — surface it here instead.
+        let legacy = Paths.globalShareRoot.appending(Paths.legacyDataFolderName)
+        let modern = Paths.globalShareRoot.appending(Paths.dataFolderName)
+        if PathIO.isDirectoryExistent(atPath: legacy.string),
+           !PathIO.isDirectoryExistent(atPath: modern.string) {
+            throw Abort(.conflict, reason: "Legacy \(legacy.string) exists — rename it to \(modern.string) first, then create again")
+        }
+
+        let binary = Paths.bin.appending("openloop")
+        guard PathIO.isFileExistent(atPath: binary.string) else {
+            throw Abort(.internalServerError, reason: "openloop binary not found at \(binary.string)")
+        }
+
+        guard PathIO.createDirectoryIfNotExists(atPath: Paths.globalShareRoot.string) else {
+            throw Abort(.internalServerError, reason: "Could not create \(Paths.globalShareRoot.string)")
+        }
+
+        try await Launcher.registerWorker(
+            workingDirectory: Paths.globalShareRoot,
+            binaryPath: binary
+        )
+        try await Launcher.launchWorker(workingDirectory: Paths.globalShareRoot.string)
         return Response(status: .ok)
     }
 

@@ -236,10 +236,10 @@ private extension Error {
     }
 }
 
-// The global share is a shared library, never a run target — runs execute in the launching project's `.openloop`.
+// The global share is a shared library, never a manual run target — manual runs execute in the launching project's `.openloop`.
 private func throwIfGlobalShare(_ instancePath: String) throws {
     assert(instancePath.notEmpty)
-    guard FilePath(instancePath) != Paths.globalOpenloop else {
+    guard FilePath(instancePath) != Paths.globalShareRoot else {
         throw Abort(
             .conflict,
             reason: "Global share is a shared library, not a run target — launch the workflow from a project instance so it runs and logs in that project"

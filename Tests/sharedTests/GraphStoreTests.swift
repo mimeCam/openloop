@@ -41,6 +41,39 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(Set(try remaining().keys), ["b"])
     }
 
+    // ── nearestWinsMcpUnion: the cross-folder MCP merge — nearest folder
+    // owns a URL's auth, no ghost `host-2` duplicate survives. ───────────
+
+    func endpoint(_ url: String, _ auth: String?) -> GraphMcpEndpoint {
+        GraphMcpEndpoint(url: url, auth: auth)
+    }
+
+    func testNearestWinsMcpUnionTakesFirstAuthPerUrl() {
+        let near: Set<GraphMcpEndpoint> = [
+            endpoint("https://a.example", "near"),
+            endpoint("https://b.example", "only-near"),
+        ]
+        let far: Set<GraphMcpEndpoint> = [
+            endpoint("https://a.example", "far"),
+            endpoint("https://c.example", nil),
+        ]
+        let merged = GraphStore.nearestWinsMcpUnion([near, far])
+        XCTAssertEqual(merged.count, 3, "one entry per URL, the loser must not survive as a duplicate")
+        XCTAssertEqual(merged.first { $0.url == "https://a.example" }?.auth, "near")
+        XCTAssertEqual(merged.first { $0.url == "https://b.example" }?.auth, "only-near")
+        XCTAssertNil(merged.first { $0.url == "https://c.example" }?.auth)
+    }
+
+    func testNearestWinsMcpUnionOverEmptyFoldersKeepsEverything() {
+        let global: Set<GraphMcpEndpoint> = [endpoint("https://g.example", "k")]
+        let merged = GraphStore.nearestWinsMcpUnion([[], global, []])
+        XCTAssertEqual(merged, global)
+    }
+
+    func testNearestWinsMcpUnionEmptyInputIsEmpty() {
+        XCTAssertTrue(GraphStore.nearestWinsMcpUnion([]).isEmpty)
+    }
+
     func testDeleteMidChainBridgesChildrenToGrandparent() throws {
         try insert(node("a", nil), node("b", "a"), node("c", "b"))
         try GraphStore.deleteNode(id: "b", at: path)

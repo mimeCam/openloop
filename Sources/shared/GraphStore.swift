@@ -645,6 +645,24 @@ public struct GraphStore {
         })
     }
 
+    /// URL-deduped union of per-folder endpoint sets, NEAREST FOLDER WINS:
+    /// `perDir` must be ordered nearest-first (see
+    /// `Paths.contextLookupDirs`), and the first folder to contribute a URL
+    /// owns its auth — two folders holding different keys for the same URL
+    /// must not surface the loser as a ghost `host-2` server in the run's
+    /// mcp config (which plain `formUnion` would keep).
+    public static func nearestWinsMcpUnion(
+        _ perDir: [Set<GraphMcpEndpoint>]
+    ) -> Set<GraphMcpEndpoint> {
+        var byUrl: [String: GraphMcpEndpoint] = [:]
+        for set in perDir {
+            for endpoint in set where byUrl[endpoint.url] == nil {
+                byUrl[endpoint.url] = endpoint
+            }
+        }
+        return Set(byUrl.values)
+    }
+
     public static let containerCtxDir = "/context"
 
     public static func contextRunDir(_ runId: String) -> FilePath {

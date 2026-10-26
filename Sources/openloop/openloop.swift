@@ -87,13 +87,32 @@ private func prepareFolders() {
     )
     assert(created0)
 
-    let curDirOpenloop = Paths.curDir.appending(Paths.dataFolderName)
-    let created10 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.string
-    )
-    assert(created10)
+    prepareInstanceFolders(at: Paths.curDir)
 
-    let gitignorePath = curDirOpenloop.appending(".gitignore")
+    // Provision the user-global (system-wide) input folders only when the
+    // share folder already exists — `openloop` running in a normal project
+    // must never manufacture a global library for a user who never had one
+    // (the api log folder and a hand-created share both count as "had one").
+    // Running AT the share needs no second pass: the branch above prepared
+    // the very same folders.
+    let shareRoot = Paths.globalShareRoot
+    if shareRoot != Paths.curDir,
+       PathIO.isDirectoryExistent(atPath: shareRoot.string) {
+        prepareInstanceFolders(at: shareRoot)
+    }
+}
+
+/// `<root>/.openloop` skeleton shared by every instance — projects and the
+/// global share alike (same wrapper, same layout): content folders, `bin`
+/// and the state-shielding `.gitignore` (logs, state, secrets never commit).
+private func prepareInstanceFolders(at root: FilePath) {
+    let openloop = root.appending(Paths.dataFolderName)
+    let createdRoot = PathIO.createDirectoryIfNotExists(
+        atPath: openloop.string
+    )
+    assert(createdRoot)
+
+    let gitignorePath = openloop.appending(".gitignore")
     if !PathIO.isFileExistent(atPath: gitignorePath.string) {
         let createdGitignore = FileManager.default.createFile(
             atPath: gitignorePath.string,
@@ -108,45 +127,12 @@ private func prepareFolders() {
         ensureGitignoreLine("secrets.json5", at: gitignorePath)
     }
 
-    let created11 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.appending("workflows").string
-    )
-    assert(created11)
-    let created12 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.appending("personas").string
-    )
-    assert(created12)
-    let created13 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.appending("knowledge").string
-    )
-    assert(created13)
-    let created14 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.appending("bin").string
-    )
-    assert(created14)
-    let created15 = PathIO.createDirectoryIfNotExists(
-        atPath: curDirOpenloop.appending("nodes").string
-    )
-    assert(created15)
-
-    // Ensure the user-global (system-wide) objects root exists — read-only last-resort lookup layer, never a run target.
-    let shareOpenloop = Paths.globalOpenloop
-    let created20 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.string
-    )
-    assert(created20)
-    let created21 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("workflows").string
-    )
-    assert(created21)
-    let created22 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("personas").string
-    )
-    assert(created22)
-    let created23 = PathIO.createDirectoryIfNotExists(
-        atPath: shareOpenloop.appending("knowledge").string
-    )
-    assert(created23)
+    for name in ["workflows", "personas", "knowledge", "bin", "nodes"] {
+        let created = PathIO.createDirectoryIfNotExists(
+            atPath: openloop.appending(name).string
+        )
+        assert(created)
+    }
 }
 
 private let loopIntervalSecs: UInt64 = 60

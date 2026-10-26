@@ -86,10 +86,29 @@
             flex-shrink: 1;
             min-width: 0;
         }
+        /* the current crumb states its location — green name + muted path in
+           parens. A flex row so the two shrink separately: the name keeps the
+           old never-truncates guarantee (flex-shrink: 0 on .crumb-name), the
+           path yields first and ellipsizes, where one text run would hard-clip
+           at the bar's edge mid-glyph. flex-shrink 0 → 1 lets the bar apply
+           that pressure at all. */
         .crumb.cur {
             color: var(--accent-green);
             font-weight: 600;
-            flex-shrink: 0;
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            flex-shrink: 1;
+        }
+        .crumb.cur .crumb-name { flex-shrink: 0; }
+        .crumb-path {
+            color: var(--text-muted);
+            font-weight: 400;
+            font-size: 11px;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .crumb-sep {
             color: var(--text-faint);
@@ -1287,6 +1306,7 @@
 
         @media (max-width: 768px) {
             .gt-subtitle, .gt-version { display: none; }
+            .crumb-path { display: none; } /* a phone bar buys no full paths — the name keeps the line */
             #mcp-auth-warn .gt-warn-label { display: none; } /* the count + tooltip carry it on a phone */
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */

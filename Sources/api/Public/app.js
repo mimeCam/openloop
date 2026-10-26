@@ -101,7 +101,7 @@ document.addEventListener('DOMContentLoaded', function() {
             current = parent;
         }
         globalSharePaths.forEach(gp => {
-            if (!chain.includes(gp)) chain.push(gp);
+            if (gp !== path && !chain.includes(gp)) chain.push(gp);
         });
         return chain;
     }
@@ -294,14 +294,13 @@ document.addEventListener('DOMContentLoaded', function() {
             updateNotifBubble(data.instances || []);
             updateRunningBubble(data.instances || []);
 
-            if (data.instances && data.instances.length > 0) {
-                const tree = buildTreeFromPaths(data.instances);
-                await Promise.all(tree.instances.map(instance => fetchPersonaCount(instance.fullPath)));
-                await Promise.all(tree.instances.map(instance => fetchWorkflowCount(instance.fullPath)));
-                renderTree(tree);
-            } else {
-                content.innerHTML = '<div class="empty-state">No instances found<div class="empty-hint">To launch an instance, run <code>openloop</code> from your project folder in the terminal</div></div>';
-            }
+            // Always render through the tree — it owns the empty state AND
+            // the create-global cell, so the share is offerable even when no
+            // instance exists at all.
+            const tree = buildTreeFromPaths(data.instances || []);
+            await Promise.all(tree.instances.map(instance => fetchPersonaCount(instance.fullPath)));
+            await Promise.all(tree.instances.map(instance => fetchWorkflowCount(instance.fullPath)));
+            renderTree(tree);
         } catch (error) {
             console.error('Failed to fetch instances:', error);
             console.error('Error details:', error.message, error.stack);
@@ -338,6 +337,30 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!confirm(confirmMessages[action])) return;
         try { await performLifecycle(action, encodedPath); }
         catch (e) { alert(`Could not ${action} instance — ${e.message}. Refreshing...`); fetchInstances(); }
+    };
+
+    // Create-global button (the home page's last cell): the api provisions
+    // and starts the share worker; on success the page refreshes itself and
+    // the real global instance cell replaces this tile.
+    window.createGlobalShare = async function(btn) {
+        if (btn && btn.disabled) return;
+        const originalLabel = btn ? btn.textContent : null;
+        if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+        try {
+            const res = await fetch('/api/instances/global/create', { method: 'POST' });
+            if (!res.ok) {
+                let reason = `server responded ${res.status}`;
+                try {
+                    const body = await res.json();
+                    if (body && body.reason) reason = body.reason;
+                } catch (e) { /* non-JSON body — keep the status line */ }
+                throw new Error(reason);
+            }
+            fetchInstances(); // auto-refresh — the new instance lands last
+        } catch (e) {
+            alert(`Could not create the global project — ${e.message}.`);
+            if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+        }
     };
 
     // ── DB size gauge + Clean old logs ──
@@ -400,7 +423,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return { depth, rootPath: current };
         }
 
-        const instances = instancesData.filter(d => !d.isGlobalShare).map(instanceData => {
+        const instances = instancesData.map(instanceData => {
             const path = instanceData.path;
             const parts = path.split('/').filter(c => c.length > 0);
             const name = parts[parts.length - 1] || path;
@@ -481,8 +504,15 @@ document.addEventListener('DOMContentLoaded', function() {
             addChildren(root, null, 0);
         });
 
+        // The global share instance is pinned LAST — it is the machine-wide
+        // library every other project reads from, not a sibling project, so
+        // it never interleaves with the project families above.
+        const ordered = sorted.filter(i => !globalSharePaths.has(i.fullPath))
+            .concat(sorted.filter(i => globalSharePaths.has(i.fullPath)));
+
         return {
-            instances: sorted
+            instances: ordered,
+            globalShareMissing: globalSharePaths.size === 0
         };
     }
 
@@ -491,6 +521,10 @@ document.addEventListener('DOMContentLoaded', function() {
         let html = '';
         let currentRoot = null;
         let familyInstances = [];
+
+        if (tree.instances.length === 0) {
+            html += '<div class="empty-state">No instances found<div class="empty-hint">To launch an instance, run <code>openloop</code> from your project folder in the terminal</div></div>';
+        }
 
         function flushFamily() {
             if (familyInstances.length === 0) return;
@@ -511,6 +545,10 @@ document.addEventListener('DOMContentLoaded', function() {
             familyInstances.push(instance);
         });
         flushFamily();
+
+        // LAST cell: when no worker is registered at the share, offer to
+        // create it — the created instance then takes this last slot itself.
+        if (tree.globalShareMissing) html += renderCreateGlobalCell();
 
         content.innerHTML = `
             <div class="tree-container" role="tree" aria-label="Instance tree">
@@ -657,6 +695,37 @@ document.addEventListener('DOMContentLoaded', function() {
                 ${expandedContentHtml}
             </div>
         `;
+    }
+
+    // The "no global project yet" tile — LAST cell on the home page. Same
+    // amber language as the Global (system-wide) sections inside projects'
+    // expanded views; dashed because it doesn't exist yet. One button: mkdir
+    // the share, register + start the worker there (the api route), then the
+    // page refreshes itself and the real instance cell takes this slot.
+    function renderCreateGlobalCell() {
+        return `
+            <div class="instance-family" style="--hue:38">
+                <div class="instance-node create-global-node" data-depth="0" style="--indent:0;--hue:38;--depth:0">
+                    <div class="instance-row create-global-row">
+                        <div class="instance-header">
+                            <span class="instance-icon create-global-icon" title="Not created yet">○</span>
+                            <div class="instance-name-group">
+                                <span class="instance-name">Global (system-wide)</span>
+                            </div>
+                            <div class="instance-action-strip">
+                                <button class="instance-action-btn warn"
+                                    onclick="event.stopPropagation(); createGlobalShare(this)">Create</button>
+                            </div>
+                        </div>
+                        <div class="instance-path-row">
+                            <span class="instance-path" title="~/.local/share/openloop">~/.local/share/openloop</span>
+                        </div>
+                        <div class="instance-badges">
+                            <span class="create-global-hint">Not created yet — the machine-wide library of personas, knowledge and workflows every project can read. Creates and starts the worker at the share.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
     }
 
     async function fetchPersonaCount(path) {

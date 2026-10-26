@@ -81,12 +81,22 @@
         return chain;
     }
 
+    // Crumb markup, pure (checkChainPath pins it): parents are names-only —
+    // context, not location, and their paths already ride the hover; the
+    // current crumb states its full path inline, muted beside the green
+    // name. Name and path are separate spans so the path is what ellipsizes
+    // when the bar runs out of room (.crumb.cur is a flex row in graph.html).
+    function crumbHtml(p, cur) {
+        const name = p.split('/').filter(Boolean).pop() || p;
+        const cls = cur ? 'crumb cur' : 'crumb';
+        const body = cur
+            ? `<span class="crumb-name">${esc(name)}</span><span class="crumb-path">(${esc(p)})</span>`
+            : esc(name);
+        return `<span class="${cls}" title="${esc(p)}">${body}</span>`;
+    }
+
     function renderChain(chain) {
-        const crumbs = chain.map((p, i) => {
-            const name = p.split('/').filter(Boolean).pop() || p;
-            const cls = i === chain.length - 1 ? 'crumb cur' : 'crumb';
-            return `<span class="${cls}" title="${esc(p)}">${esc(name)}</span>`;
-        });
+        const crumbs = chain.map((p, i) => crumbHtml(p, i === chain.length - 1));
         const sep = '<span class="crumb-sep">&gt;</span>';
         $('graph-chain').innerHTML = sep + crumbs.join(sep);
     }
@@ -2334,6 +2344,7 @@
     // ── Sanity checks (flip ISOLATED_RUN=true to run in DevTools) ────────────
     function runSanityChecks() {
         checkFmtDur();
+        checkChainPath();
         checkClampPanelWidth();
         checkRenderBubbleTruncation();
         checkAddRootPinned();
@@ -2386,6 +2397,23 @@
         console.assert(runMeta({ status: 'success', took: 150, created_at: Date.now() }).includes('took 3m'),
             'fmtDur wiring: a >2m turn renders "took 3m" in the thread meta');
         console.log('OK: fmtDur wiring');
+    }
+
+    // The header states which instance you're on: the current crumb pairs
+    // its green name with the full path in muted parens; parents stay
+    // names-only (context, not location — the hover carries every path).
+    function checkChainPath() {
+        const cur = crumbHtml('/home/u/dev/openloop', true);
+        console.assert(cur.includes('class="crumb-name">openloop<'),
+            'chainPath: the name stays its own span — never the part that ellipsizes');
+        console.assert(cur.includes('<span class="crumb-path">(/home/u/dev/openloop)</span>'),
+            'chainPath: the current crumb states the full path in parens');
+        console.assert(cur.includes('title="/home/u/dev/openloop"'),
+            'chainPath: the tooltip keeps the full path');
+        const parent = crumbHtml('/home/u/dev', false);
+        console.assert(!parent.includes('crumb-path') && !parent.includes('crumb-name'),
+            'chainPath: parents stay names-only');
+        console.log('OK: chain path beside the name');
     }
 
     function checkRunLogHtml() {

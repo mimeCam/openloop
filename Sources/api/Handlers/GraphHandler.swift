@@ -1036,18 +1036,20 @@ private extension GraphHandler {
         return agent
     }
 
-    /// Persona MCPs collected across the instance → home chain, like the
-    /// runner's collectContext (parent-instance nodes count). Texts are
-    /// dropped on purpose — follow-up turns are knowledge-free.
+    /// Persona MCPs collected across the instance → home chain plus the
+    /// user-global share last, like the runner's collectContext
+    /// (parent-instance and global nodes count; auth conflicts resolve
+    /// nearest-wins by URL). Texts are dropped on purpose — follow-up turns
+    /// are knowledge-free.
     func sessionPersonaMcps(
         personaId: String, instancePath: String
     ) throws -> Set<GraphMcpEndpoint> {
         guard isRealSessionPersona(personaId) else { return [] }
-        var mcps = Set<GraphMcpEndpoint>()
-        for dir in Paths.dirsToHome(from: FilePath(instancePath)) {
-            mcps.formUnion(try GraphStore.personaContext(personaId: personaId, at: dir.string).mcps)
+        var perDir: [Set<GraphMcpEndpoint>] = []
+        for dir in Paths.contextLookupDirs(from: FilePath(instancePath)) {
+            perDir.append(try GraphStore.personaContext(personaId: personaId, at: dir.string).mcps)
         }
-        return mcps
+        return GraphStore.nearestWinsMcpUnion(perDir)
     }
 
     /// The session's full MCP surface: union over ALL its personas (outer + inner), collected across the instance → home chain.
