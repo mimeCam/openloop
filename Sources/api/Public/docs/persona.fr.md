@@ -93,3 +93,23 @@ Si vous voulez qu'un <persona> utilise un ensemble spécifique de MCPs, vous pou
 OpenLoop cherchera d'abord le fichier MCP personnalisé du persona, puis le fichier à l'échelle du projet.
 
 Par exemple, voir `scripts/yolo/openloop_cc_docker` dans le code source d'OpenLoop ou `~/.local/bin/openloop_cc_docker` si vous avez déjà installé OpenLoop.
+
+## Partager les outils de nœuds entre projets
+
+Les nœuds du graphe (/graph.html) peuvent porter des serveurs MCP distants, et un persona attaché à un nœud emporte les outils de ce nœud : chaque exécution du persona reçoit les serveurs MCP (et les résumés de chaîne) des nœuds qui lui sont attachés. Les nœuds sans résumé sont ignorés.
+
+Les personas sont donc le canal approuvé pour partager les fonctionnalités de nœuds (comme les MCPs) entre projets :
+
+- **Préféré :** configurez le persona au niveau qui possède l'outillage — un projet parent, ou le partage global (`~/.local/share/openloop`) — et utilisez ce persona dans tout projet en dessous. Les personas, comme les workflows et les connaissances, se résolvent au plus proche dans la hiérarchie des dossiers : la définition du projet gagne, le partage global est le dernier recours.
+- **Repli :** quand le persona ne convient pas — vous avez besoin du MCP sans le persona — copiez la définition du MCP dans un nœud du projet qui en a besoin.
+
+Recette pour la voie préférée :
+
+1. Dans le projet (ou le partage global) qui possède l'outil : créez un nœud avec l'URL du MCP et sa clé d'autorisation.
+2. Attachez le persona à ce nœud et exécutez le nœud une fois pour qu'il obtienne un résumé.
+3. Utilisez le persona dans un niveau de workflow, ou attachez-le à des nœuds locaux — chaque exécution de ce persona porte désormais le MCP.
+
+Deux limites à garder en tête :
+
+- Les clés d'autorisation vivent par machine, dans le `.openloop/secrets.json5` de chaque projet, indexées par URL MCP. Un nœud partagé depuis un projet parent lit sa clé là où le nœud vit.
+- Ce canal alimente les exécutions de workflow du persona et les conversations de suivi de workflow. Un RUN simple d'un nœud du graphe reste local à sa chaîne : il ne voit que les MCPs de sa propre chaîne d'ancêtres.

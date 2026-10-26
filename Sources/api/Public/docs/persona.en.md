@@ -93,3 +93,23 @@ If you want a <persona> to use a custom set of MCPs you may create `<project-fol
 Openloop will first look for persona's custom mcp file and then for project-wide file.
 
 For example see `scripts/yolo/openloop_cc_docker` in the openloop source code or `~/.local/bin/openloop_cc_docker` if you have installed openloop already.
+
+## Sharing node tools across projects
+
+Nodes on the graph (/graph.html) can carry remote MCP servers, and a persona attached to a node carries that node's tools along: every run of the persona receives the MCP servers (and chain summaries) of the nodes it is attached to. Nodes without a summary are skipped.
+
+That makes personas the approved channel for sharing node-enabled functionality across projects:
+
+- **Preferred:** configure the persona at the level that owns the tooling — a parent project, or the global share (`~/.local/share/openloop`) — and use that persona in any project below it. Personas, like workflows and knowledge, resolve nearest-first through the folder hierarchy: the project's own definition wins, the global share is the last resort.
+- **Fallback:** when a persona does not fit — you need the MCP without the persona — copy the MCP definition into a node of the project that needs it.
+
+Recipe for the preferred path:
+
+1. In the project (or the global share) that owns the tool: create a node with the MCP URL and its authorization key.
+2. Attach the persona to that node and run the node once so it gets a summary.
+3. Use the persona in a workflow level.
+
+Two boundaries to keep in mind:
+
+- Authorization keys live per machine, in each project's own `.openloop/secrets.json5`, keyed by the MCP URL. A node shared from a parent project reads its key from where the node lives.
+- This channel feeds workflow runs of the persona and workflow follow-up conversations. A plain RUN of a node on the graph stays chain-local: it sees the MCPs of its own ancestor chain only.

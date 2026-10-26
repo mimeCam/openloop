@@ -24,3 +24,13 @@ Instances are tied to folders. This means:
 - Different projects have different instances
 - Each instance can define its own set of [personas](persona) and [workflows](workflow)
 - You can spin up an instance for a specific project and shut it down when done
+
+## The folder hierarchy
+
+Project folders nest, and an instance reads through the whole ladder: its own `.openloop` first, then each parent project's up to your home folder, and the global share — `~/.local/share/openloop` — last. Lookups are always nearest-first: the closest definition wins.
+
+What resolves through the ladder:
+- [Personas](persona), [workflows](workflow) and persona knowledge — define them once at the top, reuse them in every project below.
+- Node-enabled functionality (MCP servers on graph nodes) travels attached to personas — see [Personas](persona) for the approved sharing flow.
+
+What never travels: execution state. Run logs and artifacts always land in the running project's `.openloop` — parent projects and the global share are read-only inputs and are never written to.

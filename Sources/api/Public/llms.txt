@@ -185,6 +185,12 @@ Graph — node graph per instance (powers /graph.html)
                                                    summaries are written to
                                                    convo.md and referenced with
                                                    @/context/convo.md
+                                                   MCP scope = this node's own
+                                                   ancestor chain only, this
+                                                   instance only. Cross-project
+                                                   MCPs reach runs through the
+                                                   persona channel below, not
+                                                   through node RUNs.
   PUT    /api/instances/:id/graph/:nid/runs/:rid  body { summary } → edited
                                                    run summary (enables
                                                    follow-ups on it)
@@ -254,7 +260,12 @@ notification_kinds marker row written in the same transaction as the insert
        thread empty → 409 seed first. Session must have a successful
        run_ends row (409 otherwise). MCP scope = the union of ALL the
        session's personas' assigned MCP servers (outer + inner workflows,
-       live from the graph at turn time).
+       live from the graph at turn time), collected across the
+       instance → parent-project → global-share ladder, nearest-wins by
+       URL: a persona configured (or attached to nodes) in a parent
+       project or in the global share contributes its MCPs here. This
+       persona channel is the approved way to share node-enabled
+       functionality across projects; plain node RUNs stay chain-local.
   POST /api/instances/:id/graph/sessions/:sid/seed  → Run. Opt-in run 0:
        materializes the original answer (prompt = the session's original
        ask, output = tip persona output) and summarizes it. Empty/failed
