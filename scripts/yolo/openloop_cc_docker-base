@@ -214,7 +214,7 @@ CLAUDE_CMD="claude ${SKIP_PERMISSIONS_FLAG} \
     --max-turns 500 \
     --model sonnet \
     --permission-mode bypassPermissions \
-    --disallowed-tools \"WebSearch,WebFetch,AskUserQuestion,Bash(cat *),Bash(head *),Bash(tail *),Bash(less *),Bash(more *),Bash(nl *),Bash(tac *),Bash(bat *),Bash(strings *),Bash(xxd *),Bash(od *),Bash(hexdump *),Bash(base64 *),Bash(cut *),Bash(zcat *),Bash(rg *),Bash(grep *),Bash(egrep *),Bash(fgrep *),Bash(ag *),Bash(ack *),Bash(fd *),Bash(find *),Bash(locate *),Bash(sed *),Bash(awk *),Bash(tee *),Bash(sponge *),Bash(ed *),Bash(ex *),Bash(vi *),Bash(vim *),Bash(nano *),Bash(sudo *),Bash(su *),Bash(doas *),Bash(osascript *),Bash(python *),Bash(python3 *),Bash(bash *),Bash(sh *),Bash(env *),Bash(xargs *)\" \
+    --disallowed-tools \"WebSearch,WebFetch,AskUserQuestion,Bash(cat *),Bash(head *),Bash(tail *),Bash(less *),Bash(more *),Bash(nl *),Bash(tac *),Bash(bat *),Bash(strings *),Bash(xxd *),Bash(od *),Bash(hexdump *),Bash(base64 *),Bash(cut *),Bash(zcat *),Bash(rg *),Bash(grep *),Bash(egrep *),Bash(fgrep *),Bash(ag *),Bash(ack *),Bash(fd *),Bash(find *),Bash(locate *),Bash(sed *),Bash(awk *),Bash(tee *),Bash(sponge *),Bash(ed *),Bash(ex *),Bash(vi *),Bash(vim *),Bash(nano *),Bash(sudo *),Bash(su *),Bash(doas *),Bash(osascript *),Bash(curl *),Bash(wget *),Bash(python *),Bash(python3 *),Bash(bash *),Bash(sh *),Bash(env *),Bash(xargs *)\" \
     --no-session-persistence \
     ${MCP_FLAGS} \
     -p \"\$PROMPT\""

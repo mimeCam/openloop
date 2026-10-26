@@ -17,6 +17,6 @@ USER node
 #
 USER root
 # Delete curl so LLM does not try to fetch webpages with it - there is MCP for that (that also converts html into minimazed markdown), or chrome-dev-tools.
-RUN apt remove -y wget
+RUN apt remove -y curl wget
 # RUN apt remove -y curl wget # sudo
 USER node
