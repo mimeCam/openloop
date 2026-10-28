@@ -1,5 +1,6 @@
 import XCTest
 import SQLite
+import SystemPackage
 import shared
 
 final class GraphStoreTests: XCTestCase {
@@ -31,8 +32,8 @@ final class GraphStoreTests: XCTestCase {
         try GraphStore.fetchNodes(at: path).reduce(into: [:]) { $0[$1.id] = $1 }
     }
 
-    func runLog(_ id: String, node: String, status: String = "success", parent: String? = nil, root: String? = nil) -> GraphRunLog {
-        GraphRunLog(id: id, nodeId: node, prompt: "p", status: status, output: nil, took: nil, createdAt: 1, completedAt: nil, parentRunId: parent, rootRunId: root)
+    func runLog(_ id: String, node: String, status: String = "success", parent: String? = nil, root: String? = nil, refIds: [String]? = nil) -> GraphRunLog {
+        GraphRunLog(id: id, nodeId: node, prompt: "p", status: status, output: nil, took: nil, createdAt: 1, completedAt: nil, parentRunId: parent, rootRunId: root, refNodeIds: refIds)
     }
 
     func testDeleteLeafRemovesOnlyThatNode() throws {
@@ -379,6 +380,88 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertNil(run.summary)
     }
 
+    // ── The advisory scope audit: two columns, marker then verdict, cleared by every summary rewrite. ──
+
+    func testAuditMarkerThenVerdictRoundTrip() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a"), at: path)
+        try GraphStore.markRunAuditing(id: "r1", at: path)
+        var run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertEqual(run.auditStatus, "analyzing")
+        XCTAssertNil(run.audit, "the marker arms with no verdict — the pulse, not a band")
+        try GraphStore.finishRunAudit(id: "r1", audit: "beyond scope: refactored the parser too", at: path)
+        run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertEqual(run.audit, "beyond scope: refactored the parser too")
+        XCTAssertNil(run.auditStatus, "the terminal write clears the marker in the same statement")
+    }
+
+    func testFinishRunAuditFailureWritesNeutral() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a"), at: path)
+        try GraphStore.markRunAuditing(id: "r1", at: path)
+        try GraphStore.finishRunAudit(id: "r1", audit: nil, at: path)
+        let run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertNil(run.audit)
+        XCTAssertNil(run.auditStatus, "a failed analysis renders neutral — no pulse forever")
+    }
+
+    func testFreshRowReadsNeutralAudit() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a"), at: path)
+        let run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertNil(run.audit, "not audited is not audited clean — fresh rows render nothing")
+        XCTAssertNil(run.auditStatus)
+    }
+
+    func testFinishRunSummaryClearsAuditPair() throws {
+        // manual edits and every regen land here — a badge must never lie over a rewritten summary
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "summarizing"), at: path)
+        try GraphStore.markRunAuditing(id: "r1", at: path)
+        try GraphStore.finishRunAudit(id: "r1", audit: "All clear", at: path)
+        try GraphStore.finishRunSummary(id: "r1", summary: "hand-edited", at: path)
+        let run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertNil(run.audit)
+        XCTAssertNil(run.auditStatus)
+    }
+
+    func testRestartRunLogClearsAuditPair() throws {
+        // belt-and-braces for retries: the old verdict dies with the old answer
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "failed"), at: path)
+        try GraphStore.markRunAuditing(id: "r1", at: path)
+        try GraphStore.finishRunAudit(id: "r1", audit: "beyond scope: also rewrote the tests", at: path)
+        try GraphStore.restartRunLog(id: "r1", at: path)
+        let run = try XCTUnwrap(try runLogsById()["r1"])
+        XCTAssertNil(run.audit)
+        XCTAssertNil(run.auditStatus)
+    }
+
+    func testSweepStuckRunAuditsClearsMarkersOnly() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a"), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a"), at: path)
+        try GraphStore.markRunAuditing(id: "r1", at: path) // a restart interrupted this one
+        try GraphStore.finishRunAudit(id: "r2", audit: "x", at: path)
+        try GraphStore.sweepStuckRunAudits(at: path)
+        let runs = try runLogsById()
+        XCTAssertNil(runs["r1"]?.auditStatus, "a restart must not leave rows pulsing forever")
+        XCTAssertNil(runs["r1"]?.audit)
+        XCTAssertEqual(runs["r2"]?.audit, "x", "the sweep touches only stuck markers")
+        XCTAssertNil(runs["r2"]?.auditStatus)
+    }
+
+    func testLegacyRunDbMigratesAuditColumns() throws {
+        let legacy = try legacyRunDb()
+        defer { try? FileManager.default.removeItem(atPath: legacy) }
+        let db = try Connection(GraphStore.dbPath(at: legacy))
+        try insertLegacyRun(db, id: "r1", parent: nil)
+        try GraphStore.createTables(at: legacy) // boot path — adds audit/audit_status
+        let run = try XCTUnwrap(try GraphStore.fetchRunLogs(nodeId: "a", at: legacy).first { $0.id == "r1" })
+        XCTAssertNil(run.audit, "legacy rows read neutral")
+        XCTAssertNil(run.auditStatus)
+    }
+
     func testInsertRunLogPersistsParentRunId() throws {
         try insert(node("a", nil))
         try GraphStore.insertRunLog(GraphRunLog(id: "r1", nodeId: "a", prompt: "p", status: "success", output: "o", took: 1, createdAt: 1, completedAt: nil), at: path)
@@ -461,6 +544,104 @@ final class GraphStoreTests: XCTestCase {
         let nodes = try GraphStore.fetchNodes(at: path)
         let child = try XCTUnwrap(nodes.first { $0.id == "b" })
         XCTAssertEqual(GraphStore.chainText(GraphStore.chain(of: child, in: nodes)), "root summary\n\n---\n\nchild summary")
+    }
+
+    // refContextText: gate on the referenced node's own summary, content from its whole chain
+
+    func insertSummarized(_ id: String, _ parent: String?, _ summary: String?) throws {
+        try insert(GraphNode(
+            id: id, parentId: parent, prompt: "p", agent: "a", status: "success",
+            output: nil, took: nil, mcp: nil, summary: summary, createdAt: 1, completedAt: nil
+        ))
+    }
+
+    func testRefContextTextCarriesWholeChainOldestFirst() throws {
+        // a summary-less middle node skips silently
+        try insertSummarized("root", nil, "root summary")
+        try insertSummarized("mid", "root", nil)
+        try insertSummarized("ref", "mid", "ref summary")
+        let nodes = try GraphStore.fetchNodes(at: path)
+        let ref = try XCTUnwrap(nodes.first { $0.id == "ref" })
+        XCTAssertEqual(
+            GraphStore.refContextText(node: ref, chain: GraphStore.chain(of: ref, in: nodes)),
+            "root summary\n\n---\n\nref summary"
+        )
+    }
+
+    func testRefContextTextGateIsThePickedNodeNotItsParents() throws {
+        // parents carry summaries, the picked node doesn't → no file rides
+        try insertSummarized("root", nil, "root summary")
+        try insertSummarized("ref", "root", nil)
+        let nodes = try GraphStore.fetchNodes(at: path)
+        let ref = try XCTUnwrap(nodes.first { $0.id == "ref" })
+        XCTAssertNil(GraphStore.refContextText(node: ref, chain: GraphStore.chain(of: ref, in: nodes)))
+    }
+
+    func testRefContextTextDropsDormantAncestors() throws {
+        // a dormant ancestor's summary drops out exactly where its MCPs do
+        try insertSummarized("root", nil, "root summary")
+        try insertSummarized("mid", "root", "mid summary")
+        try insertSummarized("ref", "mid", "ref summary")
+        try GraphStore.updateActive(id: "mid", active: false, at: path)
+        let nodes = try GraphStore.fetchNodes(at: path)
+        let ref = try XCTUnwrap(nodes.first { $0.id == "ref" })
+        XCTAssertEqual(
+            GraphStore.refContextText(node: ref, chain: GraphStore.chain(of: ref, in: nodes)),
+            "root summary\n\n---\n\nref summary"
+        )
+    }
+
+    // ref_node_ids: persist on insert, survive a retry's restart untouched
+
+    func testRefNodeIdsRoundTripBothInsertPaths() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", refIds: ["n1", "n2"]), at: path)
+        try GraphStore.insertSessionRunLog(runLog("s1", node: "sess-1", refIds: ["n3"]), session: "sess-1", workflowId: "wf", at: path)
+        let runs = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        XCTAssertEqual(runs.first { $0.id == "r1" }?.refNodeIds, ["n1", "n2"])
+        let sessions = try GraphStore.fetchRunLogs(nodeId: "sess-1", at: path)
+        XCTAssertEqual(sessions.first { $0.id == "s1" }?.refNodeIds, ["n3"])
+    }
+
+    func testRefNodeIdsNilWhenAbsentAndKeptThroughRestart() throws {
+        try insert(node("a", nil))
+        try GraphStore.insertRunLog(runLog("r1", node: "a", status: "failed", refIds: ["n1"]), at: path)
+        try GraphStore.insertRunLog(runLog("r2", node: "a"), at: path) // no refs -> column nil, decodes nil
+        try GraphStore.restartRunLog(id: "r1", at: path) // the retry path: must not touch the column
+        let runs = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        XCTAssertEqual(runs.first { $0.id == "r1" }?.refNodeIds, ["n1"])
+        XCTAssertNil(runs.first { $0.id == "r2" }?.refNodeIds)
+    }
+
+    func testEncodeDecodeRefNodeIds() {
+        XCTAssertEqual(GraphStore.decodeRefNodeIds(GraphStore.encodeRefNodeIds(nil)), nil)
+        XCTAssertEqual(GraphStore.decodeRefNodeIds(GraphStore.encodeRefNodeIds([])), nil)
+        XCTAssertEqual(GraphStore.decodeRefNodeIds(GraphStore.encodeRefNodeIds(["a", "b"])), ["a", "b"])
+        XCTAssertEqual(GraphStore.decodeRefNodeIds("not json"), nil)
+        XCTAssertEqual(GraphStore.decodeRefNodeIds(nil), nil)
+    }
+
+    // chainMcpUrls: the count-only twin of chainMcpEndpoints — unique URLs along an ACTIVE chain
+    func testChainMcpUrlsDedupesAndSkipsInactive() throws {
+        try insert(node("root", nil))
+        try insert(node("mid", "root"))
+        try insert(node("leaf", "mid"))
+        try GraphStore.updateMcp(id: "root", mcp: "https://a.example", at: path)
+        try GraphStore.updateMcp(id: "mid", mcp: "https://a.example", at: path) // duplicate URL — one entry
+        try GraphStore.updateMcp(id: "leaf", mcp: "https://b.example", at: path)
+        var nodes = try remaining()
+        let leaf = nodes["leaf"]!
+        XCTAssertEqual(GraphStore.chainMcpUrls(GraphStore.chain(of: leaf, in: Array(nodes.values))).sorted(),
+                       ["https://a.example", "https://b.example"])
+        // a dormant MIDDLE node drops only its own endpoint — the active root's URL still rides
+        try GraphStore.updateActive(id: "mid", active: false, at: path)
+        nodes = try remaining()
+        XCTAssertEqual(GraphStore.chainMcpUrls(GraphStore.chain(of: leaf, in: Array(nodes.values))).sorted(),
+                       ["https://a.example", "https://b.example"])
+        // dormant root as well — only the leaf's own endpoint remains
+        try GraphStore.updateActive(id: "root", active: false, at: path)
+        nodes = try remaining()
+        XCTAssertEqual(GraphStore.chainMcpUrls(GraphStore.chain(of: leaf, in: Array(nodes.values))), ["https://b.example"])
     }
 
     func testLegacyDbBackfillsRootRunIdFromParentChain() throws {
@@ -634,5 +815,267 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: path), 0)
         let empty = NSTemporaryDirectory() + "openloop-graphstore-none-\(UUID().uuidString)"
         XCTAssertEqual(GraphStore.mcpAuthMissingCount(at: empty), 0)
+    }
+
+    // personaContextAcrossLadder: the ONE shared ladder walk — texts in ladder order, MCPs nearest-wins
+
+    private struct Ladder {
+        let tmp: String
+        let inst: String
+        let parentProject: String
+        let global: String
+    }
+
+    private func makeLadder() throws -> Ladder {
+        let tmp = NSTemporaryDirectory() + "openloop-persona-ladder-\(UUID().uuidString)"
+        let parentProject = tmp + "/root"
+        let inst = parentProject + "/inst"
+        let global = tmp + "/global" // plays the user-global share
+        for d in [parentProject, inst, global] {
+            try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+        }
+        return Ladder(tmp: tmp, inst: inst, parentProject: parentProject, global: global)
+    }
+
+    private func personaNode(
+        _ id: String, _ parent: String?, persona: String,
+        summary: String?, mcp: String? = nil
+    ) -> GraphNode {
+        GraphNode(
+            id: id, parentId: parent, prompt: "p", agent: "x", status: "success",
+            output: nil, took: nil, mcp: mcp, summary: summary, personas: [persona],
+            createdAt: 1, completedAt: nil
+        )
+    }
+
+    private func ladderCtx(_ l: Ladder, persona: String) throws -> GraphStore.PersonaContext {
+        try GraphStore.personaContextAcrossLadder(
+            personaId: persona, from: FilePath(l.inst), globalRoot: FilePath(l.global)
+        )
+    }
+
+    func testJoinedTextFencesBlocksAndDropsEmpties() {
+        XCTAssertEqual(GraphStore.joinedText([]), "")
+        XCTAssertEqual(GraphStore.joinedText(["", ""]), "", "empty texts are not blocks")
+        XCTAssertEqual(GraphStore.joinedText(["a", "", "b"]), "a\n\n---\n\nb")
+        XCTAssertEqual(GraphStore.joinedText(["a", "b"]), "a\n\n---\n\nb", "the exact fence chainText uses")
+    }
+
+    func testPersonaContextAcrossLadderCollectsTextsInLadderOrder() throws {
+        let ladder = try makeLadder()
+        defer { try? FileManager.default.removeItem(atPath: ladder.tmp) }
+        try GraphStore.insertNode(personaNode("g1", nil, persona: "p", summary: "global"), at: ladder.global)
+        try GraphStore.insertNode(personaNode("pp1", nil, persona: "p", summary: "parent"), at: ladder.parentProject)
+        try GraphStore.insertNode(personaNode("i1", nil, persona: "p", summary: "inst root"), at: ladder.inst)
+        try GraphStore.insertNode(personaNode("i2", "i1", persona: "p", summary: "inst leaf"), at: ladder.inst)
+        let ctx = try ladderCtx(ladder, persona: "p")
+        // one chain per folder (longest-wins inside a folder), folders nearest-first
+        XCTAssertEqual(ctx.texts, ["inst root\n\n---\n\ninst leaf", "parent", "global"])
+    }
+
+    func testPersonaContextAcrossLadderMergesMcpsNearestWinsByFolder() throws {
+        let ladder = try makeLadder()
+        defer { try? FileManager.default.removeItem(atPath: ladder.tmp) }
+        try GraphStore.insertNode(
+            personaNode("i1", nil, persona: "p", summary: "s", mcp: "https://shared.example"),
+            at: ladder.inst
+        )
+        try GraphStore.insertNode(
+            personaNode("pp1", nil, persona: "p", summary: "s", mcp: "https://parent.example"),
+            at: ladder.parentProject
+        )
+        try GraphStore.insertNode(
+            personaNode("g1", nil, persona: "p", summary: "s", mcp: "https://shared.example"),
+            at: ladder.global
+        )
+        // each folder's key lives in ITS OWN secrets store (auth is per-folder)
+        try SecretStore.setSecret("near", for: "https://shared.example", at: ladder.inst)
+        try SecretStore.setSecret("far", for: "https://shared.example", at: ladder.global)
+        try SecretStore.setSecret("parent-key", for: "https://parent.example", at: ladder.parentProject)
+        let ctx = try ladderCtx(ladder, persona: "p")
+        XCTAssertEqual(ctx.mcps, Set([
+            GraphMcpEndpoint(url: "https://shared.example", auth: "near"),
+            GraphMcpEndpoint(url: "https://parent.example", auth: "parent-key"),
+        ]), "the nearer folder owns a shared URL's auth — the share's loser must not survive as a ghost")
+    }
+
+    func testPersonaContextAcrossLadderGateIsTheTaggedNodesOwnSummary() throws {
+        let ladder = try makeLadder()
+        defer { try? FileManager.default.removeItem(atPath: ladder.tmp) }
+        // tagged node without a summary and without a tagged descendant: its chain drops out entirely
+        try GraphStore.insertNode(
+            personaNode("bare", nil, persona: "p", summary: nil, mcp: "https://bare.example"),
+            at: ladder.inst
+        )
+        var ctx = try ladderCtx(ladder, persona: "p")
+        XCTAssertTrue(ctx.texts.isEmpty)
+        XCTAssertTrue(ctx.mcps.isEmpty)
+        // a summary-less MIDDLE member of a matched chain is not the gate
+        try GraphStore.insertNode(
+            personaNode("mid", nil, persona: "other", summary: nil, mcp: "https://mid.example"),
+            at: ladder.inst
+        )
+        try GraphStore.insertNode(
+            personaNode("leaf", "mid", persona: "p", summary: "leaf s", mcp: "https://leaf.example"),
+            at: ladder.inst
+        )
+        ctx = try ladderCtx(ladder, persona: "p")
+        XCTAssertEqual(ctx.texts, ["leaf s"])
+        XCTAssertEqual(ctx.mcps, Set([
+            GraphMcpEndpoint(url: "https://mid.example", auth: nil),
+            GraphMcpEndpoint(url: "https://leaf.example", auth: nil),
+        ]), "every chain member's MCP rides, summary or not — and bare's never does")
+    }
+
+    // ChainResolver: the same resolver node RUNs, #node refs and the persona channel all use
+
+    private struct DeepLadder {
+        let tmp: String
+        let cic: String      // the running instance
+        let innerB: String   // parent project
+        let prjA: String     // grandparent project
+        let global: String   // plays the user-global share
+    }
+
+    private func makeDeepLadder() throws -> DeepLadder {
+        let tmp = NSTemporaryDirectory() + "openloop-resolver-\(UUID().uuidString)"
+        let prjA = tmp + "/prjA"
+        let innerB = prjA + "/innerB"
+        let cic = innerB + "/cic"
+        let global = tmp + "/global"
+        for d in [prjA, innerB, cic, global] {
+            try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+        }
+        return DeepLadder(tmp: tmp, cic: cic, innerB: innerB, prjA: prjA, global: global)
+    }
+
+    /// root(parent:summary:assigned:mcp:) — the assignment-carrying node builder.
+    private func assignedNode(
+        _ id: String, _ parent: String?, summary: String?,
+        assigned: [String] = [], mcp: String? = nil, persona: String? = nil
+    ) -> GraphNode {
+        GraphNode(
+            id: id, parentId: parent, prompt: "p", agent: "x", status: "success",
+            output: nil, took: nil, mcp: mcp, summary: summary,
+            personas: persona.map { [$0] } ?? [], assignedNodeIds: assigned,
+            createdAt: 1, completedAt: nil
+        )
+    }
+
+    private func seedEightNodeTrace(_ l: DeepLadder) throws {
+        try GraphStore.insertNode(assignedNode("gr-1", nil, summary: "gr-1 s", mcp: "https://gr.example"), at: l.global)
+        try GraphStore.insertNode(assignedNode("gr-2", "gr-1", summary: "gr-2 s"), at: l.global)
+        try GraphStore.insertNode(assignedNode("prjA-1", nil, summary: "prjA-1 s", assigned: ["gr-2"]), at: l.prjA)
+        try GraphStore.insertNode(assignedNode("prjA-2", "prjA-1", summary: "prjA-2 s"), at: l.prjA)
+        try GraphStore.insertNode(assignedNode("innerB-1", nil, summary: "innerB-1 s", assigned: ["prjA-2"]), at: l.innerB)
+        try GraphStore.insertNode(assignedNode("innerB-2", "innerB-1", summary: "innerB-2 s"), at: l.innerB)
+        try GraphStore.insertNode(assignedNode("cic-1", nil, summary: "cic-1 s", assigned: ["innerB-2"]), at: l.cic)
+        try GraphStore.insertNode(assignedNode("cic-2", "cic-1", summary: "cic-2 s"), at: l.cic)
+    }
+
+    private func resolveNode(_ id: String, at l: DeepLadder) throws -> GraphStore.ResolvedChain {
+        let node = try XCTUnwrap(NodeStore.load(id: id, at: l.cic))
+        var resolver = GraphStore.ChainResolver(globalRoot: FilePath(l.global))
+        return resolver.resolve(node: node, at: l.cic)
+    }
+
+    func testResolverFollowsAssignmentsAcrossFoldersOldestFirst() throws {
+        // each splice's own root's assignments expand FIRST, then its line — oldest material first
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        try seedEightNodeTrace(l)
+        // resolve(node:) takes ANY member — its ancestor line IS the own line
+        let resolved = try resolveNode("cic-2", at: l)
+        XCTAssertEqual(resolved.nodes.map(\.id), [
+            "gr-1", "gr-2", "prjA-1", "prjA-2", "innerB-1", "innerB-2", "cic-1", "cic-2",
+        ])
+        XCTAssertEqual(resolved.segments.map(\.instance), [l.global, l.prjA, l.innerB])
+        XCTAssertEqual(resolved.own.map(\.id), ["cic-1", "cic-2"])
+        XCTAssertEqual(GraphStore.chainText(resolved.nodes),
+                       "gr-1 s\n\n---\n\ngr-2 s\n\n---\n\nprjA-1 s\n\n---\n\nprjA-2 s\n\n---\n\ninnerB-1 s\n\n---\n\ninnerB-2 s\n\n---\n\ncic-1 s\n\n---\n\ncic-2 s")
+    }
+
+    func testResolverMcpSetsAreOwnFirstThenSegmentsPerFolder() throws {
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        try seedEightNodeTrace(l)
+        // same URL on the own chain's root and in the assigned global chain — the OWN instance's key must win
+        try GraphStore.updateMcp(id: "cic-1", mcp: "https://gr.example", at: l.cic)
+        try SecretStore.setSecret("own-key", for: "https://gr.example", at: l.cic)
+        try SecretStore.setSecret("global-key", for: "https://gr.example", at: l.global)
+        let resolved = try resolveNode("cic-2", at: l)
+        let sets = resolved.mcpEndpointSets()
+        XCTAssertEqual(sets.count, 1 + resolved.segments.count, "one set per folder: own line first, then each segment")
+        XCTAssertEqual(
+            GraphStore.nearestWinsMcpUnion(sets),
+            [GraphMcpEndpoint(url: "https://gr.example", auth: "own-key")],
+            "own-instance auth owns the URL — the global segment's loser must not surface"
+        )
+    }
+
+    func testResolverDedupesFirstOccurrenceWins() throws {
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        try GraphStore.insertNode(assignedNode("shared", nil, summary: "shared s"), at: l.prjA)
+        try GraphStore.insertNode(assignedNode("a", "shared", summary: "a s"), at: l.prjA)
+        try GraphStore.insertNode(assignedNode("b", "shared", summary: "b s"), at: l.prjA)
+        try GraphStore.insertNode(assignedNode("r", nil, summary: "r s", assigned: ["a", "b"]), at: l.cic)
+        let resolved = try resolveNode("r", at: l)
+        // both splices' lines share `shared`: the first occurrence wins
+        XCTAssertEqual(resolved.nodes.map(\.id), ["shared", "a", "b", "r"])
+        XCTAssertEqual(resolved.segments.count, 2, "two assignments stay two segments — dedupe is by id, not by splice")
+    }
+
+    func testResolverSkipsDanglingAndSameProjectIdsSilently() throws {
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        // a same-project node is NOT an assignment target (strictly up the ladder)
+        try GraphStore.insertNode(assignedNode("sibling", nil, summary: "sibling s"), at: l.cic)
+        // a dead id (deleted upstream) logs one line and is skipped
+        try GraphStore.insertNode(
+            assignedNode("r", nil, summary: "r s", assigned: ["sibling", "ghost-id", "r"]),
+            at: l.cic
+        )
+        let resolved = try resolveNode("r", at: l)
+        XCTAssertEqual(resolved.nodes.map(\.id), ["r"])
+        XCTAssertTrue(resolved.segments.isEmpty)
+    }
+
+    func testResolverDropsInactiveTargetsAndDormantMidLineFields() throws {
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        // inactive target: drops out of its own splice, its active ancestors still ride
+        try GraphStore.insertNode(assignedNode("anc", nil, summary: "anc s"), at: l.innerB)
+        try GraphStore.insertNode(assignedNode("target", "anc", summary: "target s", assigned: ["gone"]), at: l.innerB)
+        try GraphStore.updateActive(id: "target", active: false, at: l.innerB)
+        // mid-line node carrying the field (hand-edited): dormant
+        try GraphStore.insertNode(assignedNode("r", nil, summary: "r s", assigned: ["target"]), at: l.cic)
+        let resolved = try resolveNode("r", at: l)
+        XCTAssertEqual(resolved.nodes.map(\.id), ["anc", "r"], "the inactive target drops; `gone` (dangling under a dormant field) never fires")
+    }
+
+    func testUpdateAssignedNodeIdsSetsAndClears() throws {
+        try insert(node("a", nil))
+        try GraphStore.updateAssignedNodeIds(id: "a", assignedNodeIds: ["up-1", "up-1", ""], at: path)
+        XCTAssertEqual(try remaining()["a"]?.assignedNodeIds, ["up-1", "up-1", ""], "the store writes what it is given — hygiene is the wire's job")
+        try GraphStore.updateAssignedNodeIds(id: "a", assignedNodeIds: [], at: path)
+        XCTAssertEqual(try remaining()["a"]?.assignedNodeIds, [])
+    }
+
+    func testPersonaContextPullsAssignmentsThroughTheSameResolver() throws {
+        let l = try makeDeepLadder()
+        defer { try? FileManager.default.removeItem(atPath: l.tmp) }
+        try seedEightNodeTrace(l)
+        try SecretStore.setSecret("gr-key", for: "https://gr.example", at: l.global)
+        // the persona is tagged on the whole cic chain; its assignments ride
+        try GraphStore.updatePersonas(id: "cic-1", personas: ["p"], at: l.cic)
+        try GraphStore.updatePersonas(id: "cic-2", personas: ["p"], at: l.cic)
+        let ctx = try GraphStore.personaContext(
+            personaId: "p", at: l.cic, globalRoot: FilePath(l.global)
+        )
+        XCTAssertEqual(ctx.texts, [GraphStore.chainText(try resolveNode("cic-2", at: l).nodes)],
+                       "persona chains resolve through the same resolver node RUNs use")
+        XCTAssertEqual(ctx.mcps, [GraphMcpEndpoint(url: "https://gr.example", auth: "gr-key")],
+                       "assignment-segment MCPs ride with auth from their own folder")
     }
 }

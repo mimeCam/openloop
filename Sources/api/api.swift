@@ -175,6 +175,9 @@ private func configure(_ app: Application) async throws {
     graph.get { req async throws in
         try await GraphHandler().list(req: req)
     }
+    graph.get("nodes") { req async throws in
+        try await GraphHandler().ladderNodes(req: req)
+    }
     graph.post { req async throws in
         try await GraphHandler().create(req: req)
     }

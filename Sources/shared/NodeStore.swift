@@ -64,6 +64,8 @@ public struct NodeFile: Codable, Equatable, Sendable {
     public var status: String
     public var active: Bool
     public var personas: [String]
+    /// Standing assignment ids (see ChainResolver): roots only, dormant once the node gains a parent.
+    public var assignedNodeIds: [String]
     public var mcp: String?
     /// Repo-traveling marker: this node's MCP endpoint requires an
     /// authorization key (the key itself lives in SecretStore, keyed by `mcp`).
@@ -83,6 +85,7 @@ public struct NodeFile: Codable, Equatable, Sendable {
         status = node.status
         active = node.active
         personas = node.personas
+        assignedNodeIds = node.assignedNodeIds
         mcp = node.mcp
         mcpRequiresAuth = node.mcpRequiresAuth
         output = node.output
@@ -93,8 +96,8 @@ public struct NodeFile: Codable, Equatable, Sendable {
             id: id, parentId: parentId, prompt: prompt, agent: agent,
             status: status, output: output, took: took, mcp: mcp,
             mcpRequiresAuth: mcpRequiresAuth, summary: summary, name: name,
-            personas: personas, createdAt: createdAt,
-            completedAt: completedAt, active: active
+            personas: personas, assignedNodeIds: assignedNodeIds,
+            createdAt: createdAt, completedAt: completedAt, active: active
         )
     }
 
@@ -108,7 +111,8 @@ public struct NodeFile: Codable, Equatable, Sendable {
     fileprivate enum Field: String, CaseIterable, Sendable {
         case id, parentId = "parent_id", createdAt = "created_at", agent, took
         case completedAt = "completed_at", name, summary, prompt, status
-        case active, personas, mcp, mcpRequiresAuth = "mcp_requires_auth", output
+        case active, personas, assignedNodeIds = "assigned_node_ids", mcp
+        case mcpRequiresAuth = "mcp_requires_auth", output
     }
 
     // Tolerant decode: `personas`/`active`/`mcp_requires_auth` may be absent
@@ -126,7 +130,7 @@ public struct NodeFile: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, parentId, createdAt, agent, took, completedAt
         case name, summary, prompt, status, active, personas
-        case mcp, mcpRequiresAuth, output
+        case assignedNodeIds, mcp, mcpRequiresAuth, output
     }
 
     public init(from decoder: Decoder) throws {
@@ -143,6 +147,7 @@ public struct NodeFile: Codable, Equatable, Sendable {
         status = try c.decode(String.self, forKey: .status)
         active = try c.decodeIfPresent(Bool.self, forKey: .active) ?? true
         personas = try c.decodeIfPresent([String].self, forKey: .personas) ?? []
+        assignedNodeIds = try c.decodeIfPresent([String].self, forKey: .assignedNodeIds) ?? []
         mcp = try c.decodeIfPresent(String.self, forKey: .mcp)
         mcpRequiresAuth = try c.decodeIfPresent(Bool.self, forKey: .mcpRequiresAuth) ?? false
         output = try c.decodeIfPresent(String.self, forKey: .output)
@@ -316,6 +321,7 @@ private extension NodeStore {
         case .status: return scalar(f.status)
         case .active: return scalar(f.active)
         case .personas: return scalar(f.personas)
+        case .assignedNodeIds: return scalar(f.assignedNodeIds)
         case .mcp: return scalar(f.mcp)
         case .mcpRequiresAuth: return scalar(f.mcpRequiresAuth)
         case .output: return scalar(f.output)

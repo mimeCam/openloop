@@ -3483,6 +3483,16 @@ mark {
     border-top: 1px solid rgba(239, 68, 68, 0.08);
 }
 
+/* "How to actually run it" line under a refused launch (409 global share) */
+.launcher-validation-errors .error-hint {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed rgba(239, 68, 68, 0.2);
+    font-size: 12px;
+    line-height: 1.5;
+    color: #7f1d1d;
+}
+
 .loading-manual-workflows {
     text-align: center;
     padding: 20px;

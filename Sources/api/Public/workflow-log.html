@@ -547,7 +547,15 @@
             gap: 10px;
         }
         .summary-head .detail-section-label { margin-bottom: 0; }
-        .summary-actions { display: flex; align-items: center; gap: 6px; }
+        /* Advisory scope audit: the verdict is the summary head's title word —
+           the old SUMMARY heading's seat, left of the Edit/Add actions; neutral
+           renders nothing — not audited is not audited clean */
+        .detail-section-label.audit.ok { color: var(--accent-green); }
+        .detail-section-label.audit.warn { color: #f59e0b; }
+        .detail-section-label.audit.bad { color: var(--accent-red); }
+        .detail-section-label.audit.busy { color: #f59e0b; animation: wl-breathe 2.5s ease-in-out infinite; }
+        /* The summary head's left seat belongs to the audit title word when a verdict exists; without one the lone Edit/Add still pins right. */
+        .summary-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
         .summary-edit-btn {
             background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.12);
@@ -602,6 +610,7 @@
         @media (prefers-reduced-motion: reduce) {
             .run-log.beacon { animation: none; }
             .detail-section-label.running { animation: none; }
+            .detail-section-label.audit.busy { animation: none; }
         }
 
         /* ── Mobile: page-specific diet (panel sheet rules live in panel.css) ── */
@@ -707,6 +716,8 @@
 
     <script src="/panel.js"></script>
     <script src="/bubble.js"></script>
+    <script src="/mention.js"></script>
+    <script src="/suggest.js"></script>
     <script src="/workflow-log.js"></script>
 </body>
 </html>

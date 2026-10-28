@@ -802,7 +802,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
             });
             if (!response.ok) {
-                throw new Error(`Failed to launch workflow: ${response.statusText}`);
+                // statusText is empty over HTTP/2 — carry the server's own "reason"
+                let reason = '';
+                try {
+                    const body = await response.json();
+                    if (body && body.reason) reason = body.reason;
+                } catch (e) { /* non-JSON body */ }
+                throw new Error(reason || `Server responded ${response.status}`);
             }
             const data = await response.json();
             return data;
@@ -823,7 +829,20 @@ document.addEventListener('DOMContentLoaded', function() {
             return { valid: false, errors: data.errors || [] };
         }
         if (!response.ok) {
-            throw new Error(`Could not reach server. Please try again.`);
+            // refusals (409 global share, etc.) carry a human-readable "reason" — surface it
+            let reason = null;
+            try {
+                const body = await response.json();
+                if (body && body.reason) reason = body.reason;
+            } catch (e) { /* non-JSON body */ }
+            return {
+                valid: false,
+                refused: true,
+                errors: [reason || `The server refused the launch (HTTP ${response.status}). Please try again.`],
+                hint: response.status === 409
+                    ? 'Open a project on the home page, expand it, and launch this workflow from its "Global (system-wide)" section — the run and its logs will land in that project.'
+                    : null
+            };
         }
         return { valid: true, errors: [] };
     }
@@ -846,6 +865,27 @@ document.addEventListener('DOMContentLoaded', function() {
                 <span class="info-icon" data-doc="workflow-levels" title="How levels work">ⓘ</span>
             </div>
             <ul>${errorsHtml}</ul>
+        `;
+
+        const actionsDiv = launcher.querySelector('.launcher-actions');
+        actionsDiv.parentNode.insertBefore(panel, actionsDiv);
+    }
+
+    // never a browser alert — Safari silently stops showing repeated alerts
+    function showLaunchRefusal(launcher, message, hint) {
+        const existing = launcher.querySelector('.launcher-validation-errors');
+        if (existing) existing.remove();
+
+        const panel = document.createElement('div');
+        panel.className = 'launcher-validation-errors';
+        panel.setAttribute('role', 'alert');
+        panel.innerHTML = `
+            <div class="error-title" aria-live="assertive">
+                <span class="error-icon">✗</span>
+                Launch refused
+            </div>
+            <ul><li>${escapeHtml(message)}</li></ul>
+            ${hint ? `<div class="error-hint">${escapeHtml(hint)}</div>` : ''}
         `;
 
         const actionsDiv = launcher.querySelector('.launcher-actions');
@@ -982,7 +1022,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 const validation = await validateManualWorkflow(instancePath, workflowId, ask);
 
                 if (!validation.valid) {
-                    showValidationErrors(launcher, validation.errors);
+                    if (validation.refused) {
+                        showLaunchRefusal(launcher, validation.errors[0] || 'The server refused this launch.', validation.hint);
+                    } else {
+                        showValidationErrors(launcher, validation.errors);
+                    }
                     launchBtn.disabled = false;
                     launchBtn.textContent = 'Launch';
                     return;

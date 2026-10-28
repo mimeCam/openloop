@@ -703,6 +703,11 @@
         return tip ? `${turns} · ${threadRunMeta(tip)}` : turns;
     }
 
+    // The thread reads as a chat, not a report: no RESULT/SUMMARY headings, the bubbles speak (state labels stay).
+    // The summary is the main answer (5 free lines), the raw result a 2-line reference — depths ride bubble.js's data-free-lines.
+    const THREAD_RESULT_LINES = 2;
+    const THREAD_SUMMARY_LINES = 5;
+
     function threadEntryHtml(l) {
         return `<div class="run-log" data-run-id="${escHtml(l.id)}">` +
             `<div class="run-log-meta"><span>${escHtml(l.id.slice(0, 8))} · ${escHtml(threadRunMeta(l))}</span>${threadDelBtn(l)}</div>` +
@@ -711,6 +716,7 @@
             `</div>` +
             threadResultSection(l) +
             threadSummarySection(l) +
+            auditSection(l) +
             `</div>`;
     }
 
@@ -719,14 +725,15 @@
         return `${l.status}${took} · ${ago(l.created_at)}`;
     }
 
+    // The thread's direct answer: no RESULT heading, the bubble is the message (state labels stay); fold depth 2 — a reference copy under the summary.
     function threadResultSection(l) {
         if (l.status === 'progress') {
             return `<div><div class="detail-section-label running">RUNNING</div>` +
-                OpenLoopBubble.bubbleHtml('output', 'in progress…') + `</div>`;
+                OpenLoopBubble.bubbleHtml('output', 'in progress…', null, THREAD_RESULT_LINES) + `</div>`;
         }
         const failed = l.status === 'failed';
-        const label = `<div class="detail-section-label result${failed ? ' error' : ''}">${failed ? 'ERROR' : 'RESULT'}</div>`;
-        return `<div>${label}${OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)')}</div>`;
+        const label = failed ? `<div class="detail-section-label result error">ERROR</div>` : '';
+        return `<div>${label}${OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)', null, THREAD_RESULT_LINES)}</div>`;
     }
 
     function threadSummarySection(l) {
@@ -734,15 +741,43 @@
         return `<div class="run-summary-section" data-run-id="${escHtml(l.id)}">${threadSummaryInner(l)}</div>`;
     }
 
+    // The summarized answer is the thread's main message: no SUMMARY heading, the bubble speaks — fold depth 5 vs the result's 2.
+    // The audit title word takes the old SUMMARY heading's seat in the head row — band and coloring come from the verdict alone.
     function threadSummaryInner(l) {
         const body = l.summary
-            ? OpenLoopBubble.bubbleHtml('summary', l.summary)
+            ? OpenLoopBubble.bubbleHtml('summary', l.summary, null, THREAD_SUMMARY_LINES)
             : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
         return `<div class="summary-head">` +
-            `<div class="detail-section-label summary">SUMMARY</div>` +
+            auditTitleHtml(l) +
             `<span class="summary-actions">` +
             `<button class="summary-edit-btn" data-run-id="${escHtml(l.id)}">${l.summary ? 'Edit' : 'Add'}</button>` +
             `</span></div>${body}`;
+    }
+
+    // The advisory scope audit's render grammar — character-identical twins in graph.js, pinned by both sanity suites.
+    // nil → nothing; 'analyzing' → ANALYZING…; < AUDIT_WARN_CHARS → ANALYZED: OK; ≤ AUDIT_BAD_CHARS → ANALYSIS: ISSUE FOUND + the ANALYSIS bubble; past it → the same title in red + bubble.
+    const AUDIT_WARN_CHARS = 100;
+    const AUDIT_BAD_CHARS = 200;
+
+    function auditBand(l) {
+        const text = (l.audit || '').trim();
+        if (text) return text.length < AUDIT_WARN_CHARS ? 'ok' : (text.length <= AUDIT_BAD_CHARS ? 'warn' : 'bad');
+        return l.audit_status === 'analyzing' ? 'busy' : null;
+    }
+
+    function auditTitleHtml(l) {
+        const band = auditBand(l);
+        if (band === 'busy') return '<div class="detail-section-label audit busy" title="Analyzing the recorded turn against the ask…">ANALYZING…</div>';
+        if (band === 'ok') return '<div class="detail-section-label audit ok" title="All clear">ANALYZED: OK</div>';
+        if (band === 'warn' || band === 'bad') return `<div class="detail-section-label audit ${band}" title="Scope analysis found findings — read the ANALYSIS note below">ANALYSIS: ISSUE FOUND</div>`;
+        return '';
+    }
+
+    function auditSection(l) {
+        const band = auditBand(l);
+        if (band !== 'warn' && band !== 'bad') return '';
+        return `<div class="audit-section"><div class="detail-section-label audit ${band}">ANALYSIS</div>` +
+            OpenLoopBubble.bubbleHtml(band === 'bad' ? 'output error' : 'output', l.audit) + `</div>`;
     }
 
     // Mirrors graph.js's runSummaryEditHtml — same 7-line canvas, same
@@ -842,8 +877,10 @@
         }
         // The composer capsule: field + send circle in one row (the skin
         // lives in panel.css). rows=3, not the editors' 7 — a pinned dock
-        // must not eat the stream; resize + the 40vh cap bound it.
-        return `<div class="run-composer">` +
+        // must not eat the stream; resize + the 40vh cap bound it. The
+        // mention hint rides above the capsule (suggest.js single-sources it).
+        return `<div class="mcp-hint suggest-hint">${escHtml(OpenLoopSuggest.HINT)}</div>` +
+            `<div class="run-composer">` +
             `<textarea id="thread-followup-text" rows="3" aria-label="Continue conversation" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
             `<button class="composer-send" id="thread-followup-send" aria-label="Send follow-up (⌘↵)" title="Send follow-up (⌘↵)" aria-keyshortcuts="Meta+Enter Control+Enter" disabled>${sendIcon()}</button>` +
             `</div>`;
@@ -879,6 +916,8 @@
             // blur is belt-and-braces here (loadThread has no focus gate),
             // and matches the button path: focus leaves a sent field.
             OpenLoopPanel.bindCmdEnterSubmit(text, submitFollowupTurn);
+            // per-render bind: 'above' — the dock is bottom-pinned, the list unfolds upward
+            OpenLoopSuggest.bindField(text, { instance: instanceParam, place: 'above' });
             send.addEventListener('click', submitFollowupTurn);
         }
     }
@@ -1015,12 +1054,16 @@
         const tip = threadTip();
         if (!text || !text.value.trim() || !tip) return;
         const prompt = text.value.trim();
+        const refIds = OpenLoopSuggest.nodeIds(text);
+        const body = { prompt, parent_run_id: tip.id };
+        if (refIds.length) body.node_ids = refIds;
         try {
             await threadFetchJson(threadUrl('/run'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt, parent_run_id: tip.id })
+                body: JSON.stringify(body)
             });
+            OpenLoopSuggest.reset(text);
             refreshThread(true);
         } catch (e) {
             showError(`Failed to continue the conversation: ${e.message}`);
@@ -1151,9 +1194,27 @@
         await checkThreadAutoSeed();
         checkThreadEditFields();
         checkThreadDelete();
+        checkAuditBand();
+        checkThreadFoldDepths();
         checkDeepLinkBeacon();
         checkDockStructure();
+        checkSuggestWiring();
         console.log('All sanity checks passed.');
+    }
+
+    // the session dock carries the shared hint line — the dropdown itself is pinned by suggest.js's suite
+    function checkSuggestWiring() {
+        const mk = (status, summary) => {
+            const saved = threadRows;
+            threadRows = [{ id: 'r1', created_at: 1, status, summary, output: 'x' }];
+            const html = threadFooterHtml(threadTip());
+            threadRows = saved;
+            return html;
+        };
+        const composer = mk('success', 's');
+        console.assert(composer.includes('mcp-hint suggest-hint'), 'suggest: the session dock carries the mention hint line');
+        console.assert(composer.includes('@file') && composer.includes('#node'), 'suggest: the dock hint names both triggers');
+        console.log('OK: suggest wiring (session dock hint line)');
     }
 
     function checkNodeCardBodyEmpty() {
@@ -1425,6 +1486,47 @@
         console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
             'threadDel: teaching hint pinned');
         console.log('OK: per-turn delete markup');
+    }
+
+    // The audit band grammar, pinned on both pages (the audit trio renders character-identical) — an empty audit string is neutral: "not audited" is not "audited clean".
+    function checkAuditBand() {
+        const clean = { audit: null, audit_status: null };
+        console.assert(auditBand(clean) === null, 'auditBand: no audit → nothing renders');
+        console.assert(auditTitleHtml(clean) === '' && auditSection(clean) === '',
+            'auditBand: neutral renders neither title word nor bubble');
+        console.assert(auditBand({ audit: '   ' }) === null, 'auditBand: whitespace-only audit is neutral');
+        const busy = { audit: null, audit_status: 'analyzing' };
+        console.assert(auditBand(busy) === 'busy', 'auditBand: the marker reads busy');
+        console.assert(auditTitleHtml(busy).includes('audit busy') && auditTitleHtml(busy).includes('ANALYZING…') && auditSection(busy) === '',
+            'auditBand: busy renders the ANALYZING title word only — no bubble');
+        const ok = { audit: 'All clear' };
+        console.assert(ok.audit.length < 100 && auditBand(ok) === 'ok',
+            'auditBand: the mandated clean line stays under 100 chars');
+        console.assert(auditTitleHtml(ok).includes('audit ok') && auditTitleHtml(ok).includes('ANALYZED: OK'),
+            'auditBand: clean → the ANALYZED: OK title word, the verdict text never shown as content');
+        console.assert(auditSection(ok) === '', 'auditBand: clean renders no analysis bubble');
+        const warn = { audit: 'beyond scope: '.repeat(8) }; // 13 × 8 = 104 chars
+        console.assert(auditBand(warn) === 'warn', 'auditBand: 100–200 chars → warn');
+        console.assert(auditTitleHtml(warn).includes('audit warn') && auditTitleHtml(warn).includes('ISSUE FOUND') && auditSection(warn).includes('ANALYSIS'),
+            'auditBand: warn → the issue title word plus the analysis bubble');
+        const bad = { audit: 'x'.repeat(201) };
+        console.assert(auditBand(bad) === 'bad', 'auditBand: over 200 chars → bad');
+        console.assert(auditTitleHtml(bad).includes('audit bad') && auditSection(bad).includes('ANALYSIS'),
+            'auditBand: bad → the red issue title word plus the bubble');
+        const row = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's', ...warn });
+        console.assert(row.indexOf('wl-bubble summary') < row.indexOf('ANALYSIS'),
+            'auditBand: the analysis bubble rides after the summary');
+        console.log('OK: audit band grammar');
+    }
+
+    // The thread's fold hierarchy, pinned on both pages — result 2, summary 5, no RESULT/SUMMARY headings.
+    function checkThreadFoldDepths() {
+        const html = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' });
+        console.assert(html.includes('data-free-lines="2"'), 'foldDepths: the raw result folds at two lines');
+        console.assert(html.includes('data-free-lines="5"'), 'foldDepths: the summary folds at five lines');
+        console.assert(!html.includes('>RESULT<') && !html.includes('>SUMMARY<'),
+            'foldDepths: the chat cells carry no answer headings');
+        console.log('OK: thread fold depths (result 2 · summary 5 · no headings)');
     }
 
     // ?run= deep link: consumed on first sight, ringed, and centered only

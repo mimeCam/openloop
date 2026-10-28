@@ -67,7 +67,7 @@ struct ManualWorkflowHandler: Sendable {
             throw Abort(.badRequest)
         }
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        try throwIfGlobalShare(instancePath)
+        try throwIfGlobalShare(instancePath, what: "validation")
         let body = try req.content.decode(ManualWorkflowLaunchRequest.self)
 
         let roots = Paths.dirsToHome(from: FilePath(instancePath))
@@ -92,7 +92,7 @@ struct ManualWorkflowHandler: Sendable {
         }
 
         let instancePath = rawInstancePath.removingPercentEncoding ?? rawInstancePath
-        try throwIfGlobalShare(instancePath)
+        try throwIfGlobalShare(instancePath, what: "launch")
         let launchRequest = try req.content.decode(ManualWorkflowLaunchRequest.self)
 
         // Validate workflow exists
@@ -236,10 +236,14 @@ private extension Error {
     }
 }
 
+private let log = PrintLog(module: "api")
+
 // The global share is a shared library, never a manual run target — manual runs execute in the launching project's `.openloop`.
-private func throwIfGlobalShare(_ instancePath: String) throws {
+private func throwIfGlobalShare(_ instancePath: String, what: String) throws {
     assert(instancePath.notEmpty)
     guard FilePath(instancePath) != Paths.globalShareRoot else {
+        // ErrorMiddleware answers the client; PrintLog makes the refusal visible in api-stdout.log too
+        log.warn("Manual workflow \(what) refused: the global share is a shared library, not a run target (\(instancePath)) — launch the workflow from a project instance so it runs and logs in that project")
         throw Abort(
             .conflict,
             reason: "Global share is a shared library, not a run target — launch the workflow from a project instance so it runs and logs in that project"

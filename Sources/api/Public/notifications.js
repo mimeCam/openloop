@@ -391,9 +391,12 @@
     }
 
     // "open ↗" doubles as the read receipt — target="_blank" lets the mark POST ride along with navigation.
+    // BIND, never fire — bindRows runs on every render (load, poll, filter); a bare markRead would mark the whole list read on page load.
     function bindOpenMarksRead(a) {
-        const n = items.find(x => x.id === a.dataset.ref && x.instance_path === a.dataset.inst);
-        if (n && !n.read) markRead(a.dataset);
+        a.addEventListener('click', () => {
+            const n = items.find(x => x.id === a.dataset.ref && x.instance_path === a.dataset.inst);
+            if (n && !n.read) markRead(a.dataset);
+        });
     }
 
     // One-way reveal: remember the key (so the next poll re-render keeps it
@@ -560,6 +563,23 @@ Press / to focus · Esc to clear`;
         const quoted = rowHtml({ ...base, id: 'r"1', read: false });
         console.assert(/<a class="notif-open"[^>]*\bdata-ref="r&quot;1"/.test(quoted),
             'rowHtml: open payload attributes escaped');
+        // Regression pin (mark-all-on-reload bug): a render/poll is not a user action — binding attaches, never fires.
+        const savedItems = items, realMarkRead = markRead;
+        items = [{ ...base, id: 'r 1', instance_path: '/tmp/demo', read: false }];
+        let posted = 0;
+        markRead = () => { posted++; };
+        const bound = [];
+        bindOpenMarksRead({
+            dataset: { kind: 'node_run', ref: 'r 1', inst: '/tmp/demo' },
+            addEventListener: (type, fn) => bound.push([type, fn])
+        });
+        console.assert(bound.length === 1 && bound[0][0] === 'click' && posted === 0,
+            'bindOpenMarksRead: binds one click listener, marks nothing during render');
+        bound[0][1](); // the user's click — only now may the POST fire
+        markRead = realMarkRead;
+        items = savedItems;
+        console.assert(posted === 1,
+            'bindOpenMarksRead: the listener fires the mark exactly once per click');
         console.log('OK: open marks read');
     }
 

@@ -427,6 +427,115 @@
             font-weight: 600;
         }
 
+        /* NODES rails — a dot fills with its status color when the node rides the root's resolved chain; one horizontal scroll per folder */
+        .nr-group { margin-bottom: 12px; }
+        .nr-group:last-child { margin-bottom: 0; }
+        .nr-scroll { overflow-x: auto; padding-bottom: 4px; }
+        .nr-scroll::-webkit-scrollbar { height: 4px; }
+        .nr-scroll::-webkit-scrollbar-track { background: transparent; }
+        .nr-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 2px; }
+        /* width auto (not max-content): the lane alone sizes the horizontal scroll; a long pick name wraps at the panel's width */
+        .nr-chain {
+            display: flex;
+            flex-direction: column;
+            margin-left: calc(26px * var(--nr-offset, 0));
+        }
+        .nr-lane { display: flex; width: max-content; }
+        /* pick captions: the assigned tip names itself under its dot; --i is lane-relative, --nr-offset carries the branch indent */
+        .nr-captions {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            margin-top: 4px;
+        }
+        .nr-caption {
+            margin-left: min(calc(26px * var(--i, 0) + 7px), 176px);
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-family: inherit;
+            font-size: 10px;
+            font-weight: 500;
+            line-height: 1.45;
+            text-align: left;
+            color: var(--text-primary);
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            cursor: pointer;
+            background: rgba(255,255,255,0.04);  /* neutral fallback tint */
+            border: 1px solid rgba(255,255,255,0.10);
+        }
+        .nr-caption:hover:not(:disabled) { filter: brightness(1.4); }
+        .nr-caption:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        .nr-caption:disabled { cursor: default; }
+        .nr-caption.inactive { opacity: 0.55; }
+        .nr-slot { position: relative; width: 26px; height: 26px; flex-shrink: 0; }
+        .nr-slot::after {
+            content: '';
+            position: absolute;
+            top: 12px; left: 19px;
+            width: 14px; height: 2px;
+            border-radius: 1px;
+            background: rgba(255,255,255,0.16);
+        }
+        .nr-slot.last::after { display: none; }
+        .nr-dot {
+            position: absolute;
+            left: 7px; top: 7px;
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            background: transparent;
+            box-shadow: 0 0 0 3px rgba(255,255,255,0.04);
+            transition: box-shadow 0.15s ease, transform 0.1s ease;
+        }
+        .nr-dot::before { content: ''; position: absolute; inset: -9px; } /* the tap area */
+        .nr-dot:not(.filled) {
+            border: 1.5px solid rgba(255,255,255,0.25);
+            box-sizing: border-box;
+        }
+        .nr-dot.filled.progress    { background: var(--accent-amber); }
+        .nr-dot.filled.summarizing { background: var(--accent-blue); }
+        .nr-dot.filled.answered    { background: #ff9f0a; }
+        .nr-dot.filled.success     { background: var(--accent-green); }
+        .nr-dot.filled.failed      { background: var(--accent-red); }
+        .nr-dot:hover:not(:disabled) { box-shadow: 0 0 0 3px rgba(52,199,89,0.25); }
+        .nr-dot:active:not(:disabled) { transform: scale(0.9); }
+        .nr-dot:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 3px; }
+        .nr-dot.inactive,
+        .nr-dot.inactive:hover {
+            filter: grayscale(1);
+            opacity: 0.5;
+            cursor: default;
+            box-shadow: none;
+        }
+        .assign-dangling {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 5px 8px;
+            margin-bottom: 6px;
+            border: 1px dashed rgba(255,159,10,0.45);
+            border-radius: 8px;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+        .assign-dangling .assign-unassign {
+            background: none;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px;
+            color: var(--text-muted);
+            font-size: 9px;
+            padding: 2px 7px;
+            cursor: pointer;
+        }
+        .assign-dangling .assign-unassign:hover {
+            border-color: rgba(255,255,255,0.4);
+            color: rgba(255,255,255,0.85);
+        }
+
         .node-card-header {
             background: var(--bg-card-header);
             border-bottom: 1px solid rgba(255,255,255,0.05);
@@ -614,15 +723,12 @@
         .node-status-dot.answered { background: #ff9f0a; }
         .node-status-dot.success { background: var(--accent-green); }
         .node-status-dot.failed { background: var(--accent-red); }
-        /* bird's-eye caption tints — same status tokens as the dots above:
-           the bubble's border/bg wear the cell's hue at whisper volume
-           (badge grammar: fill ≤ 0.12, border ≤ 0.35) so the dot above the
-           row and the bubble below it read as one colored object */
-        .be-caption.progress    { background: rgba(245,158,11,0.10); border-color: rgba(245,158,11,0.26); }
-        .be-caption.summarizing { background: rgba(10,132,255,0.10); border-color: rgba(10,132,255,0.26); }
-        .be-caption.answered    { background: rgba(255,159,10,0.10); border-color: rgba(255,159,10,0.26); }
-        .be-caption.success     { background: rgba(52,199,89,0.10); border-color: rgba(52,199,89,0.26); }
-        .be-caption.failed      { background: rgba(255,69,58,0.12); border-color: rgba(255,69,58,0.32); }
+        /* caption tints (bird's-eye + the NODES rails' pick rows) — badge grammar: fill ≤ 0.12, border ≤ 0.35 */
+        .be-caption.progress,    .nr-caption.progress    { background: rgba(245,158,11,0.10); border-color: rgba(245,158,11,0.26); }
+        .be-caption.summarizing, .nr-caption.summarizing { background: rgba(10,132,255,0.10); border-color: rgba(10,132,255,0.26); }
+        .be-caption.answered,    .nr-caption.answered    { background: rgba(255,159,10,0.10); border-color: rgba(255,159,10,0.26); }
+        .be-caption.success,     .nr-caption.success     { background: rgba(52,199,89,0.10); border-color: rgba(52,199,89,0.26); }
+        .be-caption.failed,      .nr-caption.failed      { background: rgba(255,69,58,0.12); border-color: rgba(255,69,58,0.32); }
         @keyframes pulse {
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.35; transform: scale(0.75); }
@@ -965,6 +1071,13 @@
             gap: 10px;
         }
         .summary-head .detail-section-label { margin-bottom: 0; }
+        /* Advisory scope audit: the verdict is the summary head's title word —
+           the old SUMMARY heading's seat, left of the Edit/Add actions; neutral
+           renders nothing — not audited is not audited clean */
+        .detail-section-label.audit.ok { color: var(--accent-green); }
+        .detail-section-label.audit.warn { color: var(--accent-amber); }
+        .detail-section-label.audit.bad { color: var(--accent-red); }
+        .detail-section-label.audit.busy { color: var(--accent-amber); animation: live-breathe 2.5s ease-in-out infinite; }
         .summary-regen {
             background: rgba(52,199,89,0.14);
             border: 1px solid rgba(52,199,89,0.40);
@@ -996,7 +1109,8 @@
         /* .run-composer / .run-followup-hint live in panel.css — the dock's
            shared furniture (one skin, one home; the page copy was deleted
            when the pinned footer landed). */
-        .summary-actions { display: flex; align-items: center; gap: 6px; }
+        /* The summary head's left seat belongs to the audit title word when a verdict exists; without one the lone Edit/Add still pins right. */
+        .summary-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
         .summary-edit-btn {
             background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.12);
@@ -1399,6 +1513,7 @@
             .delete-btn.deleting { animation: none; }
             .run-counts .live { animation: none; }
             .detail-section-label.running { animation: none; }
+            .detail-section-label.audit.busy { animation: none; }
             .detail-panel-body.run-enter { animation: none; }
             .detail-panel-body.run-back { animation: none; }
             .run-log.beacon { animation: none; }
@@ -1460,7 +1575,9 @@
     </button>
 
     <div id="composer">
-        <button id="composer-cancel" title="Cancel">✕</button>
+        <button id="composer-cancel" title="Cancel (Esc)" aria-label="Cancel (Esc)">✕</button>
+        <!-- showComposer owns this line per mode: creation keeps this files-only copy, run mode swaps in the full "#node" line -->
+        <div class="mcp-hint suggest-hint" id="composer-mention-hint">Type @file to attach</div>
         <textarea id="composer-text" placeholder="Type the prompt…" autocomplete="off" spellcheck="false"></textarea>
         <button id="composer-mcp-toggle" type="button">add mcp</button>
         <div id="composer-mcp">
@@ -1486,6 +1603,9 @@
     <script src="lang.js"></script>
     <script src="panel.js"></script>
     <script src="bubble.js"></script>
+    <script src="mention.js"></script>
+    <script src="suggest.js"></script>
+    <script src="ladder.js"></script>
     <script src="graph.js"></script>
     <script>
         initLangSwitcher();

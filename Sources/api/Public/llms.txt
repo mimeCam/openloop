@@ -155,17 +155,53 @@ Instance files — project-tree index for the @-mention composer
 
 Graph — node graph per instance (powers /graph.html)
   GET    /api/instances/:id/graph              → { nodes:[GraphNode] }
+  GET    /api/instances/:id/graph/nodes        → { nodes:[{ id, name?, agent,
+                                                   status, active, source,
+                                                   source_path,
+                                                   chain_mcp_count,
+                                                   parent_id?, created_at,
+                                                   assigned_node_ids }] }
+                                                   All nodes visible through
+                                                   the ladder, nearest-first,
+                                                   id-deduped (entry order IS
+                                                   the ladder) — feeds the
+                                                   #node box and the NODES
+                                                   rails. source = project|
+                                                   parent|global, the folder
+                                                   the node lives in;
+                                                   source_path = that folder
+                                                   (rails' grouping key);
+                                                   chain_mcp_count = MCP URLs
+                                                   riding the resolved chain
+                                                   (count-only, no secrets
+                                                   read); the shape fields
+                                                   (parent_id, created_at,
+                                                   assigned_node_ids) pass
+                                                   through so a client can
+                                                   mirror ChainResolver and
+                                                   compute which dots fill.
   POST   /api/instances/:id/graph              body { prompt, agent, parent_id? |
                                                    insert_before?, mcp?, mcp_auth? }
                                                    → { node fields… }   (launches a run)
   PUT    /api/instances/:id/graph/:nid         body: any subset (mcp, mcp_auth,
-                                                   summary, personas, active, name,
-                                                   agent)
+                                                   summary, personas,
+                                                   assigned_node_ids, active,
+                                                   name, agent)
                                                    name = chain label shown in the
                                                    graph UI; empty string clears it
                                                    agent = runner for this node's
                                                    next execution (unknown agent →
                                                    400; must exist in /api/agents)
+  assigned_node_ids = standing assignments (see Assignments under Node):
+                                                   ids strictly up the
+                                                   ladder; [] clears. Roots
+                                                   only — dormant once
+                                                   parented. A dead id is
+                                                   not an error here or at
+                                                   run time: skipped with
+                                                   one log line; the panel
+                                                   shows "⚠ missing" with an
+                                                   un-assign action.
   mcp_auth is WRITE-ONLY: set/replace (non-empty string) or clear (empty
   string). It is never returned. The key is stored per machine in
   .openloop/secrets.json5 keyed by the node's mcp URL (gitignored, 0600);
@@ -175,7 +211,8 @@ Graph — node graph per instance (powers /graph.html)
   DELETE /api/instances/:id/graph/:nid[?chain=true] → { nodes:[GraphNode] }
   POST   /api/instances/:id/graph/:nid/summary body { prompt? }  → regenerate /
                                                    re-run with the edited prompt
-  POST   /api/instances/:id/graph/:nid/run     body { prompt, parent_run_id? }
+  POST   /api/instances/:id/graph/:nid/run     body { prompt, parent_run_id?,
+                                                   node_ids? }
                                                    → run log entry (prompt stored
                                                    & returned raw; context file
                                                    lines are added only at exec
@@ -185,15 +222,53 @@ Graph — node graph per instance (powers /graph.html)
                                                    summaries are written to
                                                    convo.md and referenced with
                                                    @/context/convo.md
-                                                   MCP scope = this node's own
-                                                   ancestor chain only, this
-                                                   instance only. Cross-project
-                                                   MCPs reach runs through the
-                                                   persona channel below, not
-                                                   through node RUNs.
+                                                   node_ids = `#node` mentions
+                                                   (the wire carries ids; the
+                                                   #name text is the human's
+                                                   anchor). Each id resolves
+                                                   nearest-first through the
+                                                   ladder; unknown id → 400
+                                                   naming it, before anything
+                                                   is written. A referenced
+                                                   node contributes READ-ONLY
+                                                   from its whole active
+                                                   chain: MCP endpoints (auth
+                                                   from that folder's secrets
+                                                   store, merged nearest-wins,
+                                                   the run's own chain FIRST)
+                                                   and one ref-<id>.md
+                                                   chainText file in the run's
+                                                   context dir (persona-gated:
+                                                   present only when the
+                                                   referenced node itself has
+                                                   a summary; summary-less
+                                                   ancestors skip silently).
+                                                   Nothing is written to the
+                                                   folder a ref lives in. Ids
+                                                   persist on the run row
+                                                   (ref_node_ids); a retry
+                                                   re-resolves at retry time
+                                                   (deleted ref → 400 then).
+                                                   MCP scope = the run's
+                                                   resolved chain (ancestors +
+                                                   assignments) first, then
+                                                   refs' chains, nearest-wins
+                                                   by URL. Assignments widen
+                                                   ctx.md to the resolved
+                                                   chain's chainText; run
+                                                   readiness never looks at
+                                                   assignments.
   PUT    /api/instances/:id/graph/:nid/runs/:rid  body { summary } → edited
                                                    run summary (enables
                                                    follow-ups on it)
+  POST   /api/instances/:id/graph/:nid/runs/:rid/retry → Run. Failed tips
+                                                   only, no children, not in
+                                                   flight. Persisted node_ids
+                                                   re-resolve at retry time —
+                                                   same #node ref scope as
+                                                   the run route above
+                                                   (context files rebuilt
+                                                   fresh).
   DELETE /api/instances/:id/graph/:nid/runs/:rid → { logs:[…] } (fresh list).
                                                    Delete one run-log row:
                                                    rows whose parent_run_id
@@ -249,23 +324,32 @@ notification_kinds marker row written in the same transaction as the insert
 (absence of a marker = node run).
   GET  /api/instances/:id/graph/sessions/:sid/logs → { logs:[Run…] }
        (sid = workflow session UUID; run 0 is the seeded original answer)
-  POST /api/instances/:id/graph/sessions/:sid/run   body { prompt, parent_run_id }
+  POST /api/instances/:id/graph/sessions/:sid/run   body { prompt,
+       parent_run_id?, node_ids? }
        → Run. Follow-up turn — a fully generic RUN item, the exact shape
        node RUNs use: persona-free `_bottom_` args, agent = the workflow's
        own (recorded on its run row, resolved like any graph agent;
-       unresolvable → 400). No persona knowledge or system prompt reaches
-       the turn — context = convo.md (thread summaries) + the workflow
-       parents' full outputs. Gating mirrors node runs: parent must be the
+       unresolvable → 400). Context files, referenced line-per-file in the
+       node-RUN order: ctx.md = persona knowledge (every persona the
+       session used, in first-use order; each persona-tagged chain's
+       chainText, oldest first, --- fenced; persona-channel gates
+       inherited — a tagged node without a summary contributes nothing,
+       secrets read where the nodes live); convo.md = thread summaries;
+       parent-*.md = the workflow parents' full outputs. node_ids = `#node`
+       mentions, same ladder resolution and read-only contributions as the
+       node run route: their MCP endpoints merge nearest-wins AFTER the
+       persona union, their knowledge rides as persona-gated ref-<id>.md
+       chainText files; ids persist on the run row and the retry route
+       re-resolves them. Gating mirrors node runs: parent must be the
        thread tip with a summary (409 already-continued / 400 no-summary),
-       thread empty → 409 seed first. Session must have a successful
-       run_ends row (409 otherwise). MCP scope = the union of ALL the
-       session's personas' assigned MCP servers (outer + inner workflows,
-       live from the graph at turn time), collected across the
-       instance → parent-project → global-share ladder, nearest-wins by
-       URL: a persona configured (or attached to nodes) in a parent
-       project or in the global share contributes its MCPs here. This
-       persona channel is the approved way to share node-enabled
-       functionality across projects; plain node RUNs stay chain-local.
+       thread empty → 409 seed first; a successful run_ends row is
+       required (409 otherwise). MCP scope = the union of ALL the
+       session's personas' MCP servers (outer + inner workflows, live
+       from the graph at turn time, each chain through the same assignment
+       resolver node RUNs use), collected across the ladder, nearest-wins
+       by URL. The persona channel, #node refs, and standing assignments
+       are the ways node functionality crosses projects — assignments
+       reach turns through both the union and ctx.md, as they reach RUNs.
   POST /api/instances/:id/graph/sessions/:sid/seed  → Run. Opt-in run 0:
        materializes the original answer (prompt = the session's original
        ask, output = tip persona output) and summarizes it. Empty/failed
@@ -287,9 +371,27 @@ notification_kinds marker row written in the same transaction as the insert
 
   GET    /api/agents                           → { agents:[{ name }] }
   Node : { id, parent_id?, prompt, agent, status, output?, took?, mcp?,
-           mcp_requires_auth, mcp_auth_local, summary?, personas, active
+           mcp_requires_auth, mcp_auth_local, summary?, personas,
+           assigned_node_ids, active
            (dormant flag), name?, runnable,
            runs:{ total, success, failed, active }, created_at, completed_at? }
+  Assignments: a root's standing assigned_node_ids name nodes strictly UP
+           the ladder (parent projects / the global share — never the
+           node's own project; same-project reuse is what parents are
+           for). Resolution (GraphStore.ChainResolver): each assignment
+           contributes the target's whole active ancestor line
+           oldest→target; splices expand their own root's assignments
+           first; ids dedupe, first occurrence wins. No summary gate —
+           MCPs always ride, summary-less members skip silently, inactive
+           nodes drop out exactly where their MCPs do, a dead id skips
+           with one log line (never a 400). Knowledge lands INSIDE the
+           run's ctx.md (resolved chain's chainText, oldest first) and
+           tools inside its MCP set (own chain first, then assignment
+           segments); the persona channel uses the same resolver, so
+           workflow runs and session follow-ups get assignments too.
+           READ-ONLY inputs — nothing is ever written to the assigned
+           node's folder. Run readiness never considers them. Field:
+           `assigned_node_ids`, roots only, dormant once parented.
            mcp_requires_auth = the repo-traveling marker "this MCP requires
            an authorization key"; mcp_auth_local = this machine's
            secrets store holds the key for the node's URL (what runs will

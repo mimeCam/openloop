@@ -5,7 +5,7 @@
   "agent" : "cc_docker-z",
   "took" : 266,
   "completed_at" : 813867574.954345,
-  "name" : null,
+  "name" : "cc: --bare mode with skills",
   "summary" : "In claude-code `--bare` mode, MCP servers can be passed manually with `--mcp-config` (path or inline JSON in `{\"mcpServers\": ...}` format); without it, bare mode loads zero MCP servers since `.mcp.json` and user config are skipped. Skills aren't advertised in the system prompt in bare mode but still load on-demand when invoked via `/skill-name`, working from `<cwd>/.claude/skills/<name>/SKILL.md` or a plugin supplied with `--plugin-dir`. Since the model doesn't see skill descriptions, they must be invoked explicitly or referenced in a custom system prompt. `--settings`-based MCP and plugin-manifest MCP don't work in bare mode, and `CLAUDE.md` auto-discovery is skipped unless `--add-dir` is used.",
   "prompt" : "when i run claude-code in `--bare` mode, is there a way to manually pass MCPs config & Skills?",
   "status" : "success",

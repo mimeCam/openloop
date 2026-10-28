@@ -41,6 +41,8 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertTrue(body.hasPrefix("{\n  \"id\" : \"a\",\n  \"parent_id\" : null,\n  \"created_at\" : 1,\n"))
         XCTAssertTrue(body.hasSuffix("  \"mcp\" : null,\n  \"mcp_requires_auth\" : false,\n  \"output\" : null\n}\n"))
         XCTAssertFalse(body.contains("parentId")) // camelCase must never leak into the file
+        // the Linux pretty printer spells an empty array "[\n\n]" with an UNindented close
+        XCTAssertTrue(body.contains("  \"assigned_node_ids\" : [\n\n],\n"), "the empty-array field rides, snake_case")
     }
 
     func testFileKeysFollowStabilityOrderExactly() throws {
@@ -54,7 +56,7 @@ final class NodeStoreTests: XCTestCase {
             keys,
             ["id", "parent_id", "created_at", "agent", "took", "completed_at",
              "name", "summary", "prompt", "status", "active", "personas",
-             "mcp", "mcp_requires_auth", "output"]
+             "assigned_node_ids", "mcp", "mcp_requires_auth", "output"]
         )
     }
 
@@ -63,6 +65,7 @@ final class NodeStoreTests: XCTestCase {
             id: "n", parentId: "root", prompt: "q", agent: "cc", status: "answered",
             output: "a", took: 9, mcp: "https://mcp.example", mcpRequiresAuth: true,
             summary: "s", name: "alpha", personas: ["p1", "p2"],
+            assignedNodeIds: ["up-1", "up-2"],
             createdAt: 719267835.42, completedAt: 719267900.0, active: false
         )
         try NodeStore.save(full, at: path)
@@ -79,6 +82,7 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(back.summary, full.summary)
         XCTAssertEqual(back.name, full.name)
         XCTAssertEqual(back.personas, full.personas)
+        XCTAssertEqual(back.assignedNodeIds, full.assignedNodeIds)
         XCTAssertEqual(back.createdAt, full.createdAt, accuracy: 1e-9)
         XCTAssertEqual(back.completedAt ?? 0, full.completedAt ?? 0, accuracy: 1e-9)
         XCTAssertEqual(back.active, false)

@@ -26,6 +26,8 @@ public struct GraphNode: Sendable {
     public let summary: String?
     public let name: String?
     public let personas: [String]
+    /// Standing assignment ids (see ChainResolver): roots only, dormant once the node gains a parent.
+    public let assignedNodeIds: [String]
     public let createdAt: Double
     public let completedAt: Double?
     public let active: Bool
@@ -43,6 +45,7 @@ public struct GraphNode: Sendable {
         summary: String? = nil,
         name: String? = nil,
         personas: [String] = [],
+        assignedNodeIds: [String] = [],
         createdAt: Double,
         completedAt: Double?,
         active: Bool = true
@@ -59,6 +62,7 @@ public struct GraphNode: Sendable {
         self.summary = summary
         self.name = name
         self.personas = personas
+        self.assignedNodeIds = assignedNodeIds
         self.createdAt = createdAt
         self.completedAt = completedAt
         self.active = active
@@ -77,6 +81,12 @@ public struct GraphRunLog: Sendable {
     public let parentRunId: String?
     public let summary: String?
     public let rootRunId: String?
+    /// `#node` reference ids the prompt carried — persisted so a retry re-resolves the same ladder references.
+    public let refNodeIds: [String]?
+    /// Advisory scope-audit verdict text (nil = never ran / failed / cleared). Execution-state advice about ONE run — never node-file data.
+    public let audit: String?
+    /// The only non-nil value is "analyzing" (a live audit's marker, swept at boot). Terminal writes always clear it.
+    public let auditStatus: String?
 
     public init(
         id: String,
@@ -89,7 +99,10 @@ public struct GraphRunLog: Sendable {
         completedAt: Double?,
         parentRunId: String? = nil,
         summary: String? = nil,
-        rootRunId: String? = nil
+        rootRunId: String? = nil,
+        refNodeIds: [String]? = nil,
+        audit: String? = nil,
+        auditStatus: String? = nil
     ) {
         self.id = id
         self.nodeId = nodeId
@@ -102,6 +115,9 @@ public struct GraphRunLog: Sendable {
         self.parentRunId = parentRunId
         self.summary = summary
         self.rootRunId = rootRunId
+        self.refNodeIds = refNodeIds
+        self.audit = audit
+        self.auditStatus = auditStatus
     }
 }
 
@@ -253,6 +269,9 @@ public struct GraphStore {
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN parent_run_id TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN summary TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN root_run_id TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN ref_node_ids TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN audit TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN audit_status TEXT;")
         backfillRootRunIds(db)
     }
 
@@ -614,17 +633,175 @@ public struct GraphStore {
         public static let empty = PersonaContext(texts: [], mcps: [])
     }
 
-    public static func personaContext(personaId: String, at instancePath: String) throws -> PersonaContext {
+    public static func personaContext(
+        personaId: String,
+        at instancePath: String,
+        globalRoot: FilePath = Paths.globalShareRoot
+    ) throws -> PersonaContext {
         let nodes = try fetchNodes(at: instancePath)
         let chains = longestAssignedChains(personaId: personaId, nodes: nodes)
-        return PersonaContext(
-            texts: chains.map(chainText),
-            mcps: chains.reduce(into: []) { $0.formUnion(chainMcpEndpoints($1, at: instancePath)) }
-        )
+        var resolver = ChainResolver(globalRoot: globalRoot)
+        var texts: [String] = []
+        var sets: [Set<GraphMcpEndpoint>] = []
+        for chain in chains {
+            guard let holder = chain.last else { continue }
+            // persona chains resolve through the SAME resolver a node RUN uses
+            let resolved = resolver.resolve(node: holder, at: instancePath)
+            texts.append(chainText(resolved.nodes))
+            sets += resolved.mcpEndpointSets()
+        }
+        return PersonaContext(texts: texts, mcps: nearestWinsMcpUnion(sets))
     }
 
     public static func chainText(_ chain: [GraphNode]) -> String {
         chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
+    }
+
+    /// chainText's join rule lifted to multi-chain joins: non-empty blocks fenced by `---`, empties dropped.
+    public static func joinedText(_ texts: [String]) -> String {
+        texts.filter(\.notEmpty).joined(separator: "\n\n---\n\n")
+    }
+
+    /// One persona's context across the WHOLE lookup ladder: texts in ladder order, MCPs nearest-wins by URL.
+    public static func personaContextAcrossLadder(
+        personaId: String,
+        from dir: FilePath,
+        globalRoot: FilePath = Paths.globalShareRoot
+    ) throws -> PersonaContext {
+        var texts: [String] = []
+        var perDir: [Set<GraphMcpEndpoint>] = []
+        for folder in Paths.contextLookupDirs(from: dir, globalRoot: globalRoot)
+        where PathIO.isDirectoryExistent(atPath: NodeStore.nodesDir(at: folder.string).string) {
+            let ctx = try personaContext(personaId: personaId, at: folder.string, globalRoot: globalRoot)
+            texts += ctx.texts
+            perDir.append(ctx.mcps)
+        }
+        return PersonaContext(texts: texts, mcps: nearestWinsMcpUnion(perDir))
+    }
+
+    public static func updateAssignedNodeIds(
+        id: String,
+        assignedNodeIds: [String],
+        at instancePath: String
+    ) throws {
+        try NodeStore.mutate(id: id, at: instancePath) { $0.assignedNodeIds = assignedNodeIds }
+    }
+
+    // MARK: - Assignments (the ladder resolver)
+    // Standing, READ-ONLY input: nothing is ever written to the folder an assigned node lives in.
+
+    /// One folder's contribution to a resolved chain; the segment's MCP auth reads THAT folder's secrets store.
+    public struct ChainSegment: Sendable {
+        public let nodes: [GraphNode]
+        public let instance: String
+
+        init(nodes: [GraphNode], instance: String) {   // built only by ChainResolver, in-module
+            self.nodes = nodes
+            self.instance = instance
+        }
+    }
+
+    /// A root's fully resolved chain: own active line + every assignment segment, oldest first, id-deduped first-wins.
+    public struct ResolvedChain: Sendable {
+        /// The root's own active line, oldest first.
+        public let own: [GraphNode]
+        /// Assignment segments in resolved order (the own line is NOT among them).
+        public let segments: [ChainSegment]
+        /// The instance the root's own line lives in.
+        public let ownInstance: String
+
+        init(own: [GraphNode], segments: [ChainSegment], ownInstance: String) {   // built only by ChainResolver
+            self.own = own
+            self.segments = segments
+            self.ownInstance = ownInstance
+        }
+
+        /// Resolved order: assignment segments first, then the own line — oldest material first.
+        public var nodes: [GraphNode] { segments.flatMap(\.nodes) + own }
+
+        /// Per-folder endpoint sets, own line first — feed to `nearestWinsMcpUnion`.
+        public func mcpEndpointSets() -> [Set<GraphMcpEndpoint>] {
+            [chainMcpEndpoints(own, at: ownInstance)]
+                + segments.map { chainMcpEndpoints($0.nodes, at: $0.instance) }
+        }
+
+        /// Count-only twin for the ladder wire (`chain_mcp_count`); never reads a secrets store.
+        public func mcpUrlCount() -> Int {
+            chainMcpUrls(nodes).count
+        }
+    }
+
+    /// HOLDER = a root (dormant otherwise); TARGET = strictly UP the ladder, nearest folder wins; SPLICE = the target's active ancestor line; RECURSION expands the splice root's assignments first; DEDUPE first-wins; cycles cannot close (lookup only goes UP). No summary gate; a dead id logs one line and is skipped.
+    public struct ChainResolver: Sendable {
+        private let globalRoot: FilePath
+        private var nodesByInstance: [String: [GraphNode]] = [:]
+
+        public init(globalRoot: FilePath = Paths.globalShareRoot) {
+            self.globalRoot = globalRoot
+        }
+
+        /// `node` = ANY member of the line being run: its ancestor line IS the own line, never truncated at the root.
+        public mutating func resolve(node: GraphNode, at instancePath: String) -> ResolvedChain {
+            let own = chain(of: node, in: nodes(at: instancePath))
+            var seen = Set(own.map(\.id))
+            var expanding = Set<String>()
+            var segments: [ChainSegment] = []
+            if let root = own.first {
+                expand(root, at: instancePath, into: &segments, seen: &seen, expanding: &expanding)
+            }
+            return ResolvedChain(own: own, segments: segments, ownInstance: instancePath)
+        }
+
+        private mutating func expand(
+            _ root: GraphNode,
+            at instancePath: String,
+            into segments: inout [ChainSegment],
+            seen: inout Set<String>,
+            expanding: inout Set<String>
+        ) {
+            // only ROOTS carry assignments — the parent check ignores hand-edited mid-line fields
+            guard root.parentId == nil else { return }
+            guard expanding.insert(root.id).inserted else { return }
+            for id in root.assignedNodeIds where id != root.id {
+                guard let target = find(id, from: instancePath) else {
+                    storeLog.warn(
+                        "assignment to missing node \(id) skipped (root \(root.id) at \(instancePath))"
+                    )
+                    continue
+                }
+                let line = chain(of: target.node, in: nodes(at: target.instance))
+                if let lineRoot = line.first {
+                    expand(lineRoot, at: target.instance, into: &segments, seen: &seen, expanding: &expanding)
+                }
+                let fresh = line.filter { seen.insert($0.id).inserted }
+                if fresh.notEmpty {
+                    segments.append(ChainSegment(nodes: fresh, instance: target.instance))
+                }
+            }
+        }
+
+        /// Nearest-folder-wins id lookup strictly ABOVE the holder's folder.
+        private mutating func find(_ id: String, from holderInstance: String) -> (node: GraphNode, instance: String)? {
+            for dir in Paths.contextLookupDirs(from: FilePath(holderInstance), globalRoot: globalRoot).dropFirst() {
+                if let hit = nodes(at: dir.string).first(where: { $0.id == id }) {
+                    return (hit, dir.string)
+                }
+            }
+            return nil
+        }
+
+        private mutating func nodes(at instancePath: String) -> [GraphNode] {
+            if let cached = nodesByInstance[instancePath] { return cached }
+            let list = NodeStore.list(at: instancePath)
+            nodesByInstance[instancePath] = list
+            return list
+        }
+    }
+
+    /// The persona channel's rule: GATE on the referenced node's OWN summary (nil = no file), CONTENT = chainText of the resolved chain.
+    public static func refContextText(node: GraphNode, chain: [GraphNode]) -> String? {
+        guard let summary = node.summary, summary.notEmpty else { return nil }
+        return chainText(chain)
     }
 
     /// Auth is resolved HERE, by URL, from the secrets store OF THE INSTANCE
@@ -643,6 +820,11 @@ public struct GraphStore {
             guard let url = node.mcp, url.notEmpty else { return nil }
             return GraphMcpEndpoint(url: url, auth: secrets[url])
         })
+    }
+
+    /// Count-only twin of `chainMcpEndpoints` — a count never reads a secrets store.
+    public static func chainMcpUrls(_ chain: [GraphNode]) -> Set<String> {
+        Set(chain.compactMap(\.mcp).filter { $0.notEmpty })
     }
 
     /// URL-deduped union of per-folder endpoint sets, NEAREST FOLDER WINS:
@@ -755,13 +937,26 @@ public struct GraphStore {
         return chain(of: other, in: nodes).contains { $0.id == node.id }
     }
 
-    private static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id"
+    private static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id, ref_node_ids, audit, audit_status"
+
+    /// `ref_node_ids` rides as a JSON-encoded id array (nil/absent = none) in one TEXT column.
+    public static func encodeRefNodeIds(_ ids: [String]?) -> String? {
+        guard let ids, !ids.isEmpty, let data = try? JSONEncoder().encode(ids) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    public static func decodeRefNodeIds(_ text: String?) -> [String]? {
+        guard let text, !text.isEmpty,
+              let ids = try? JSONDecoder().decode([String].self, from: Data(text.utf8)),
+              !ids.isEmpty else { return nil }
+        return ids
+    }
 
     public static func insertRunLog(_ log: GraphRunLog, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run(
-            "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, parent_run_id, root_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt, log.parentRunId, log.rootRunId
+            "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, parent_run_id, root_run_id, ref_node_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt, log.parentRunId, log.rootRunId, encodeRefNodeIds(log.refNodeIds)
         )
     }
 
@@ -781,8 +976,8 @@ public struct GraphStore {
         let db = try connect(at: instancePath)
         try db.transaction {
             try db.run(
-                "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, root_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt, log.completedAt, log.parentRunId, log.rootRunId
+                "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, root_run_id, ref_node_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                log.id, log.nodeId, log.prompt, log.status, log.output, log.took, log.createdAt, log.completedAt, log.parentRunId, log.rootRunId, encodeRefNodeIds(log.refNodeIds)
             )
             try db.run(
                 "INSERT OR REPLACE INTO notification_kinds (run_id, kind, session, workflow_id) VALUES (?, 'session_run', ?, ?);",
@@ -791,14 +986,36 @@ public struct GraphStore {
         }
     }
 
+    /// Every summary rewrite clears the audit pair in the same statement — a badge must never lie over a rewritten summary; status/completed_at untouched, so notifications can't re-fire.
     public static func finishRunSummary(id: String, summary: String?, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run(
-            "UPDATE graph_run_logs SET summary = ?, status = ? WHERE id = ?;",
+            "UPDATE graph_run_logs SET summary = ?, status = ?, audit = NULL, audit_status = NULL WHERE id = ?;",
             summary,
             summary == nil ? "answered" : "success",
             id
         )
+    }
+
+    // MARK: - Advisory scope audit (execution state, display-only)
+
+    /// Arms the marker before the detached analysis spawns — the only write a restart can find; a previous attempt's verdict dies with it.
+    public static func markRunAuditing(id: String, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.run("UPDATE graph_run_logs SET audit = NULL, audit_status = 'analyzing' WHERE id = ?;", id)
+    }
+
+    /// The terminal audit write: verdict text (nil = failed analysis, renders neutral) and the marker clear in ONE statement; a deleted row matches nothing.
+    public static func finishRunAudit(id: String, audit: String?, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        try db.run("UPDATE graph_run_logs SET audit = ?, audit_status = NULL WHERE id = ?;", audit, id)
+    }
+
+    /// Boot-only sweep (a per-process ledger guards the call site): an interrupted analysis must not pulse forever; a missing table is tolerated.
+    public static func sweepStuckRunAudits(at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        guard try sqliteMasterHas("graph_run_logs", db) else { return }
+        try db.run("UPDATE graph_run_logs SET audit_status = NULL WHERE audit_status = 'analyzing';")
     }
 
     public static func runChain(of log: GraphRunLog, in logs: [GraphRunLog]) -> [GraphRunLog] {
@@ -835,7 +1052,7 @@ public struct GraphStore {
     public static func restartRunLog(id: String, at instancePath: String) throws {
         let db = try connect(at: instancePath)
         try db.run(
-            "UPDATE graph_run_logs SET status = 'progress', output = NULL, took = NULL, completed_at = NULL WHERE id = ?;",
+            "UPDATE graph_run_logs SET status = 'progress', output = NULL, took = NULL, completed_at = NULL, audit = NULL, audit_status = NULL WHERE id = ?;",
             id
         )
     }
@@ -1007,7 +1224,9 @@ public struct GraphStore {
             id: id, nodeId: nodeId, prompt: prompt, status: status,
             output: row[4] as? String, took: (row[5] as? Int64).map(Int.init),
             createdAt: createdAt, completedAt: row[7] as? Double,
-            parentRunId: row[8] as? String, summary: row[9] as? String, rootRunId: row[10] as? String
+            parentRunId: row[8] as? String, summary: row[9] as? String, rootRunId: row[10] as? String,
+            refNodeIds: decodeRefNodeIds(row[11] as? String),
+            audit: row[12] as? String, auditStatus: row[13] as? String
         )
     }
 }

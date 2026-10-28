@@ -2,7 +2,7 @@
     'use strict';
 
     const TRIGGER  = '@';
-    const TOKEN_RE = /[^\s@]/;      // a token char is anything but whitespace and another trigger
+    const TOKEN_RE = /[^\s@#]/;     // '#' (the node twin, suggest.js) closes an @-token mid-word
     const MD_TIERS = ['md', 'mdx', 'txt'];
     const GRADE    = { none: 0, exact: 100, prefix: 80, word: 60, substring: 40, subsequence: 20 };
     const PATH_GRADE_PENALTY = 5;
@@ -126,6 +126,8 @@
         console.assert(JSON.stringify(mentionTokenBefore('@readme', 4)) === '{"query":"rea","start":0}', 'grammar: mid-token caret arms the prefix');
         console.assert(mentionTokenBefore('no token here', 13) === null, 'grammar: no @ → no token');
         console.assert(mentionTokenBefore('@a b', 4) === null, 'grammar: whitespace closes the token');
+        console.assert(mentionTokenBefore('@a#b', 3) === null, 'grammar: # closes an @-token mid-word (trigger exclusivity)');
+        console.assert(mentionTokenBefore('@rea#nod', 8) === null, 'grammar: a whole #name after @… stays closed');
         console.assert(mentionTokenBefore('@./docs/a.md ', 13) === null, 'grammar: accepted mention + space stays closed');
         console.assert(JSON.stringify(mentionTokenBefore('@./a.md @ne', 11)) === '{"query":"ne","start":8}', 'grammar: second @ arms a fresh token');
         console.log('OK: token grammar');
@@ -181,6 +183,10 @@
         mentionTokenBefore: mentionTokenBefore,
         rankEntries: rankEntries,
         applyMention: applyMention,
+        // the #node twin (suggest.js) reuses the ranking grammar on node labels
+        GRADE: GRADE,
+        matchGrade: matchGrade,
+        subsequenceOf: subsequenceOf,
         runMentionSanityChecks: runMentionSanityChecks
     };
 

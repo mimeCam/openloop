@@ -347,6 +347,10 @@ body.panel-resizing #graph-canvas { transition: none; }
     -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%);
     mask-image: linear-gradient(to bottom, #000 0%, #000 78%, transparent 100%);
 }
+/* Per-surface fold depths: a surface that claims freeLines (data-free-lines) folds AT it —
+   the thread chat's raw result at 2, its summary at 5; no claim keeps the shared 3 above. */
+.wl-bubble-text[data-free-lines="2"].truncated { -webkit-line-clamp: 2; }
+.wl-bubble-text[data-free-lines="5"].truncated { -webkit-line-clamp: 5; }
 .wl-bubble-text.expanded {
     -webkit-line-clamp: unset;
     -webkit-mask-image: none;
@@ -438,3 +442,104 @@ body.panel-resizing #graph-canvas { transition: none; }
     .run-del-btn.deleting { animation: none; }
     .run-log.run-del-dying { transition: none; } /* the splice beat is instant */
 }
+
+/* Suggestion dropdown (suggest.js) — the @file / #node completion list; one singleton on <body> (the 5s poll re-renders pass under it unseen) */
+.suggest-drop {
+    position: fixed;
+    z-index: 700; /* over the composer modal (500) and the error banner (600) */
+    max-height: 40vh;
+    overflow-y: auto;
+    background: #16181f;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.55);
+    padding: 4px;
+    box-sizing: border-box;
+}
+.suggest-drop[hidden] { display: none; }
+.suggest-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-primary, #f0f0f5);
+}
+.suggest-item.active { background: rgba(52,199,89,0.12); }
+.suggest-item.off { opacity: 0.55; } /* an inactive node: referenceable, but visibly dormant */
+.sug-path {
+    flex: 1; min-width: 0;   /* shares the row with the weight meta, which never wraps */
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-muted, #8e8ea0);
+    word-break: break-all;
+}
+.sug-path.md { color: var(--text-primary, #f0f0f5); } /* md tier wins the ranking; it wins the ink too */
+/* the file's weight: line count when known, size when the count was capped; ≥1000 lines (HEAVY_LINES) wears amber */
+.sug-lines {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--text-muted, #8e8ea0);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.sug-lines.heavy {
+    color: var(--accent-amber, #f59e0b);
+    background: rgba(245,158,11,0.10);
+    border: 1px solid rgba(245,158,11,0.28);
+    border-radius: 4px;
+    padding: 0 5px;
+}
+.sug-name {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600;
+}
+/* how many MCP endpoints ride this node's chain (its own + ancestors') — amber, the mcp domain's color */
+.sug-mcp {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--accent-amber, #f59e0b);
+    background: rgba(245,158,11,0.10);
+    border: 1px solid rgba(245,158,11,0.28);
+    border-radius: 4px;
+    padding: 0 5px;
+    flex-shrink: 0;
+}
+/* where the node lives: project, parent (up the ladder), global (the shared pool — blue) */
+.sug-src {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted, #8e8ea0);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    padding: 0 5px;
+    flex-shrink: 0;
+}
+.sug-src.global { color: var(--accent-blue, #0a84ff); border-color: rgba(10,132,255,0.35); }
+.sug-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.suggest-empty, .sug-foot {
+    font-size: 11px;
+    color: var(--text-muted, #8e8ea0);
+    padding: 6px 8px;
+}
+
+/* The mention hint line above every suggest field — same voice as graph.html's mcp-hint */
+.mcp-hint { font-size: 11px; color: var(--text-faint, #4a4a5a); margin-top: 6px; }
+/* above a composer field, not below a label: sit closer, hug the left ink */
+.mcp-hint.suggest-hint { margin: 0 2px 6px; }
+
+@media (max-width: 768px) {
+    /* Touch is the primary input: fat rows beat density */
+    .suggest-item { min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .suggest-drop { transition: none; }
+}
+

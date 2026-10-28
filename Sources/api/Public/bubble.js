@@ -1,42 +1,22 @@
-// bubble.js — shared text-reveal grammar (graph.html + workflow-log.html)
+// bubble.js — shared text-reveal grammar (graph.html + workflow-log.html): the bubble markup plus its two delegated taps, door (bindExpand) and copy (bindCopy — clipboard API with an execCommand fallback, so copy works on insecure origins too).
+// Pages bind both once at init; every re-render is covered.
 //
-// Owns the bubble markup (text + fold door + copy button) AND its two
-// delegated behaviors: the door (bindExpand) and the copy tap (bindCopy —
-// clipboard API with an execCommand fallback, so copy works on insecure
-// origins too). Pages bind both once at init; every re-render is covered.
+// The rule is visual, not typographic: ≤ FREE_LINES (10) painted lines where the text lives → shown in full, no chrome; more → folds to CLAMP_LINES (3) + one quiet one-way door, "show more".
+// The line count belongs to the surface, not the string — the same text may be free in the wide panel and folded on a 240px card, and both readings are correct.
+// A surface may claim its own threshold: bubbleHtml's freeLines rides as data-free-lines, and the gate + panel.css's matching clamp rule fold past THAT count.
 //
-// The rule is visual, not typographic: a text that paints in FREE_LINES
-// (10) lines or fewer where it lives is shown in full, no chrome; one that
-// paints in more folds to CLAMP_LINES (3) lines and offers one quiet
-// one-way door, "show more". The line count belongs to the surface, not
-// the string: the same text may be free in the wide panel and folded on a
-// 240px card, and both readings are correct.
+// Render contract (one script turn — no frame of unfolded long text ever paints): build FREE markup with bubbleHtml(), inject it, call gateBubbles() synchronously; the scrollHeight read forces layout BEFORE paint.
+// Both pages' panels are only ever translated off-screen, never display:none — a hidden box measures 0 lines.
 //
-// Render contract (one script turn — no frame of unfolded long text ever
-// paints): build FREE markup with bubbleHtml(), inject it, then call
-// gateBubbles() synchronously. The scrollHeight read forces layout BEFORE
-// paint, folding over-limit texts and un-hiding their door in the same
-// pass (both pages' panels are only ever translated off-screen, never
-// display:none — a hidden box measures 0 lines).
+// Measurement: line height from getComputedStyle px — the unitless 1.65 in panel.css resolves to px in Chrome/Firefox/current Safari, older WebKit reports the raw ratio (detected, backed out of font-size).
+// The compare is a threshold, never an exact count, so sub-pixel drift over 10+ wrapped lines cannot mis-gate; it always measures the FREE pose (unfold-measure-refold) because a clamped -webkit-box can report scrollHeight === clientHeight in some engines.
 //
-// Measurement: line height comes from getComputedStyle px (the unitless
-// 1.65 in panel.css resolves to px in Chrome/Firefox/current Safari; older
-// WebKit reports the raw ratio — detected, backed out of font-size). The
-// compare is a threshold, never an exact count, so sub-pixel drift over
-// 10+ wrapped lines cannot mis-gate; and it always measures the FREE pose
-// (unfold-measure-refold): a clamped -webkit-box can report
-// scrollHeight === clientHeight in some engines.
-//
-// Cross-browser contract (Safari · Firefox · Chrome): keep the
-// -webkit-box / -webkit-line-clamp / overflow:hidden trio — the only
-// clamp dialect all three engines speak (Firefox aliases the prefix);
-// keep the mask dual-prefixed; no `lh` units anywhere (Safari 16.4+ only).
+// Cross-browser contract (Safari · Firefox · Chrome): keep the -webkit-box / -webkit-line-clamp / overflow:hidden trio — the only clamp dialect all three speak (Firefox aliases the prefix); mask dual-prefixed; no `lh` units anywhere (Safari 16.4+ only).
 
 (function () {
     'use strict';
 
-    // Keep FREE_LINES / CLAMP_LINES in sync with the .wl-bubble-text.truncated
-    // clamp in panel.css, and LINE_HEIGHT_FALLBACK with its line-height.
+    // Keep FREE_LINES / CLAMP_LINES in sync with the .wl-bubble-text.truncated clamp in panel.css, and LINE_HEIGHT_FALLBACK with its line-height.
     const FREE_LINES           = 10;   // ≤ 10 painted lines → shown in full
     const CLAMP_LINES          = 3;    // > 10 → folded pose (the CSS clamp)
     const LINE_HEIGHT_FALLBACK = 1.65; // only if computed line-height comes back unitless (old WebKit)
@@ -66,23 +46,19 @@
             `</svg>`;
     }
 
-    // Markup only, always FREE: no truncated class, the door hidden. `extra`
-    // rides the text element for page typography ('result-snippet',
-    // 'summary-text') — never a second truncation voice. There is no char
-    // threshold anymore: lines are a property of the reading, and only
-    // gateBubbles() may fold — after layout, per surface.
-    function bubbleHtml(cls, text, extra) {
+    // Markup only, always FREE: no truncated class, the door hidden; `extra` rides the text element for page typography ('result-snippet', 'summary-text') — never a second truncation voice.
+    // `freeLines` claims the surface's threshold (data-free-lines) instead of the shared FREE_LINES — lines are a property of the reading; only gateBubbles() may fold, after layout, per surface.
+    function bubbleHtml(cls, text, extra, freeLines) {
         const textCls = extra ? `wl-bubble-text ${extra}` : 'wl-bubble-text';
-        return `<div class="wl-bubble ${cls}">` +
-            `<div class="${textCls}">${esc(text)}</div>` +
-            `<button class="wl-expand-btn" hidden aria-expanded="false">show more</button>` +
-            `<button class="wl-bubble-copy">${copyIcon()}</button>` +
-            `</div>`;
+        const free = freeLines ? ` data-free-lines="${freeLines}"` : '';
+        return `<div class="wl-bubble ${cls}">
+            <div class="${textCls}"${free}>${esc(text)}</div>
+            <button class="wl-expand-btn" hidden aria-expanded="false">show more</button>
+            <button class="wl-bubble-copy">${copyIcon()}</button>
+        </div>`;
     }
 
-    // One line box, px. The unitless 1.65 in panel.css resolves to used px
-    // in Chrome/Firefox/current Safari; older WebKit reports the raw ratio
-    // ("1.65") — anything under LINE_BOX_FLOOR falls back to font-size × 1.65.
+    // One line box, px — the unitless 1.65 in panel.css resolves to used px in Chrome/Firefox/current Safari; older WebKit reports the raw ratio ("1.65"), so anything under LINE_BOX_FLOOR falls back to font-size × 1.65.
     function lineHeightOf(el) {
         const lh = parseFloat(getComputedStyle(el).lineHeight);
         return (lh && lh >= LINE_BOX_FLOOR)
@@ -94,15 +70,20 @@
         return el.scrollHeight / lineHeightOf(el);
     }
 
-    // Over the free pass? Threshold compare (never an exact count), always
-    // on the FREE pose: unfold-measure-refold, because a clamped
-    // -webkit-box can report scrollHeight === clientHeight in some engines.
+    // The surface's threshold: data-free-lines when claimed, FREE_LINES otherwise — an override, never a requirement.
+    function freeLinesOf(el) {
+        const n = parseFloat(el.dataset.freeLines);
+        return n > 0 ? n : FREE_LINES;
+    }
+
+    // Threshold compare (never an exact count), always on the FREE pose — unfold-measure-refold, because a clamped -webkit-box can report scrollHeight === clientHeight in some engines.
     // The refold is a no-op for texts that were not folded.
     function isOverLimit(el) {
+        const free = freeLinesOf(el);
         const folded = el.classList.contains('truncated');
-        if (!folded) return linesOf(el) > FREE_LINES + HALF_LINE_EPSILON;
+        if (!folded) return linesOf(el) > free + HALF_LINE_EPSILON;
         el.classList.remove('truncated');
-        const over = linesOf(el) > FREE_LINES + HALF_LINE_EPSILON;
+        const over = linesOf(el) > free + HALF_LINE_EPSILON;
         el.classList.add('truncated');
         return over;
     }
@@ -111,8 +92,7 @@
         return text.parentElement.querySelector('.wl-expand-btn');
     }
 
-    // Post-inject pass, same script turn as the innerHTML write: over the
-    // pass → fold + unhide the door; within it → free, door stays hidden.
+    // Post-inject pass, same script turn as the innerHTML write: over the pass → fold + unhide the door; within it → free, door stays hidden.
     // OPEN (.expanded) texts are never re-folded — the door never relocks.
     function gateBubbles(container) {
         container.querySelectorAll('.wl-bubble-text').forEach(t => {
@@ -124,26 +104,15 @@
         });
     }
 
-    // Once per page, at init. Delegated on document in the CAPTURE phase: a
-    // door inside a click-target card (grid cells open the panel on click)
-    // is heard BEFORE the card's own bubble-phase listener — stopPropagation
-    // keeps the tap a fold-opening, not a fold-and-open-panel. One binding
-    // also survives every innerHTML rewrite (5s polls, sub-section swaps)
-    // with zero listener stacking.
+    // Once per page, at init — delegated on document in the CAPTURE phase, so a door inside a click-target card is heard BEFORE the card's own bubble-phase listener; stopPropagation keeps the tap a fold-opening, not a fold-and-open-panel.
+    // One binding survives every innerHTML rewrite (5s polls, sub-section swaps) with zero listener stacking.
     function bindExpand(root) {
         (root || document).addEventListener('click', onDoorTap, true);
     }
 
     // ── Copy ──────────────────────────────────────────────────────────────────
-    // bubbleHtml() renders the copy button, so bubble.js owns its tap too —
-    // one delegated binding per page (same contract as bindExpand: capture
-    // phase, survives every innerHTML rewrite, covers every surface that
-    // ever emits a bubble, including sub-section swaps that re-render in
-    // place). Both pages once carried private twins here and they drifted:
-    // graph.js had the clipboard fallback + error surface, workflow-log.js
-    // called navigator.clipboard.writeText bare — which THROWS on any
-    // insecure origin (http on a LAN IP/hostname: navigator.clipboard is
-    // undefined there) and every copy button on the page dies silently.
+    // bubbleHtml() renders the copy button, so bubble.js owns its tap too — one delegated binding per page, same contract as bindExpand (capture phase, survives every innerHTML rewrite, covers every surface that ever emits a bubble).
+    // Both pages once carried private twins here and they drifted: workflow-log.js called navigator.clipboard.writeText bare, which THROWS on any insecure origin (http on a LAN IP/hostname — navigator.clipboard is undefined there) and every copy button on the page dies silently.
 
     function bindCopy(root, onError) {
         (root || document).addEventListener('click', e => onCopyTap(e, onError), true);
@@ -170,10 +139,7 @@
         );
     }
 
-    // Clipboard API when the context has it (https / localhost), execCommand
-    // textarea fallback when it doesn't — the API object simply does not
-    // exist on insecure origins, and the fallback is the only copy dialect
-    // that works there.
+    // Clipboard API when the context has it (https / localhost), execCommand textarea fallback when it doesn't — the API object does not exist on insecure origins, and the fallback is the only copy dialect that works there.
     function copyText(text) {
         if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
         return legacyCopy(text);
@@ -197,10 +163,8 @@
         openDoor(btn);
     }
 
-    // The reveal: the fold dissolves (the mask transition in panel.css) and
-    // the door is consumed — there is no "show less"; the grammar is
-    // one-way. Focus rides into the text when the door held it (keyboard),
-    // so it never falls to <body>; a pointer click keeps focus where it was.
+    // The reveal: the fold dissolves (the mask transition in panel.css) and the door is consumed — there is no "show less", the grammar is one-way.
+    // Focus rides into the text when the door held it (keyboard), so it never falls to <body>; a pointer click keeps focus where it was.
     function openDoor(btn) {
         const text = btn.parentElement.querySelector('.wl-bubble-text');
         if (!text) return;
@@ -216,11 +180,8 @@
         text.focus({ preventScroll: true });
     }
 
-    // Expansion memory across the 5s poll re-renders. Only OPEN doors are
-    // recorded: a FREE text whose text later grows re-enters in its correct
-    // (folded) pose, an OPEN one never relocks — when text grows under an
-    // open fold, open wins. Key = first 200 chars, so appended growth
-    // (streaming) keeps the key.
+    // Expansion memory across the 5s poll re-renders — only OPEN doors are recorded: a FREE text that later grows re-enters in its correct (folded) pose, an OPEN one never relocks (open wins when text grows under an open fold).
+    // Key = first 200 chars, so appended growth (streaming) keeps the key.
     function snapshotExpansion(container) {
         const open = new Map();
         container.querySelectorAll('.wl-bubble-text.expanded')
@@ -256,9 +217,7 @@
         console.log('All bubble sanity checks passed.');
     }
 
-    // scrollHeight is 0 for everything without a layout engine (jsdom) —
-    // the gate/door/memory checks are meaningless there. Skip, don't fake
-    // (same convention as graph.js's fadeDisplay probe).
+    // scrollHeight is 0 for everything without a layout engine (jsdom) — the gate/door/memory checks are meaningless there; skip, don't fake (same convention as graph.js's fadeDisplay probe).
     function layoutWorks() {
         const probe = document.createElement('div');
         probe.style.whiteSpace = 'pre';
@@ -269,8 +228,7 @@
         return works;
     }
 
-    // Focus must work inside the probe, so no visibility:hidden — fixed at
-    // the viewport corner instead (checks are a DevTools-only flash).
+    // Focus must work inside the probe, so no visibility:hidden — fixed at the viewport corner instead (checks are a DevTools-only flash).
     function probeHost() {
         const host = document.createElement('div');
         host.style.cssText = 'width:360px;position:fixed;top:0;left:0';
@@ -278,8 +236,7 @@
         return host;
     }
 
-    // Explicit \n breaks make the painted line count deterministic at any
-    // probe width (white-space:pre-wrap honors them) — no font guessing.
+    // Explicit \n breaks make the painted line count deterministic at any probe width (white-space:pre-wrap honors them) — no font guessing.
     function linesText(n) {
         return Array.from({ length: n }, (_, i) => 'line ' + (i + 1)).join('\n');
     }
@@ -292,6 +249,9 @@
         console.assert(html.includes('<button class="wl-expand-btn" hidden aria-expanded="false">'), 'bubbleHtml: door ships hidden');
         console.assert(!html.includes('truncated'), "bubbleHtml: markup is FREE — folding is gateBubbles' job, never a char guess");
         console.assert(!html.includes('wl-bubble-label'), 'bubbleHtml: the dead label param stays dead');
+        console.assert(!html.includes('data-free-lines'), 'bubbleHtml: no override claimed → no data attribute');
+        const sized = bubbleHtml('output', 'hi', null, 5);
+        console.assert(sized.includes('data-free-lines="5"'), 'bubbleHtml: a surface free-lines claim rides as data');
         console.log('OK: bubbleHtml shape (free markup, hidden door, escaped)');
     }
 
@@ -308,16 +268,28 @@
                 'gate: ' + n + ' lines → door ' + (fold ? 'offered' : 'hidden'));
             assertClampPose(text, fold);
         });
+        // A surface's own claim: the gate folds past THAT count, not the shared 10.
+        [[2, false, 2], [3, true, 2], [5, false, 5], [6, true, 5], [11, true, 5]].forEach(([n, fold, free]) => {
+            host.innerHTML = bubbleHtml('output', linesText(n), null, free);
+            gateBubbles(host);
+            const text = host.querySelector('.wl-bubble-text');
+            const door = host.querySelector('.wl-expand-btn');
+            console.assert(text.classList.contains('truncated') === fold,
+                `gate: ${n} lines at free=${free} → ${fold ? 'folded' : 'free'}`);
+            console.assert(door && door.hidden === !fold,
+                `gate: ${n} lines at free=${free} → door ${fold ? 'offered' : 'hidden'}`);
+            assertClampPose(text, fold, free);
+        });
         host.remove();
-        console.log('OK: line gate (≤10 free · ≥11 folds at 3)');
+        console.log('OK: line gate (≤10 free · ≥11 folds at 3 · a claimed free-lines folds at its own depth)');
     }
 
-    // Computed clamp styles are engine-dependent in jsdom — skip, don't
-    // fake (same convention as graph.js's fadeDisplay probe).
-    function assertClampPose(text, fold) {
+    // Computed clamp styles are engine-dependent in jsdom — skip, don't fake (same convention as graph.js's fadeDisplay probe).
+    function assertClampPose(text, fold, clampLines) {
         const clamp = getComputedStyle(text).webkitLineClamp;
         if (clamp === undefined || clamp === '') return;
-        console.assert((clamp === String(CLAMP_LINES)) === fold, 'gate: clamp pose matches the fold');
+        const want = clampLines || CLAMP_LINES;
+        console.assert((clamp === String(want)) === fold, 'gate: clamp pose matches the fold');
     }
 
     function checkDoorOpens() {
@@ -341,10 +313,8 @@
         console.log('OK: door opens in place, is consumed, hands focus off');
     }
 
-    // The copy tap: delegated + capture-phase, so it writes the bubble's
-    // text and never reaches a click-target card behind it. writeText is
-    // stubbed for determinism (DevTools); the promise rejection path is
-    // exercised by hand on an insecure origin.
+    // The copy tap: delegated + capture-phase, so it writes the bubble's text and never reaches a click-target card behind it.
+    // writeText is stubbed for determinism (DevTools); the promise rejection path is exercised by hand on an insecure origin.
     function checkCopyTap() {
         const host = probeHost();
         const errors = [];
@@ -397,6 +367,7 @@
         bubbleHtml: bubbleHtml,
         lineHeightOf: lineHeightOf,
         linesOf: linesOf,
+        freeLinesOf: freeLinesOf,
         isOverLimit: isOverLimit,
         gateBubbles: gateBubbles,
         bindExpand: bindExpand,

@@ -524,3 +524,37 @@ private func isSymlink(_ path: String) -> Bool {
     var s = stat()
     return lstat(path, &s) == 0 && (s.st_mode & S_IFMT) == S_IFLNK
 }
+
+private let countLinesChunkBytes = 64 * 1_024
+
+// MARK: - Text sniffing + line counting
+
+public extension PathIO {
+
+    /// git's rule: a NUL in the first `sniffLimit` bytes marks binary; empty = text, unopenable = not text.
+    static func looksLikeTextFile(atPath path: String, sniffLimit: Int = 8_192) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: sniffLimit), !head.isEmpty else { return true }
+        return !head.contains(0)
+    }
+
+    /// Editor-style count (newlines + a non-empty tail); nil when `readLimit` bytes cannot prove EOF.
+    static func countLines(atPath path: String, readLimit: Int) -> Int? {
+        guard readLimit > 0, let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var lines = 0
+        var remaining = readLimit
+        var endsWithNewline = true
+        while remaining > 0 {
+            let want = min(countLinesChunkBytes, remaining)
+            guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else { break }
+            remaining -= chunk.count
+            for byte in chunk where byte == 0x0A { lines += 1 }
+            endsWithNewline = chunk.last == 0x0A
+            if chunk.count < want { break } // short read on a regular file = EOF
+        }
+        guard remaining > 0 else { return nil } // the cap bound the read, not EOF
+        return lines + (endsWithNewline ? 0 : 1)
+    }
+}

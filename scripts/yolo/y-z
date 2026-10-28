@@ -58,7 +58,6 @@ fi
 
 docker run --rm -it \
     --init --pids-limit=500 \
-    -p 53714:53714 \
     -v /etc/localtime:/etc/localtime:ro \
 	-e COLORTERM=truecolor \
 	-e ANTHROPIC_LOG=error \

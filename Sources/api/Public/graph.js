@@ -63,7 +63,7 @@
         try {
             const data = await fetchJson('/api/instances');
             renderChain(parentChainOf(data.instances, instanceParam));
-            await loadPersonas(data.instances);
+            await Promise.all([loadPersonas(data.instances), loadLadderNodes()]);
         } catch { }
     }
 
@@ -136,6 +136,41 @@
 
     function baseName(p) {
         return p.split('/').filter(Boolean).pop() || p;
+    }
+
+    // GET /graph/nodes — every node visible through the ladder; the own project is never a group (parents are for same-project reuse)
+    let ladderNodeGroups = [];
+    let ladderEntries = [];
+    const ladderIndex = new Map();
+
+    async function loadLadderNodes() {
+        try {
+            const data = await fetchJson(`/api/instances/${encodeURIComponent(instanceParam)}/graph/nodes`);
+            ladderEntries = data.nodes || [];
+            ladderNodeGroups = nodeGroupsFromLadder(ladderEntries);
+        } catch {
+            ladderEntries = [];
+            ladderNodeGroups = [];
+        }
+    }
+
+    function nodeGroupsFromLadder(entries) {
+        ladderIndex.clear();
+        entries.forEach(e => { if (!ladderIndex.has(e.id)) ladderIndex.set(e.id, e); });
+        const groups = [];
+        const byPath = new Map();
+        for (const e of entries) {
+            if (e.source === 'project') continue;
+            if (!byPath.has(e.source_path)) {
+                const label = e.source === 'global'
+                    ? 'Global (system-wide)'
+                    : `Parent: ${baseName(e.source_path || '')}`;
+                byPath.set(e.source_path, { label, path: e.source_path, nodes: [] });
+                groups.push(byPath.get(e.source_path));
+            }
+            byPath.get(e.source_path).nodes.push(e);
+        }
+        return groups;
     }
 
     async function load() {
@@ -743,6 +778,9 @@
             btn.addEventListener('click', () => submit(btn.dataset.agent));
         });
         $('composer-hint').textContent = composerHint();
+        // #node rides the RUN routes only — creation modes disarm it (a node being created has no tools to borrow)
+        OpenLoopSuggest.setNodeRefs($('composer-text'), composerMode === 'run');
+        $('composer-mention-hint').textContent = composerMode === 'run' ? OpenLoopSuggest.HINT : OpenLoopSuggest.HINT_FILES;
         resetComposerMcp();
         $('composer').classList.add('open');
         $('composer-text').value = '';
@@ -808,16 +846,20 @@
     // scheduleRunFocus once the reload has settled. Composer stays open
     // through the POST — failure keeps the user's words.
     async function submitPrompt(prompt, agent, nodeId) {
-        const res = await (composerMode === 'run' ? postRun(prompt) : postNode(prompt, agent));
+        const res = await (composerMode === 'run'
+            ? postRun(prompt, undefined, OpenLoopSuggest.nodeIds($('composer-text')))
+            : postNode(prompt, agent));
+        OpenLoopSuggest.reset($('composer-text'));
         closeComposer();
         await load();
         if (res?.id) scheduleRunFocus(nodeId, res.id);
     }
 
-    async function postRun(prompt, parentId) {
+    async function postRun(prompt, parentId, nodeIds) {
         const nodeId = parentId ? selectedId : composerRefId;
         const url = `/api/instances/${encodeURIComponent(instanceParam)}/graph/${encodeURIComponent(nodeId)}/run`;
         const body = parentId ? { prompt, parent_run_id: parentId } : { prompt };
+        if (nodeIds && nodeIds.length) body.node_ids = nodeIds;
         const opts = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -868,6 +910,7 @@
         bindActiveToggle(n);
         bindMcpField(n.id);
         bindPersonaPicks(n);
+        bindNodePicks(n);
         bindAgentPicks(n);
         bindSummaryButton(n);
         bindRetryButton(n);
@@ -893,6 +936,22 @@
     function bindPersonaPicks(n) {
         $('detail-panel-inner').querySelectorAll('.persona-pick').forEach(el => {
             el.addEventListener('click', () => togglePersona(n.id, el.dataset.personaId));
+        });
+    }
+
+    function bindNodePicks(n) {
+        const section = $('detail-panel-inner').querySelector('#nodes-section');
+        if (!section) return;
+        // one delegated listener per render — syncAssignUI rewrites #nodes-body under it on every tap
+        section.addEventListener('click', e => {
+            const dot = e.target.closest('.nr-dot');
+            if (dot && !dot.disabled) return tapDot(n, dot.dataset.id);
+            const cap = e.target.closest('.nr-caption');
+            if (cap && !cap.disabled) return tapDot(n, cap.dataset.id); // the caption is its dot's twin — the tip's tap clears
+            const un = e.target.closest('[data-unassign-id]');
+            if (un) return saveAssigned(
+                n.id, (n.assigned_node_ids || []).filter(x => x !== un.dataset.unassignId)
+            );
         });
     }
 
@@ -932,6 +991,29 @@
             el.classList.toggle('selected', assigned.has(el.dataset.personaId));
         });
         render();
+    }
+
+    // the tap grammar lives in OpenLoopLadder.tapAssign; the PUT is immediate, then the rails re-render fill-first
+    async function tapDot(n, id) {
+        const next = OpenLoopLadder.tapAssign(n.assigned_node_ids || [], id, ladderEntries);
+        n.assigned_node_ids = next;
+        panelJson = JSON.stringify(n);
+        syncAssignUI(n);
+        await saveAssigned(n.id, next);
+    }
+
+    function syncAssignUI(n) {
+        const body = $('detail-panel-inner').querySelector('#nodes-body');
+        if (body) body.innerHTML = nodesBodyHtml(n);
+    }
+
+    async function saveAssigned(nodeId, ids) {
+        try {
+            await putNode(nodeId, { assigned_node_ids: ids }); // [] clears
+        } catch (e) {
+            showError(`Failed to save nodes: ${e.message}`);
+            await load();
+        }
     }
 
     function bindMcpField(nodeId) {
@@ -1114,7 +1196,7 @@
 
     function panelBody(n) {
         return nameSection(n) + activeSection(n) + summarySection(n) + promptSection(n) + resultSection(n) +
-            personasSection(n) + mcpSection(n) + runsSection(n) + agentSection(n) + deleteSection(n);
+            personasSection(n) + nodesSection(n) + mcpSection(n) + runsSection(n) + agentSection(n) + deleteSection(n);
     }
 
     // NAME on every node: names are usually descriptions, so the field is a
@@ -1185,6 +1267,103 @@
         return `<div class="persona-pick${sel}" data-persona-id="${esc(p.id)}" title="${esc(p.role || p.name)}">` +
             avatarHtml(p, 'pp-avatar', p.role || p.name) +
             `<span class="persona-pick-name">${esc(p.name)}</span></div>`;
+    }
+
+    // NODES — standing assignments as dot rails, ROOTS only; fill = the resolved chain (an upstream pick fills a rail you never picked)
+    function nodesSection(n) {
+        if (n.parent_id) return '';
+        const assignedIds = n.assigned_node_ids || [];
+        const dangling = assignedIds.filter(id => !ladderIndex.has(id));
+        if (!ladderNodeGroups.length && !dangling.length) return '';
+        return `<div id="nodes-section"><div class="detail-section-label">NODES</div>` +
+            `<div class="mcp-hint">Chains up the ladder — a filled dot rides this root's runs, the name under a lane marks your pick. Tap a dot to ride through it; tap the tip or its name to clear.</div>` +
+            `<div id="nodes-body">` + nodesBodyHtml(n) + `</div>` +
+            `</div>`;
+    }
+
+    // dangling rows first, then one rail per ladder folder
+    function nodesBodyHtml(n) {
+        const resolution = OpenLoopLadder.resolve(n, ladderEntries);
+        const picks = new Set(n.assigned_node_ids || []);
+        const dangling = (n.assigned_node_ids || []).filter(id => !ladderIndex.has(id));
+        return dangling.map(danglingAssignHtml).join('') +
+            ladderNodeGroups.map(g => railGroupHtml(g, resolution, picks)).join('');
+    }
+
+    // the node was deleted upstream — un-assign is the only honest action
+    function danglingAssignHtml(id) {
+        return `<div class="assign-dangling">` +
+            `<span>⚠ missing — deleted upstream</span>` +
+            `<button class="assign-unassign" data-unassign-id="${esc(id)}">un-assign</button>` +
+            `</div>`;
+    }
+
+    function railGroupHtml(g, resolution, picks) {
+        const segs = OpenLoopLadder.segments(g.nodes);
+        return `<div class="persona-group nr-group">` +
+            `<div class="persona-group-label">${esc(g.label)}</div>` +
+            `<div class="nr-scroll">` +
+            segs.map(seg => railLaneHtml(seg, resolution, picks)).join('') +
+            `</div></div>`;
+    }
+
+    // one lane per segment; a branch indents past its trunk — dots never wrap, the group scrolls horizontally
+    function railLaneHtml(seg, resolution, picks) {
+        const last = seg.nodes.length - 1;
+        return `<div class="nr-chain" style="--nr-offset:${seg.indent}">` +
+            `<div class="nr-lane">` +
+            seg.nodes.map((e, i) => railSlotHtml(e, i === last, resolution, picks)).join('') +
+            `</div>` +
+            railPickCaptionHtml(seg, resolution, picks) +
+            `</div>`;
+    }
+
+    // the assigned tip names itself under its dot — the hover-free "what is assigned" marker; at most one row per lane
+    function railPickCaptionHtml(seg, resolution, picks) {
+        const i = seg.nodes.findIndex(e => picks.has(e.id));
+        if (i < 0) return '';
+        const e = seg.nodes[i];
+        const inactive = e.active === false;
+        const label = railTooltip(e, resolution.via[e.id], true, true, inactive);
+        const cls = `nr-caption clamp-10 ${esc(e.status)}${inactive ? ' inactive' : ''}`;
+        return `<div class="nr-captions">` +
+            `<button type="button" class="${cls}" data-id="${esc(e.id)}" style="--i:${i}"` +
+            (inactive ? ' disabled' : '') +
+            ` title="${esc(label)}" aria-label="${esc(label)}">${esc(railNodeLabel(e.id))}</button>` +
+            `</div>`;
+    }
+
+    // a switched-off node never fills and its dot is inert
+    function railSlotHtml(e, last, resolution, picks) {
+        const filled = resolution.idSet.has(e.id);
+        const picked = picks.has(e.id);
+        const inactive = e.active === false;
+        const cls = `nr-dot${filled ? ` filled ${esc(e.status)}` : ''}${picked ? ' picked' : ''}${inactive ? ' inactive' : ''}`;
+        const label = railTooltip(e, resolution.via[e.id], filled, picked, inactive);
+        return `<span class="nr-slot${last ? ' last' : ''}">` +
+            `<button type="button" class="${cls}" data-id="${esc(e.id)}"` +
+            (inactive ? ' disabled' : '') +
+            ` title="${esc(label)}" aria-label="${esc(label)}"></button></span>`;
+    }
+
+    function railTooltip(e, prov, filled, picked, inactive) {
+        const tools = e.chain_mcp_count
+            ? ` · ${e.chain_mcp_count} tool${e.chain_mcp_count === 1 ? '' : 's'} along its chain` : '';
+        const head = `${e.name || e.agent} · ${e.status}${tools}`;
+        if (inactive) return `${head} · switched off — re-activate it in its project to ride`;
+        if (picked) return `${head} · assigned — rides with its whole chain · tap to clear`;
+        if (filled && prov) {
+            if (prov.kind === 'pick') {
+                return `${head} · rides via your pick ${railNodeLabel(prov.pick)} · tap to pick here instead`;
+            }
+            return `${head} · rides via ${railNodeLabel(prov.holder)}'s pick of ${railNodeLabel(prov.pick)} · tap to pin your own pick`;
+        }
+        return `${head} · tap to ride through this node — its chain joins this root's runs`;
+    }
+
+    function railNodeLabel(id) {
+        const e = ladderIndex.get(id);
+        return (e && (e.name || e.agent)) || String(id).slice(0, 8);
     }
 
     // The Runs section is self-sufficient — it can start a run, not just
@@ -1578,12 +1757,18 @@
         return `<div id="thread-footer">${runFollowupSection(thread[thread.length - 1])}</div>`;
     }
 
+    // The thread reads as a chat, not a report: no RESULT/SUMMARY headings, the bubbles speak (state labels stay).
+    // The summary is the main answer (5 free lines), the raw result a 2-line reference — depths ride bubble.js's data-free-lines.
+    const THREAD_RESULT_LINES = 2;
+    const THREAD_SUMMARY_LINES = 5;
+
     function threadEntryHtml(l) {
         return `<div class="run-log" data-run-id="${esc(l.id)}">` +
             `<div class="run-log-meta"><span>${runMeta(l)}</span>${runDelBtn(l)}</div>` +
             OpenLoopBubble.bubbleHtml('input', l.prompt) +
             runResultSection(l) +
             runSummarySection(l) +
+            auditSection(l) +
             `</div>`;
     }
 
@@ -1614,13 +1799,41 @@
         return `<div class="run-summary-section" data-run-id="${esc(l.id)}">${summarySectionInner(l)}</div>`;
     }
 
+    // The summarized answer is the thread's main message: no SUMMARY heading, the bubble speaks — fold depth 5 vs the result's 2.
+    // The audit title word takes the old SUMMARY heading's seat in the head row — band and coloring come from the verdict alone.
     function summarySectionInner(l) {
         const body = l.summary
-            ? OpenLoopBubble.bubbleHtml('summary', l.summary)
+            ? OpenLoopBubble.bubbleHtml('summary', l.summary, null, THREAD_SUMMARY_LINES)
             : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
         return `<div class="summary-head">` +
-            `<div class="detail-section-label summary">SUMMARY</div>` +
+            auditTitleHtml(l) +
             `<span class="summary-actions"><button class="summary-edit-btn" data-run-id="${esc(l.id)}">${l.summary ? 'Edit' : 'Add'}</button></span></div>${body}`;
+    }
+
+    // The advisory scope audit's render grammar — character-identical twins in workflow-log.js, pinned by both sanity suites.
+    // nil → nothing; 'analyzing' → ANALYZING…; < AUDIT_WARN_CHARS → ANALYZED: OK; ≤ AUDIT_BAD_CHARS → ANALYSIS: ISSUE FOUND + the ANALYSIS bubble; past it → the same title in red + bubble.
+    const AUDIT_WARN_CHARS = 100;
+    const AUDIT_BAD_CHARS = 200;
+
+    function auditBand(l) {
+        const text = (l.audit || '').trim();
+        if (text) return text.length < AUDIT_WARN_CHARS ? 'ok' : (text.length <= AUDIT_BAD_CHARS ? 'warn' : 'bad');
+        return l.audit_status === 'analyzing' ? 'busy' : null;
+    }
+
+    function auditTitleHtml(l) {
+        const band = auditBand(l);
+        if (band === 'busy') return '<div class="detail-section-label audit busy" title="Analyzing the recorded turn against the ask…">ANALYZING…</div>';
+        if (band === 'ok') return '<div class="detail-section-label audit ok" title="All clear">ANALYZED: OK</div>';
+        if (band === 'warn' || band === 'bad') return `<div class="detail-section-label audit ${band}" title="Scope analysis found findings — read the ANALYSIS note below">ANALYSIS: ISSUE FOUND</div>`;
+        return '';
+    }
+
+    function auditSection(l) {
+        const band = auditBand(l);
+        if (band !== 'warn' && band !== 'bad') return '';
+        return `<div class="audit-section"><div class="detail-section-label audit ${band}">ANALYSIS</div>` +
+            OpenLoopBubble.bubbleHtml(band === 'bad' ? 'output error' : 'output', l.audit) + `</div>`;
     }
 
     function runSummaryEditHtml(l) {
@@ -1706,7 +1919,8 @@
     // eat the stream; resize + the 40vh cap bound it. Send is an icon
     // button — quiet until there is something to send.
     function followupComposerHtml() {
-        return `<div class="run-composer">` +
+        return `<div class="mcp-hint suggest-hint">${esc(OpenLoopSuggest.HINT)}</div>` +
+            `<div class="run-composer">` +
             `<textarea id="run-followup-text" rows="3" aria-label="Continue conversation" placeholder="Continue this conversation…" autocomplete="off" spellcheck="false"></textarea>` +
             `<button class="composer-send" id="run-followup-send" aria-label="Send follow-up (⌘↵)" title="Send follow-up (⌘↵)" aria-keyshortcuts="Meta+Enter Control+Enter" disabled>${sendIcon()}</button>` +
             `</div>`;
@@ -1768,6 +1982,8 @@
         // footer rewrite at reconcileFooter recreates the DOM, fresh
         // listeners — the same pattern as today.
         OpenLoopPanel.bindCmdEnterSubmit(text, submitFollowup);
+        // per-render for the same reason; 'above' — the dock is bottom-pinned
+        OpenLoopSuggest.bindField(text, { instance: instanceParam, place: 'above' });
         send.addEventListener('click', () => submitFollowup());
     }
 
@@ -1795,12 +2011,14 @@
     }
 
     async function submitFollowup() {
-        const prompt = $('run-followup-text').value.trim();
+        const text = $('run-followup-text');
+        const prompt = text.value.trim();
         if (!prompt) return;
         const tip = threadOf(focusedRunId, runsCache).pop();
         if (!tip) return;
         try {
-            await postRun(prompt, tip.id);
+            await postRun(prompt, tip.id, OpenLoopSuggest.nodeIds(text));
+            OpenLoopSuggest.reset(text);
             clearFollowupDraft();
             await load();
             logsJson = '';
@@ -1831,14 +2049,16 @@
         else body.scrollTop = end;
     }
 
+    // The thread's direct answer: no RESULT heading, the bubble is the message (state labels stay); fold depth 2 — a reference copy under the summary.
     function runResultSection(l) {
         const progress = l.status === 'progress';
         const failed = l.status === 'failed';
-        const cls = failed ? 'detail-section-label result error' : 'detail-section-label result';
-        const label = progress ? '<div class="detail-section-label running">RUNNING</div>' : `<div class="${cls}">${failed ? 'ERROR' : 'RESULT'}</div>`;
+        const label = progress
+            ? '<div class="detail-section-label running">RUNNING</div>'
+            : (failed ? '<div class="detail-section-label result error">ERROR</div>' : '');
         const bubble = progress
-            ? OpenLoopBubble.bubbleHtml('output', 'in progress…')
-            : OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)');
+            ? OpenLoopBubble.bubbleHtml('output', 'in progress…', null, THREAD_RESULT_LINES)
+            : OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)', null, THREAD_RESULT_LINES);
         return `<div>${label}${bubble}</div>`;
     }
 
@@ -2354,7 +2574,9 @@
         checkRunsSectionButtons();
         checkRunDisabledAttr();
         checkRunViewHtml();
+        checkThreadFoldDepths();
         checkThreadDelete();
+        checkAuditBand();
         checkThreadHeaderMeta();
         checkRootRunOf();
         checkConsumePendingRunFocus();
@@ -2383,9 +2605,30 @@
         checkEditFieldExclusions();
         checkMcpAuthSection();
         checkMcpAuthCellIndication();
+        checkNodesSection();
         checkAgentSectionEveryNode();
         checkClampGrammar();
+        checkSuggestWiring();
         console.log('All sanity checks passed.');
+    }
+
+    // hint lines above every composer, mode-dependent for the modal — the dropdown itself is pinned by suggest.js's suite
+    function checkSuggestWiring() {
+        const dock = followupComposerHtml();
+        console.assert(dock.includes('mcp-hint suggest-hint'), 'suggest: the dock composer carries the mention hint line');
+        console.assert(dock.includes('@file') && dock.includes('#node'), 'suggest: the dock hint names both triggers');
+        const modal = document.getElementById('composer-mention-hint');
+        console.assert(modal && modal.className.includes('suggest-hint'), 'suggest: the modal composer carries the hint line');
+        openRunComposer('n1');
+        console.assert(modal.textContent.includes('@file') && modal.textContent.includes('#node'),
+            'suggest: run mode names both triggers');
+        openComposer('n1');
+        console.assert(modal.textContent.includes('@file') && !modal.textContent.includes('#node'),
+            'suggest: child mode teaches @file only — #node is not honored for creation');
+        openInsert('n1');
+        console.assert(!modal.textContent.includes('#node'), 'suggest: insert mode keeps the files-only hint');
+        closeComposer();
+        console.log('OK: suggest wiring (hint lines)');
     }
 
     // The RULE lives in panel.js (checkFmtDur pins the full table — this page once carried a drifted twin); here we pin the wiring only.
@@ -2495,12 +2738,24 @@
         const html = threadViewHtml(thread[0], thread);
         console.assert(html.includes('run-back-btn'), 'runView: back button');
         console.assert(html.includes('4 runs'), 'runView: thread length in header');
-        console.assert(html.includes('ERROR') && html.includes('RUNNING') && html.includes('RESULT'), 'runView: per-run labels');
+        console.assert(html.includes('ERROR') && html.includes('RUNNING') && !html.includes('RESULT'),
+            'runView: state labels stay (RUNNING/ERROR), the RESULT heading is gone');
         console.assert(!html.includes('run-composer'), 'runView: answered tip without summary → no composer');
         const done = threadViewHtml(thread[0], thread.slice(0, 3));
-        console.assert(done.includes('SUMMARY') && done.includes('summary-edit-btn'), 'runView: summary + edit');
+        console.assert(!done.includes('SUMMARY') && done.includes('summary-edit-btn'),
+            'runView: summary renders headingless, edit affordance intact');
         console.assert(done.includes('run-composer'), 'runView: follow-up composer on summarised tip');
         console.log('OK: runViewHtml');
+    }
+
+    // The thread's fold hierarchy, pinned on both pages — result 2, summary 5, no RESULT/SUMMARY headings.
+    function checkThreadFoldDepths() {
+        const html = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' });
+        console.assert(html.includes('data-free-lines="2"'), 'foldDepths: the raw result folds at two lines');
+        console.assert(html.includes('data-free-lines="5"'), 'foldDepths: the summary folds at five lines');
+        console.assert(!html.includes('>RESULT<') && !html.includes('>SUMMARY<'),
+            'foldDepths: the chat cells carry no answer headings');
+        console.log('OK: thread fold depths (result 2 · summary 5 · no headings)');
     }
 
     // Per-turn delete: a quiet icon in EVERY thread row's meta, disabled
@@ -2522,6 +2777,37 @@
         console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
             'threadDel: teaching hint pinned');
         console.log('OK: per-turn delete markup');
+    }
+
+    // The audit band grammar, pinned on both pages (the audit trio renders character-identical) — an empty audit string is neutral: "not audited" is not "audited clean".
+    function checkAuditBand() {
+        const clean = { audit: null, audit_status: null };
+        console.assert(auditBand(clean) === null, 'auditBand: no audit → nothing renders');
+        console.assert(auditTitleHtml(clean) === '' && auditSection(clean) === '',
+            'auditBand: neutral renders neither title word nor bubble');
+        console.assert(auditBand({ audit: '   ' }) === null, 'auditBand: whitespace-only audit is neutral');
+        const busy = { audit: null, audit_status: 'analyzing' };
+        console.assert(auditBand(busy) === 'busy', 'auditBand: the marker reads busy');
+        console.assert(auditTitleHtml(busy).includes('audit busy') && auditTitleHtml(busy).includes('ANALYZING…') && auditSection(busy) === '',
+            'auditBand: busy renders the ANALYZING title word only — no bubble');
+        const ok = { audit: 'All clear' };
+        console.assert(ok.audit.length < 100 && auditBand(ok) === 'ok',
+            'auditBand: the mandated clean line stays under 100 chars');
+        console.assert(auditTitleHtml(ok).includes('audit ok') && auditTitleHtml(ok).includes('ANALYZED: OK'),
+            'auditBand: clean → the ANALYZED: OK title word, the verdict text never shown as content');
+        console.assert(auditSection(ok) === '', 'auditBand: clean renders no analysis bubble');
+        const warn = { audit: 'beyond scope: '.repeat(8) }; // 13 × 8 = 104 chars
+        console.assert(auditBand(warn) === 'warn', 'auditBand: 100–200 chars → warn');
+        console.assert(auditTitleHtml(warn).includes('audit warn') && auditTitleHtml(warn).includes('ISSUE FOUND') && auditSection(warn).includes('ANALYSIS'),
+            'auditBand: warn → the issue title word plus the analysis bubble');
+        const bad = { audit: 'x'.repeat(201) };
+        console.assert(auditBand(bad) === 'bad', 'auditBand: over 200 chars → bad');
+        console.assert(auditTitleHtml(bad).includes('audit bad') && auditSection(bad).includes('ANALYSIS'),
+            'auditBand: bad → the red issue title word plus the bubble');
+        const row = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's', ...warn });
+        console.assert(row.indexOf('wl-bubble summary') < row.indexOf('ANALYSIS'),
+            'auditBand: the analysis bubble rides after the summary');
+        console.log('OK: audit band grammar');
     }
 
     // The header count follows the splice, not the first paint — the stale
@@ -3185,6 +3471,69 @@
         console.log('OK: mcp auth cell indication');
     }
 
+    // the standing-assignments picker as dot rails — the tap grammar is pinned by ladder.js's own suite
+    function checkNodesSection() {
+        const savedGroups = ladderNodeGroups;
+        const savedEntries = ladderEntries;
+        const base = { id: 'B1', parent_id: null, prompt: 'p', created_at: 10, agent: 'cc', status: 'success' };
+        console.assert(nodesSection({ ...base, parent_id: 'B0' }) === '',
+            'nodesSection: non-roots never show the section — the field is dormant server-side');
+        ladderNodeGroups = [];
+        ladderEntries = [];
+        console.assert(nodesSection({ ...base }) === '',
+            'nodesSection: nothing up the ladder to offer → no section');
+        console.assert(nodesSection({ ...base, assigned_node_ids: ['gone'] }).includes('assign-unassign'),
+            'nodesSection: a dangling id alone still shows the section, with un-assign');
+
+        // The three-folder fixture (ladder.js's twin): B1 picks A3; innerB's root A1 picks the share's R2 → resolved R1→R2→A1→A2→A3→B1.
+        const mk = (id, parent, ca, assigned, extra) => Object.assign(
+            { id: id, parent_id: parent || null, created_at: ca, assigned_node_ids: assigned || [],
+              active: true, status: 'success', agent: 'cc', name: id.toLowerCase(),
+              source_path: '', source: '', chain_mcp_count: 0 }, extra || {});
+        ladderEntries = [
+            mk('B1', null, 10, ['A3'], { source_path: '/w/prjB', source: 'project' }),
+            mk('B2', 'B1', 11, null, { source_path: '/w/prjB', source: 'project' }),
+            mk('A1', null, 1, ['R2'], { source_path: '/w/innerB', source: 'parent', chain_mcp_count: 2 }),
+            mk('A2', 'A1', 2, null, { source_path: '/w/innerB', source: 'parent' }),
+            mk('A3', 'A2', 3, null, { source_path: '/w/innerB', source: 'parent' }),
+            mk('A3b', 'A2', 4, null, { source_path: '/w/innerB', source: 'parent', active: false }),
+            mk('R1', null, 1, null, { source_path: '/share', source: 'global' }),
+            mk('R2', 'R1', 2, null, { source_path: '/share', source: 'global' }),
+            mk('R3', 'R2', 3, null, { source_path: '/share', source: 'global' })
+        ];
+        ladderNodeGroups = nodeGroupsFromLadder(ladderEntries);
+        const html = nodesSection({ ...base, assigned_node_ids: ['A3', 'ghost'] });
+        console.assert(html.includes('Global (system-wide)'), 'nodesSection: the share names its group');
+        console.assert(html.includes('Parent: innerB'), 'nodesSection: a parent folder groups by its base name');
+        console.assert(!html.includes('data-id="B2"'), 'nodesSection: the own project is never offered — parents are for same-project reuse');
+        console.assert(html.includes('⚠ missing — deleted upstream'), 'nodesSection: a dead id says what happened to it');
+        console.assert(html.includes('class="nr-dot filled success picked" data-id="A3"'),
+            'nodesSection: the pick renders filled with its status color and the picked marker');
+        console.assert(html.includes('class="nr-dot filled success" data-id="A2"'),
+            'nodesSection: an ancestor of the pick fills with no marker of its own');
+        console.assert(html.includes('class="nr-dot filled success" data-id="R2"'),
+            'nodesSection: the share rail fills from the upstream pick — resolved truth, zero picks there');
+        console.assert(html.includes("rides via a1's pick of r2"),
+            'nodesSection: a filled dot without a direct pick names the reason in its tooltip');
+        console.assert(html.includes('class="nr-dot" data-id="R3"') && !html.includes('data-id="R3" disabled'),
+            'nodesSection: a child past the pick stays hollow and tappable');
+        console.assert(html.includes('class="nr-dot inactive" data-id="A3b"') && html.includes('disabled'),
+            'nodesSection: a switched-off node renders hollow and inert');
+        console.assert(html.includes('--nr-offset:2'),
+            'nodesSection: the fork branch indents past its trunk');
+        // the pick's caption: exactly one row — upstream fill stays tooltip-only
+        console.assert((html.match(/class="nr-caption /g) || []).length === 1,
+            'nodesSection: exactly one pick caption — upstream fill (r2) never grows a row of its own');
+        console.assert(html.includes('class="nr-caption clamp-10 success" data-id="A3" style="--i:0"'),
+            'nodesSection: the pick\'s caption names it, pinned under its own dot (--i is lane-relative — A3 is its branch\'s only cell)');
+        console.assert(html.includes('>a3</button>'), 'nodesSection: the caption text is the node\'s name');
+        console.assert(!nodesSection({ ...base }).includes('nr-caption'),
+            'nodesSection: no picks → no captions — fill stays, but rows never lie about picks');
+        ladderNodeGroups = savedGroups;
+        ladderEntries = savedEntries;
+        console.log('OK: nodes section (dot rails)');
+    }
+
     // AGENT section on every node: composer pill grammar at the panel bottom —
     // the current agent selected + inert, the others clickable, the whole
     // picker locked while the node runs, and an agent gone from the server
@@ -3237,6 +3586,8 @@
     // would stack one listener per open (the add-root comment two blocks
     // down is the same rule). composerCmdEnter self-guards on mode.
     OpenLoopPanel.bindCmdEnterSubmit($('composer-text'), composerCmdEnter);
+    // static field, one bind; # mode-switched per open (setNodeRefs), dropdown 'below' — the modal floats mid-screen
+    OpenLoopSuggest.bindField($('composer-text'), { instance: instanceParam, place: 'below' });
 
     $('composer-cancel').addEventListener('click', closeComposer);
     $('composer-mcp-toggle').addEventListener('click', () => {

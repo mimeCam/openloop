@@ -512,18 +512,10 @@ private func isRealPersona(_ id: String) -> Bool {
 }
 
 private func collectContext(personaId: String, runDir: FilePath) throws -> ([FilePath], Set<GraphMcpEndpoint>) {
-    // Nearest-first instance ladder, the user-global share LAST: global
-    // nodes' summaries and MCPs reach every run of every project persona.
-    var perDir: [Set<GraphMcpEndpoint>] = []
-    let files = try Paths.contextLookupDirs(from: Paths.curDir)
-        .filter { PathIO.isDirectoryExistent(atPath: NodeStore.nodesDir(at: $0.string).string) }
-        .flatMap { dir -> [String] in
-            let ctx = try GraphStore.personaContext(personaId: personaId, at: dir.string)
-            perDir.append(ctx.mcps)
-            return ctx.texts
-        }
-        .map { try writeContextFile($0, runDir: runDir) }
-    return (files, GraphStore.nearestWinsMcpUnion(perDir))
+    // one shared ladder walk, the user-global share LAST: global nodes' summaries and MCPs reach every run of every project persona — auth per folder, MCP conflicts nearest-wins
+    let ctx = try GraphStore.personaContextAcrossLadder(personaId: personaId, from: Paths.curDir)
+    let files = try ctx.texts.map { try writeContextFile($0, runDir: runDir) }
+    return (files, ctx.mcps)
 }
 
 private func writeContextFile(_ text: String, runDir: FilePath) throws -> FilePath {
