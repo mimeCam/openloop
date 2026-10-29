@@ -84,13 +84,18 @@
     // Crumb markup, pure (checkChainPath pins it): parents are names-only —
     // context, not location, and their paths already ride the hover; the
     // current crumb states its full path inline, muted beside the green
-    // name. Name and path are separate spans so the path is what ellipsizes
+    // name. Name and path are separate runs so the path is what ellipsizes
     // when the bar runs out of room (.crumb.cur is a flex row in graph.html).
+    // The name is also the tab-duplicating door: a plain anchor (the home
+    // page's graph-link grammar, no listener to bind) that opens this same
+    // graph in a new tab — editing many nodes in parallel means keeping a
+    // few tabs on one workspace, each with its own open panel.
     function crumbHtml(p, cur) {
         const name = p.split('/').filter(Boolean).pop() || p;
         const cls = cur ? 'crumb cur' : 'crumb';
         const body = cur
-            ? `<span class="crumb-name">${esc(name)}</span><span class="crumb-path">(${esc(p)})</span>`
+            ? `<a class="crumb-name" href="/graph.html?instance=${encodeURIComponent(p)}" target="_blank" rel="noopener noreferrer" title="Open this graph in a new tab">${esc(name)}</a>` +
+              `<span class="crumb-path">(${esc(p)})</span>`
             : esc(name);
         return `<span class="${cls}" title="${esc(p)}">${body}</span>`;
     }
@@ -513,7 +518,7 @@
         const inactive = n.active ? '' : ' inactive';
         return `<div class="node-cell${inactive}">` +
             nodeNameHtml(n) + // before .node-slot: inside it, a title would shift the top:50% insert +
-            `<div class="node-slot">${nodeCard(n)}` +
+            `<div class="node-slot">${assignmentBadge(n)}${nodeCard(n)}` +
             `<button class="node-insert-btn" data-id="${esc(n.id)}" title="Insert before">+</button></div>` +
             personaStrip(n) +
             runButton(n) +
@@ -527,6 +532,18 @@
     function nodeNameHtml(n) {
         if (!n.name) return '';
         return `<div class="node-title clamp-10" title="${esc(n.name)}">${esc(n.name)}</div>`;
+    }
+
+    function assignmentBadge(n) {
+        if (n.parent_id) return '';
+        const k = (n.assigned_node_ids || []).length;
+        if (!k) return '';
+        console.assert(n.name || n.agent, 'assignmentBadge: agent is a required wire field — the label head never falls through to empty');
+        const label = `${n.name || n.agent} · ${k} standing assignment${k > 1 ? 's' : ''}`;
+        return `<button class="node-assign-badge" data-id="${esc(n.id)}"
+            title="${esc(label)}" aria-label="${esc(label)}">
+            <span class="nab-dot" aria-hidden="true"></span>
+            <span class="nab-count">${k}</span></button>`;
     }
 
     function personaStrip(n) {
@@ -667,6 +684,7 @@
         bindCards(grid);
         bindRunButtons(grid);
         bindInsertButtons(grid);
+        bindAssignBadges(grid);
         bindAvatarFallbacks(grid);
         markSelectedCard(grid);
     }
@@ -689,6 +707,25 @@
                 openInsert(btn.dataset.id);
             });
         });
+    }
+
+    function bindAssignBadges(grid) {
+        grid.querySelectorAll('.node-assign-badge').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                openAssignBadge(btn.dataset.id);
+            });
+        });
+    }
+
+    function openAssignBadge(id) {
+        const beaconPulseMs = 900;
+        selectNode(id);
+        const sec = $('nodes-section');
+        console.assert(sec, 'assignBadge: a qualifying pin always lands on NODES — its picks render the section');
+        sec.scrollIntoView({ block: 'center' });
+        sec.classList.add('beacon');
+        setTimeout(() => sec.classList.remove('beacon'), beaconPulseMs);
     }
 
     function bindRunButtons(grid) {
@@ -2606,6 +2643,7 @@
         checkMcpAuthSection();
         checkMcpAuthCellIndication();
         checkNodesSection();
+        checkAssignmentBadge();
         checkAgentSectionEveryNode();
         checkClampGrammar();
         checkSuggestWiring();
@@ -2645,17 +2683,26 @@
     // The header states which instance you're on: the current crumb pairs
     // its green name with the full path in muted parens; parents stay
     // names-only (context, not location — the hover carries every path).
+    // The name is the tab-duplicating door: it opens THIS graph in a new
+    // tab (parallel node editing keeps several tabs on one workspace) —
+    // the path beside it and the parent crumbs never navigate.
     function checkChainPath() {
         const cur = crumbHtml('/home/u/dev/openloop', true);
-        console.assert(cur.includes('class="crumb-name">openloop<'),
-            'chainPath: the name stays its own span — never the part that ellipsizes');
+        console.assert(cur.includes('<a class="crumb-name"') && cur.includes('>openloop</a>'),
+            'chainPath: the name stays its own run — never the part that ellipsizes');
+        console.assert(cur.includes('href="/graph.html?instance=%2Fhome%2Fu%2Fdev%2Fopenloop"'),
+            'chainPath: the name opens this same graph — encoded instance path, one URL grammar with the home page links');
+        console.assert(cur.includes('target="_blank" rel="noopener noreferrer"'),
+            'chainPath: a new tab, and the opener handle never travels');
+        console.assert(cur.includes('</a><span class="crumb-path">'),
+            'chainPath: the door is the name alone — the path in parens stays inert');
         console.assert(cur.includes('<span class="crumb-path">(/home/u/dev/openloop)</span>'),
             'chainPath: the current crumb states the full path in parens');
         console.assert(cur.includes('title="/home/u/dev/openloop"'),
             'chainPath: the tooltip keeps the full path');
         const parent = crumbHtml('/home/u/dev', false);
-        console.assert(!parent.includes('crumb-path') && !parent.includes('crumb-name'),
-            'chainPath: parents stay names-only');
+        console.assert(!parent.includes('crumb-path') && !parent.includes('crumb-name') && !parent.includes('<a'),
+            'chainPath: parents stay names-only, plain text');
         console.log('OK: chain path beside the name');
     }
 
@@ -3532,6 +3579,83 @@
         ladderNodeGroups = savedGroups;
         ladderEntries = savedEntries;
         console.log('OK: nodes section (dot rails)');
+    }
+
+    function checkAssignmentBadge() {
+        const saved = nodes;
+        nodes = badgeFixtureNodes();
+        renderGrid();
+        assertBadgeGate();
+        assertBadgeGrammar();
+        assertBadgeGeometry();
+        assertBadgeRerender();
+        assertBadgeTap();
+        nodes = saved; renderGrid();
+        console.log('OK: assignment badge on root cards');
+    }
+
+    function badgeFixtureNodes() {
+        const base = { agent: 'a', prompt: 'p '.repeat(20), status: 'success', created_at: 1 };
+        return [
+            { ...base, id: 'root0', parent_id: null, name: 'r0', assigned_node_ids: [] },
+            { ...base, id: 'root3', parent_id: null, name: 'r3', created_at: 2, assigned_node_ids: ['a', 'b', 'ghost'] },
+            { ...base, id: 'child', parent_id: 'root3', name: 'c', created_at: 3, assigned_node_ids: ['x'] },
+            { ...base, id: 'rootU', parent_id: null, name: 'ru', created_at: 4 }];
+    }
+
+    function assertBadgeGate() {
+        const badges = document.querySelectorAll('#graph-grid .node-assign-badge');
+        console.assert(badges.length === 1 && badges[0].dataset.id === 'root3',
+            'assignBadge: roots with picks only — zero picks, a dormant field and a picking child render nothing');
+        console.assert(badges[0].querySelector('.nab-count').textContent === '3',
+            'assignBadge: raw wire count — dangling ids stay honest with the panel');
+    }
+
+    function assertBadgeGrammar() {
+        const b = document.querySelector('.node-assign-badge');
+        console.assert(b.title === 'r3 · 3 standing assignments' && b.title === b.getAttribute('aria-label'),
+            'assignBadge: tooltip and aria agree — middot grammar, plural');
+        const one = assignmentBadge({ id: 'q', parent_id: null, agent: 'ag', name: 'q "named"', assigned_node_ids: ['z'] });
+        console.assert(one.includes('1 standing assignment') && one.includes('q &quot;named&quot;'),
+            'assignBadge: singular at 1; a name carrying quotes survives esc()');
+    }
+
+    function assertBadgeGeometry() {
+        const insertBandClearancePx = 13;
+        const subpixelTolerancePx = 0.5;
+        const badge = document.querySelector('.node-assign-badge');
+        const slot = badge.closest('.node-slot');
+        const insert = slot.querySelector('.node-insert-btn');
+        console.assert(badge.parentElement === slot && !badge.closest('.node-card'),
+            'assignBadge: inside .node-slot, outside .node-card — edges and the selected ring measure the card');
+        console.assert(badge.offsetTop + badge.offsetHeight <= insert.offsetTop - insertBandClearancePx,
+            'assignBadge: the pin band sits fully above the insert + band');
+        console.assert(badge.offsetLeft + badge.offsetWidth <= slot.querySelector('.node-card').offsetLeft + subpixelTolerancePx,
+            'assignBadge: hugs its card — clear of its left edge, inside the column gap');
+        const grid = $('graph-grid').getBoundingClientRect();
+        console.assert(badge.getBoundingClientRect().left >= grid.left - subpixelTolerancePx,
+            'assignBadge: a first-column pin stays visible at scroll origin');
+        console.assert(document.querySelectorAll('#edge-layer path').length === 1,
+            'assignBadge: edges still anchor to cards — the pin cost them nothing');
+    }
+
+    function assertBadgeRerender() {
+        renderGrid();
+        console.assert(document.querySelectorAll('.node-assign-badge').length === 1,
+            'assignBadge: the 5s rewrite leaves exactly one pin per qualifying root');
+    }
+
+    // bindCanvasDismiss is not wired in isolated runs — this spy stands in for it
+    function assertBadgeTap() {
+        let canvasSawIt = false;
+        const spy = () => { canvasSawIt = true; };
+        $('graph-canvas').addEventListener('click', spy);
+        document.querySelector('.node-assign-badge').click();
+        $('graph-canvas').removeEventListener('click', spy);
+        console.assert(!canvasSawIt, 'assignBadge: tap stops propagation — the canvas dismiss never fires');
+        console.assert($('detail-panel').classList.contains('open') && $('nodes-section'),
+            'assignBadge: tap opens the panel at the NODES rails — dangling picks alone render them');
+        closePanel();
     }
 
     // AGENT section on every node: composer pill grammar at the panel bottom —

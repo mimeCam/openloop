@@ -14,3 +14,10 @@ dist
 .parcel-cache
 coverage
 .opencode
+//
+// openloop
+*.log
+logs*
+state.json5
+*.tmp
+secrets.json5
