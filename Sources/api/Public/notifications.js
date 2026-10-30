@@ -10,12 +10,25 @@
     const ISOLATED_RUN = false; // flip to true to run sanity checks in DevTools
 
     // ── list filter — multi-word AND over title / instance_path / ask ──
+    // TODO: server-side search — the client only ever sees FETCH_LIMIT newest per instance
     const FETCH_LIMIT = 100;
     const ANNOUNCE_DELAY_MS = 400;
-    // TODO: filter — no ?q= URL persistence yet
     let query = '';
     let fetchCapReached = false;
     let announceTimer = 0;
+    let searchOpen = false;
+
+    // ── ?q= URL state — replaceState only: typing must not stack history entries ──
+    const readFilterState = url => ({ q: new URLSearchParams(url.search).get('q') || '' });
+
+    function writeFilterState(q) {
+        const url = new URL(location.href);
+        const scope = url.searchParams.get('instance');
+        if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
+        console.assert(url.searchParams.get('instance') === scope,
+            'writeFilterState: ?instance= (page scope) is never touched');
+        history.replaceState(null, '', url);
+    }
 
     // ── prompt disclosure (grammar cloned from graph.js renderBubble) ──
     const PROMPT_THRESHOLD = 300; // ≈3 wrapped lines at 12px — same figure as graph.js renderBubble default
@@ -100,10 +113,17 @@
         try {
             items = instanceParam ? await loadOne(instanceParam) : await loadAll();
         } catch (e) {
-            $('list').innerHTML = `<div class="error-banner">Failed to load notifications: ${esc(e.message)}</div>`;
+            showError(e.message);
             return;
         }
         render();
+    }
+
+    function showError(msg) {
+        console.assert(msg, 'showError: carries the caught error text — load() passes e.message');
+        $('list').innerHTML = `<div class="error-banner">Failed to load notifications: ${esc(msg)}
+            <br><button class="clear-filter-btn" type="button">Retry</button></div>`;
+        $('list').querySelector('.clear-filter-btn').addEventListener('click', load);
     }
 
     async function loadOne(inst) {
@@ -189,11 +209,13 @@
     function listHtml(visible, tokens) {
         if (!items.length) return emptyHtml();
         if (!visible.length) return noMatchHtml(tokens);
-        return (tokens.length ? statusHtml(visible) : '') + visible.map(rowHtml).join('');
+        return visible.map(rowHtml).join('');
     }
 
     function renderFilterChrome(visible, tokens) {
         $('filter-input').disabled = !items.length && !tokens.length;
+        $('filter-status').hidden = !tokens.length || !visible.length; // no-match card owns recovery
+        $('filter-status').innerHTML = statusHtml(visible);
         announceFilter(visible, tokens);
     }
 
@@ -217,20 +239,22 @@
     }
 
     function statusHtml(visible) {
+        console.assert(visible.length <= items.length,
+            'statusHtml: visible is a subset of items — "Showing X of Y" must never exceed Y');
         const set = new Set(visible);
         const hiddenUnread = items.filter(n => !n.read && !set.has(n)).length;
-        return `<div class="filter-status">Showing ${visible.length} of ${items.length}` +
-            (hiddenUnread ? ` · ${hiddenUnread} unread hidden` : '') +
-            ` · <button class="filter-clear" type="button">clear</button></div>`;
+        const hiddenNote = hiddenUnread ? ` · ${hiddenUnread} unread hidden` : '';
+        return `Showing ${visible.length} of ${items.length}${hiddenNote} · <button class="filter-clear" type="button">clear</button>`;
     }
 
     function noMatchHtml(tokens) {
+        console.assert(tokens.length, 'noMatchHtml: the no-match card only exists for an active filter');
         return `<div class="empty">` +
             `<div class="empty-icon" aria-hidden="true">${searchXIcon()}</div>` +
             `<div class="empty-title">No matches for “${esc(tokens.join(' '))}”</div>` +
             `<div class="empty-hint">Every word must appear in the workflow or node name, the project path, or your ask.</div>` +
             noMatchNotes() +
-            `<button class="mark-all-btn visible filter-clear" type="button">Clear filter</button>` +
+            `<button class="clear-filter-btn filter-clear" type="button">Clear filter</button>` +
             `</div>`;
     }
 
@@ -445,13 +469,22 @@ Press / to focus · Esc to clear`;
         input.addEventListener('input', () => { applyQuery(input.value); trimFilter(input); });
         input.addEventListener('keydown', onFilterKey);
         $('filter-x').addEventListener('click', clearFilter);
+        $('filter-status').addEventListener('click', onStatusClick);
+        $('search-toggle').addEventListener('click', toggleSearch);
         document.addEventListener('keydown', onGlobalKey);
+        window.addEventListener('popstate', syncFilterFromUrl);
     }
 
+    const onStatusClick = e => {
+        if (e.target.closest('.filter-clear')) clearFilter();
+    };
+
     function applyQuery(q) {
+        console.assert(typeof q === 'string', 'applyQuery: raw input string — "" is filter off');
         if (q === query) return;
         const was = queryTokens(query).length > 0, now = queryTokens(q).length > 0;
         query = q;
+        writeFilterState(q);
         if (!was && now) scrollTop();
         $('list').classList.toggle('fade-in', was && !now);
         render();
@@ -465,15 +498,20 @@ Press / to focus · Esc to clear`;
         if (e.key !== 'Escape') return;
         e.preventDefault();
         if (e.target.value) { e.target.value = ''; applyQuery(''); trimFilter(e.target); }
+        else if (searchOpen) toggleSearch();
         else e.target.blur();
     }
 
-    function clearFilter() {
+    const clearQuery = () => {
         const input = $('filter-input');
         input.value = '';
-        input.focus();
         applyQuery('');
         trimFilter(input);
+    };
+
+    function clearFilter() {
+        clearQuery();
+        $('filter-input').focus();
     }
 
     function onGlobalKey(e) {
@@ -482,7 +520,47 @@ Press / to focus · Esc to clear`;
         if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
         e.preventDefault();
         const input = $('filter-input');
-        if (!input.disabled) { input.focus(); input.select(); }
+        if (input.disabled) return;
+        if (!searchOpen) setSearchOpen(true);
+        input.focus();
+        input.select();
+    }
+
+    // ── mobile deck summon — ≤768px CSS owns visibility, JS owns state ──
+    function setSearchOpen(open) {
+        searchOpen = open;
+        document.body.classList.toggle('search-open', open);
+        $('search-toggle').setAttribute('aria-expanded', String(open));
+    }
+
+    function toggleSearch() {
+        setSearchOpen(!searchOpen);
+        if (searchOpen) { $('filter-input').focus(); return; }
+        $('search-toggle').focus();
+        // a hidden filter is a trap — closing the deck drops the query with it
+        if (query) clearQuery();
+        console.assert(searchOpen || !query, 'toggleSearch: a closed deck never hides an active filter');
+    }
+
+    // ── ?q= lifecycle: seed before first load, sync on back/forward ──
+    // a query arriving from the URL summons the deck — a hidden active filter is a trap
+    function adoptQuery(q) {
+        query = q;
+        const input = $('filter-input');
+        input.value = q;
+        trimFilter(input);
+        if (q) setSearchOpen(true);
+    }
+
+    function seedFilterFromUrl() {
+        adoptQuery(readFilterState(location).q);
+    }
+
+    function syncFilterFromUrl() {
+        const q = readFilterState(location).q;
+        if (q === query) return;
+        adoptQuery(q);
+        render();
     }
 
     function scrollTop() {
@@ -500,6 +578,9 @@ Press / to focus · Esc to clear`;
         checkFilterMatch();
         checkFilterHighlight();
         checkFilterRender();
+        checkSearchChromeOutsideList();
+        checkSearchToggleState();
+        checkUrlState();
         console.log('All sanity checks passed.');
     }
 
@@ -718,6 +799,72 @@ Press / to focus · Esc to clear`;
         console.log('OK: filter render');
     }
 
+    // ── deck sanity: chrome outside the wipe zone; toggle state; URL round-trip ──
+    function checkSearchChromeOutsideList() {
+        const savedItems = items, savedQuery = query;
+        const base = { kind: 'node_run', node_id: 'n1', success: true, took: 1, ended_at: 1, read: false };
+        items = [
+            { ...base, id: 'r1', instance_path: '/x/deep/project', title: 'deploy-migration', prompt: null },
+            { ...base, id: 'r2', instance_path: '/x/y/other', title: 'unrelated', success: false }
+        ];
+        query = 'deploy';
+        render();
+        const html = $('list').innerHTML;
+        console.assert(!html.includes('filter-wrap') && !html.includes('filter-status'),
+            'deck: render leaves no search chrome inside #list (the wipe zone)');
+        console.assert(!$('filter-status').hidden && $('filter-status').innerHTML.includes('Showing 1 of 2'),
+            'deck: status strip renders into its persistent node, not the first list row');
+        console.assert($('filter-status').innerHTML.includes('1 unread hidden'),
+            'deck: unread-hidden math survives the relocation');
+        query = '';
+        render();
+        console.assert($('filter-status').hidden,
+            'deck: filter off → status strip hidden (no dead chrome)');
+        query = savedQuery;
+        items = savedItems;
+        console.log('OK: search chrome outside list');
+    }
+
+    function checkSearchToggleState() {
+        setSearchOpen(true);
+        render();
+        console.assert(searchOpen && document.body.classList.contains('search-open'),
+            'deck: open state survives a render (module-level, not DOM-resident)');
+        console.assert($('search-toggle').getAttribute('aria-expanded') === 'true',
+            'deck: aria-expanded syncs on open');
+        const saved = query;
+        query = 'trap';
+        toggleSearch(); // focus-return is a browser concern — not assertable against this DOM stub
+        console.assert(!searchOpen && !document.body.classList.contains('search-open') &&
+            $('search-toggle').getAttribute('aria-expanded') === 'false',
+            'deck: close flips state, body class and aria');
+        console.assert(query === '',
+            'deck: closing drops the query — a hidden filter is a trap');
+        query = saved;
+        console.log('OK: search toggle state');
+    }
+
+    function checkUrlState() {
+        const mk = s => new URL(`http://x/notifications.html${s}`);
+        console.assert(readFilterState(mk('?q=hello')).q === 'hello' &&
+            readFilterState(mk('?instance=/a/b')).q === '',
+            'readFilterState: reads ?q=, missing ?q= canonicalizes to empty');
+        const saved = location.href;
+        history.replaceState(null, '', '?instance=/tmp/demo&q=Fix+Build');
+        writeFilterState('fix build');
+        const url = new URL(location.href);
+        console.assert(url.searchParams.get('q') === 'fix build' &&
+            url.searchParams.get('instance') === '/tmp/demo',
+            'writeFilterState: rewrites ?q=, preserves params it does not own');
+        writeFilterState('');
+        const cleared = new URL(location.href);
+        console.assert(!cleared.searchParams.has('q') &&
+            cleared.searchParams.get('instance') === '/tmp/demo',
+            'writeFilterState: empty query leaves no ?q= residue');
+        history.replaceState(null, '', saved);
+        console.log('OK: url state');
+    }
+
     if (ISOLATED_RUN) runSanityChecks();
-    else { renderScope(); bindFilter(); load(); setInterval(load, POLL_SECONDS * 1000); }
+    else { renderScope(); seedFilterFromUrl(); bindFilter(); load(); setInterval(load, POLL_SECONDS * 1000); }
 })();

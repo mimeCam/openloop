@@ -90,11 +90,25 @@
     // page's graph-link grammar, no listener to bind) that opens this same
     // graph in a new tab — editing many nodes in parallel means keeping a
     // few tabs on one workspace, each with its own open panel.
+    const URL_STATE_KEYS = ['node', 'run'];
+
+    function crumbDoorHref(p) {
+        console.assert(p, 'crumbDoorHref: needs this graph\'s own instance path — the door re-opens the very graph');
+        const q = new URLSearchParams();
+        q.set('instance', p);
+        const src = new URLSearchParams(location.search);
+        for (const key of URL_STATE_KEYS) {
+            const v = src.get(key);
+            if (v) q.set(key, v);
+        }
+        return '/graph.html?' + q.toString();
+    }
+
     function crumbHtml(p, cur) {
         const name = p.split('/').filter(Boolean).pop() || p;
         const cls = cur ? 'crumb cur' : 'crumb';
         const body = cur
-            ? `<a class="crumb-name" href="/graph.html?instance=${encodeURIComponent(p)}" target="_blank" rel="noopener noreferrer" title="Open this graph in a new tab">${esc(name)}</a>` +
+            ? `<a class="crumb-name" href="${crumbDoorHref(p)}" target="_blank" rel="noopener noreferrer" title="Open this graph in a new tab">${esc(name)}</a>` +
               `<span class="crumb-path">(${esc(p)})</span>`
             : esc(name);
         return `<span class="${cls}" title="${esc(p)}">${body}</span>`;
@@ -751,6 +765,7 @@
 
     function selectNode(id) {
         selectedId = id;
+        syncUrl(id, null);
         document.querySelectorAll('.node-card.selected')
             .forEach(c => c.classList.remove('selected'));
         const card = document.querySelector(`.node-card[data-id="${CSS.escape(id)}"]`);
@@ -1177,7 +1192,33 @@
         }
     }
 
+    function syncUrl(nodeId, runId) {
+        console.assert(nodeId || !runId, 'syncUrl: ?run= never travels without its ?node= — threads are reached via their node');
+        const q = new URLSearchParams(location.search);
+        setOrDropParam(q, 'node', nodeId);
+        setOrDropParam(q, 'run', runId);
+        const qs = q.toString();
+        const s = qs ? '?' + qs : '';
+        if (s === location.search) return false;
+        history.replaceState(null, '', s);
+        syncCrumbDoor();
+        return true;
+    }
+
+    function setOrDropParam(q, key, value) {
+        if (value) q.set(key, value);
+        else q.delete(key);
+    }
+
+    function syncCrumbDoor() {
+        const door = document.querySelector('a.crumb-name');
+        const p = new URLSearchParams(location.search).get('instance');
+        console.assert(p, 'syncCrumbDoor: every write preserves ?instance= — absent means syncUrl broke its clone');
+        if (door) door.setAttribute('href', crumbDoorHref(p));
+    }
+
     function closePanel() {
+        syncUrl(null, null);
         $('detail-panel').classList.remove('open');
         $('graph-canvas').classList.remove('panel-open');
         document.querySelectorAll('.node-card.selected')
@@ -1629,6 +1670,7 @@
         const root = runsCache.find(l => l.id === runId && !l.parent_run_id);
         if (!root) return;
         focusedRunId = runId;
+        syncUrl(selectedId, runId);
         renderRunView(root, true);
         $('detail-panel-inner').querySelector('.run-back-btn').focus();
         scrollToThreadEnd(); // a conversation's news is at its end — arrive there
@@ -1642,6 +1684,7 @@
     function backToNode() {
         const from = focusedRunId;
         focusedRunId = null;
+        syncUrl(selectedId, null);
         runSummaryEditing = false;
         logsJson = '';
         pendingRowFocus = from; // rows re-render async (loadLogs) — restore focus then
@@ -2616,6 +2659,8 @@
         checkAuditBand();
         checkThreadHeaderMeta();
         checkRootRunOf();
+        checkSyncUrlHelper();
+        checkSyncUrlWiring();
         checkConsumePendingRunFocus();
         checkThreadOpensAtTip();
         checkFooterStructure();
@@ -2885,6 +2930,56 @@
         console.assert(rootRunOf('r1', []) === null, 'rootRunOf: empty logs → null');
         console.assert(rootRunOf('r2', [tip]) === null, 'rootRunOf: dangling root_run_id → null');
         console.log('OK: rootRunOf');
+    }
+
+    function checkSyncUrlHelper() {
+        history.replaceState(null, '', '?instance=%2Fp');
+        const calls = [];
+        const real = history.replaceState.bind(history);
+        history.replaceState = (...a) => { calls.push(String(a[2])); real(...a); };
+        try {
+            console.assert(syncUrl('n1', null) === true,
+                'syncUrl: a changed query writes and returns true');
+            console.assert(syncUrl('n1', null) === false && calls.length === 1,
+                'syncUrl: identical repeat writes nothing (returns skipped)');
+            syncUrl('n1', 'r1'); syncUrl('n1', null); syncUrl(null, null);
+            const want = ['?instance=%2Fp&node=n1', '?instance=%2Fp&node=n1&run=r1',
+                '?instance=%2Fp&node=n1', '?instance=%2Fp'];
+            console.assert(JSON.stringify(calls) === JSON.stringify(want),
+                'syncUrl: node→run→back→close, instance always preserved');
+        } finally { history.replaceState = real; }
+        console.log('OK: syncUrl helper');
+    }
+
+    function checkSyncUrlWiring() {
+        const seedQuery = '?instance=%2Fp';
+        nodes = [{ id: 'n1', parent_id: null, agent: 'a', prompt: 'p', status: 'success',
+            took: 2, created_at: 1, summary: 's', mcp: '', mcp_requires_auth: false, mcp_auth_local: false, personas: [],
+            active: true, name: 'x', runnable: true, runs: { total: 1, success: 1, failed: 0, active: 0 } }];
+        history.replaceState(null, '', seedQuery);
+        closePanel();
+        runsCache = [{ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' }];
+        renderChain(['/p']);
+        const calls = [];
+        const real = history.replaceState.bind(history);
+        history.replaceState = (...a) => { calls.push(String(a[2])); real(...a); };
+        try {
+            selectNode('n1'); focusRun('r1');
+            const door = document.querySelector('a.crumb-name');
+            console.assert(door && door.getAttribute('href') === '/graph.html?instance=%2Fp&node=n1&run=r1',
+                'wiring: the crumb door carries the open cell and thread');
+            backToNode(); closePanel();
+            const want = ['?instance=%2Fp&node=n1', '?instance=%2Fp&node=n1&run=r1',
+                '?instance=%2Fp&node=n1', '?instance=%2Fp'];
+            console.assert(JSON.stringify(calls) === JSON.stringify(want),
+                'wiring: select→focus→back→close each write their sentence');
+            console.assert(door.getAttribute('href') === '/graph.html?instance=%2Fp',
+                'wiring: the door goes clean with the URL');
+            openPanel(nodes[0]);
+            console.assert(calls.length === 4, 'wiring: a bare openPanel (the poll path) writes nothing');
+            closePanel();
+        } finally { history.replaceState = real; }
+        console.log('OK: syncUrl wiring (gestures write, the poll never does)');
     }
 
     // Pending-run arrival, hermetic: seeds runsCache + the panel stub (no
