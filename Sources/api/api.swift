@@ -199,6 +199,9 @@ private func configure(_ app: Application) async throws {
     instances.grouped(":id", "graph", ":nid").delete("runs", ":rid") { req async throws in
         try await GraphHandler().deleteRun(req: req)
     }
+    instances.grouped(":id", "graph", ":nid").post("runs", "squeeze") { req async throws in
+        try await GraphHandler().squeezeRun(req: req)
+    }
     instances.grouped(":id", "graph", ":nid").get("logs") { req async throws in
         try await GraphHandler().logs(req: req)
     }
@@ -223,6 +226,9 @@ private func configure(_ app: Application) async throws {
     }
     instances.grouped(":id", "graph", "sessions", ":sid").delete("runs", ":rid") { req async throws in
         try await GraphHandler().sessionDeleteRun(req: req)
+    }
+    instances.grouped(":id", "graph", "sessions", ":sid").post("runs", "squeeze") { req async throws in
+        try await GraphHandler().sessionSqueezeRun(req: req)
     }
 
     // Manual workflows endpoints

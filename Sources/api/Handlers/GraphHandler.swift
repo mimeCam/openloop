@@ -30,13 +30,13 @@ private actor GraphRunRegistry {
 
 private let graphRunRegistry = GraphRunRegistry()
 
-/// Boot-only guard for the stuck-audit sweep — `list` polls every 5s and cannot tell a crashed analysis from a live one; first poll after boot is the sweep.
-private actor AuditSweepLedger {
+/// Boot-only guard for the stuck-marker sweeps — `list` polls every 5s and cannot tell a crashed job from a live one; first poll after boot is the sweep.
+private actor BootSweepLedger {
     private var swept: Set<String> = []
     fileprivate func needsSweep(_ path: String) -> Bool { swept.insert(path).inserted }
 }
 
-private let auditSweepLedger = AuditSweepLedger()
+private let bootSweepLedger = BootSweepLedger()
 
 struct GraphHandler: Sendable {
 
@@ -47,8 +47,11 @@ struct GraphHandler: Sendable {
             try await sweepInterrupted(instancePath: instancePath)
             try await sweepRunLogs(instancePath: instancePath)
             GraphStore.sweepStaleRunArtifacts()
-            if await auditSweepLedger.needsSweep(instancePath) {
+            if await bootSweepLedger.needsSweep(instancePath) {
                 try? GraphStore.sweepStuckRunAudits(at: instancePath)
+                try? GraphStore.sweepStuckRunSqueezes(
+                    at: instancePath, excludingLive: Array(await squeezeRegistry.snapshot().values)
+                )
             }
             return GraphNodesResponse(nodes: try graphContents(at: instancePath))
         } catch {
@@ -152,7 +155,7 @@ struct GraphHandler: Sendable {
             throw Abort(.notFound, reason: "Node not found: \(nodeId)")
         }
         let rows = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath)
-        return GraphRunLogsResponse(logs: rows.map(toContent))
+        return GraphRunLogsResponse(logs: rows.map(toContent), squeeze_ops: await squeezeRegistry.snapshot())
     }
 
     func delete(req: Request) async throws -> GraphNodesResponse {
@@ -431,7 +434,7 @@ private extension GraphHandler {
         // resolve refs before any artifact is written — an unknown id is a 400 that names it
         let refs = try resolveNodeRefs(refNodeIds, at: instancePath)
         let logId = UUID().uuidString
-        let parent = try parentRun(parentRunId, nodeId: nodeId, at: instancePath)
+        let parent = try await parentRun(parentRunId, nodeId: nodeId, at: instancePath)
         try writeRunContext(node, parent: parent, refs: refs, id: logId, at: instancePath)
         // MCP surface: own resolved chain first, then each ref's — merged nearest-wins
         let mcpPath = GraphStore.writeMcpConfig(
@@ -448,7 +451,7 @@ private extension GraphHandler {
         )
     }
 
-    func parentRun(_ id: String?, nodeId: String, at instancePath: String) throws -> GraphRunLog? {
+    func parentRun(_ id: String?, nodeId: String, at instancePath: String) async throws -> GraphRunLog? {
         guard let id else { return nil }
         let logs = try GraphStore.fetchRunLogs(nodeId: nodeId, at: instancePath)
         guard let run = logs.first(where: { $0.id == id }) else {
@@ -460,7 +463,18 @@ private extension GraphHandler {
         guard run.status == "success" else {
             throw Abort(.badRequest, reason: "Run not ready — it needs a summary before a follow-up")
         }
+        try await assertThreadNotSqueezing(run, logs: logs)
         return run
+    }
+
+    /// Follow-ups freeze while the thread's LIVE squeeze holds rows — a stale marker blocks nothing.
+    private func assertThreadNotSqueezing(_ run: GraphRunLog?, logs: [GraphRunLog]) async throws {
+        guard let run else { return }
+        let chain = GraphStore.runChain(of: run, in: logs)
+        guard let operation = await squeezeRegistry.operation(GraphStore.runThreadRoot(of: run, in: logs)) else { return }
+        guard !chain.contains(where: { $0.squeezeOperationId == operation }) else {
+            throw Abort(.conflict, reason: "Squeeze in flight — the thread unlocks when the merge lands")
+        }
     }
 
     /// The run's resolved chain: own line + standing assignments (GraphStore.ChainResolver).
@@ -612,10 +626,19 @@ private extension GraphHandler {
         }
         try await assertRunDeletable(run, at: instancePath)
         try GraphStore.deleteRunLog(id: runId, at: instancePath)
-        return GraphRunLogsResponse(logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent))
+        return GraphRunLogsResponse(
+            logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent),
+            squeeze_ops: await squeezeRegistry.snapshot()
+        )
     }
 
     func assertRunDeletable(_ run: GraphRunLog, at instancePath: String) async throws {
+        // nil root id = the row is its own thread's root (a legacy row pre-repair) — the registry's claim key either way.
+        let threadRoot = run.rootRunId ?? run.id
+        if let operation = run.squeezeOperationId,
+           await squeezeRegistry.operation(threadRoot) == operation {
+            throw Abort(.conflict, reason: "Squeeze in flight — deletion unlocks when the merge lands")
+        }
         guard !isRunning(run.status), !(await graphRunRegistry.isLive(run.id)) else {
             throw Abort(.conflict, reason: deleteBusyReason)
         }
@@ -635,7 +658,10 @@ private extension GraphHandler {
         let thread = try GraphStore.fetchRunThread(rootId: runId, at: instancePath)
         for row in thread { try await assertRunDeletable(row, at: instancePath) }
         try GraphStore.deleteRunThread(id: runId, at: instancePath)
-        return GraphRunLogsResponse(logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent))
+        return GraphRunLogsResponse(
+            logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent),
+            squeeze_ops: await squeezeRegistry.snapshot()
+        )
     }
 
     func toContent(_ log: GraphRunLog) -> GraphRunLogContent {
@@ -644,7 +670,8 @@ private extension GraphHandler {
             output: log.output, took: log.took,
             created_at: unixMs(log.createdAt), completed_at: log.completedAt.map(unixMs),
             parent_run_id: log.parentRunId, summary: log.summary, root_run_id: log.rootRunId,
-            audit: log.audit, audit_status: log.auditStatus
+            audit: log.audit, audit_status: log.auditStatus,
+            squeeze_operation_id: log.squeezeOperationId
         )
     }
 
@@ -940,6 +967,102 @@ private func maybeAnalyze(id: String, question: String, summary: String, script:
     }
 }
 
+// MARK: - Follow-up squeeze job (convo compression)
+
+private let squeezeInstruction = """
+You are squeezing several consecutive turns of ONE conversation in @\(GraphStore.containerCtxDir)/convo.md into a single summary.
+The turns are a changelog; the block is the state after applying it — the conversation's CURRENT STATE as of the last turn, never the story of how it got there. Every item appears once, at its latest value: a later turn's outcome replaces an earlier turn's entirely — superseded facts, abandoned approaches, intermediate states, and the sequence of changes appear nowhere; never write an item as a change ("was", "became", "now") — state its end value. Deletion is evaporation: whatever stands deleted never existed — it appears nowhere in the block, not as a change ("removed", "deleted"), not as a state ("is gone", "no longer"). Keep what still holds and what a future turn could act on: standing decisions and their reasons, current scope and behavior, unresolved problems and open questions; drop the conversational echoes — repeated context, restatements, filler. Stay high-level: the real values live in the source code, not in this block — no constants, no numbers, no specifics; name systems that exist and expected behavior, never its exact value.
+The output is the knowledge block itself: plain text, terse and dense, written for a 12-year-old reader — everyday words, short sentences, every technical term explained in plain words at first use. No headings, no meta-commentary, no mention of turns or squeezing.
+The first line is the most reusable sentence: the system's current state or decision point so far.
+"""
+
+/// Stages ONLY the selected summaries as the squeeze's read-only convo.md — the user's note rides along as a steer suffix.
+private func squeezePrompt(summaries: [String], squeezeId: String, note: String?) throws -> String {
+    let dir = try runDir(squeezeId)
+    _ = try GraphStore.writeContextFile(GraphStore.joinedText(summaries), in: dir, fileName: "convo.md")
+    let ctxDir = GraphStore.containerCtxDir
+    let files = "Context files (absolute paths at filesystem root, outside the working directory, read-only): @\(ctxDir)/convo.md\n"
+    let steer = note.flatMap { $0.notEmpty ? "\nCore Focus area: \"\($0)\"." : nil } ?? ""
+    return files + squeezeInstruction + steer + "\n\nTURNS: @\(ctxDir)/convo.md"
+}
+
+/// One live merge per thread root until it lands — a seat is claimed first, then armed with the operation id.
+private actor SqueezeRegistry {
+    private enum Seat {
+        case claimed
+        case armed(Int)
+    }
+
+    private var live: [String: Seat] = [:]
+
+    fileprivate func claim(_ threadRoot: String) -> Bool {
+        guard live[threadRoot] == nil else { return false }
+        live[threadRoot] = .claimed
+        return true
+    }
+
+    fileprivate func arm(_ threadRoot: String, operation: Int) {
+        guard case .claimed = live[threadRoot] else {
+            assertionFailure("arm follows claim — squeeze() claims before stageAndDetachSqueeze arms")
+            return
+        }
+        live[threadRoot] = .armed(operation)
+    }
+
+    fileprivate func operation(_ threadRoot: String) -> Int? {
+        guard case .armed(let operation) = live[threadRoot] else { return nil }
+        return operation
+    }
+
+    fileprivate func release(_ threadRoot: String) {
+        live.removeValue(forKey: threadRoot)
+    }
+
+    fileprivate func snapshot() -> [String: Int] {
+        live.compactMapValues { seat in
+            switch seat {
+            case .armed(let operation): return operation
+            case .claimed: return nil
+            }
+        }
+    }
+}
+
+private let squeezeRegistry = SqueezeRegistry()
+
+/// Files land BEFORE the markers — a failed write means no squeeze at all, not rows held hostage.
+private func stageAndDetachSqueeze(
+    _ selection: [GraphRunLog], note: String?, script: FilePath, instancePath: String, threadRoot: String
+) async throws {
+    assert(selection.count >= GraphStore.squeezeMinimumTurns, "squeezeSelection delivers ≥2 chain-ordered rows")
+    let summaries = selection.compactMap(\.summary)
+    assert(summaries.count == selection.count, "every squeezed turn carries a summary")
+    let squeezeId = UUID().uuidString
+    guard let prompt = try? squeezePrompt(summaries: summaries, squeezeId: squeezeId, note: note) else {
+        throw Abort(.internalServerError, reason: "Could not stage the squeeze prompt")
+    }
+    let operation = try GraphStore.markRunSqueezing(ids: selection.map(\.id), at: instancePath)
+    await squeezeRegistry.arm(threadRoot, operation: operation)
+    let label = note.flatMap { $0.notEmpty ? $0 : nil } ?? "Squeezed \(selection.count) turns"
+    let anchor = selection[0].nodeId
+    Task.detached {
+        // A crash leaves the dir to the 24h stale-artifacts sweep; the marker to the boot sweep.
+        defer { GraphStore.deleteContextRunDir(squeezeId) }
+        let run = await runScript(
+            script,
+            args: runArgs(prompt, instancePath),
+            chroot: instancePath,
+            env: runEnv(mcpPath: nil, runDir: GraphStore.contextRunDir(squeezeId))
+        )
+        let trimmed = run.out?.trimmingCharacters(in: .whitespacesAndNewlines)
+        try? GraphStore.finishRunSqueeze(
+            selection: selection, operation: operation, anchor: anchor, prompt: label,
+            summary: (trimmed?.isEmpty == true) ? nil : trimmed, at: instancePath
+        )
+        await squeezeRegistry.release(threadRoot)
+    }
+}
+
 private func runArgs(_ prompt: String, _ instancePath: String) -> [String] {
     [topInstanceDir(instancePath), "_bottom_", prompt]
 }
@@ -999,10 +1122,14 @@ extension GraphHandler {
         var audit: String?
         /// "analyzing" while the detached audit runs; nil otherwise.
         var audit_status: String?
+        /// nil = plain; otherwise the squeeze operation holding this row.
+        var squeeze_operation_id: Int?
     }
 
     struct GraphRunLogsResponse: Content, Sendable {
         var logs: [GraphRunLogContent]
+        /// The live squeeze operation per thread root — a row whose id differs is a stale marker.
+        var squeeze_ops: [String: Int]
     }
 
     struct GraphRunRequest: Content, Sendable {
@@ -1010,6 +1137,13 @@ extension GraphHandler {
         var parent_run_id: String?
         /// `#node` mention ids — resolveNodeRefs resolves them through the ladder.
         var node_ids: [String]?
+    }
+
+    struct GraphSqueezeRequest: Content, Sendable {
+        /// The turns to merge — order never matters, the server derives the chain order.
+        var run_ids: [String]
+        /// Optional user steer for the merge — rides the squeeze prompt as a suffix and becomes the replacement rows' prompt.
+        var note: String?
     }
 
     struct GraphRunSummaryRequest: Content, Sendable {
@@ -1208,7 +1342,7 @@ extension GraphHandler {
         let session = try sessionIdFrom(req)
         try GraphStore.createTables(at: instancePath)
         let rows = try GraphStore.fetchRunLogs(nodeId: session, at: instancePath)
-        return GraphRunLogsResponse(logs: rows.map(toContent))
+        return GraphRunLogsResponse(logs: rows.map(toContent), squeeze_ops: await squeezeRegistry.snapshot())
     }
 
     func sessionRun(req: Request) async throws -> GraphRunLogContent {
@@ -1349,16 +1483,14 @@ private extension GraphHandler {
     /// Parent contract mirrors parentRun(_:nodeId:at:) for the session
     /// thread. A nil parentRunId appends to the current tip — the session
     /// thread is ONE conversation, so the UI sends the tip explicitly anyway.
-    func sessionParentRun(_ parentRunId: String?, logs: [GraphRunLog]) throws -> GraphRunLog? {
-        guard let id = parentRunId else {
-            guard let tip = sessionThreadTip(logs) else {
-                throw Abort(.conflict, reason: "Seed the original answer first")
-            }
-            guard tip.status == "success" else {
-                throw Abort(.badRequest, reason: "Run not ready — it needs a summary before a follow-up")
-            }
-            return tip
-        }
+    func sessionParentRun(_ parentRunId: String?, logs: [GraphRunLog]) async throws -> GraphRunLog {
+        let parent = if let id = parentRunId { try namedSessionParent(id, logs: logs) } else { try sessionTipParent(logs) }
+        try await assertThreadNotSqueezing(parent, logs: logs)
+        return parent
+    }
+
+    /// The named parent: known, terminal and un-continued — the triple parentRun enforces too.
+    private func namedSessionParent(_ id: String, logs: [GraphRunLog]) throws -> GraphRunLog {
         guard let run = logs.first(where: { $0.id == id }) else {
             throw Abort(.notFound, reason: "Run not found: \(id)")
         }
@@ -1369,6 +1501,17 @@ private extension GraphHandler {
             throw Abort(.badRequest, reason: "Run not ready — it needs a summary before a follow-up")
         }
         return run
+    }
+
+    /// The tip parent: the thread's newest un-continued row, ready for a follow-up.
+    private func sessionTipParent(_ logs: [GraphRunLog]) throws -> GraphRunLog {
+        guard let tip = sessionThreadTip(logs) else {
+            throw Abort(.conflict, reason: "Seed the original answer first")
+        }
+        guard tip.status == "success" else {
+            throw Abort(.badRequest, reason: "Run not ready — it needs a summary before a follow-up")
+        }
+        return tip
     }
 
     /// Seeds the run's context dir: ctx.md (persona chains' knowledge), convo.md, parent-*.md, ref-*.md — all @-referenced.
@@ -1403,7 +1546,7 @@ private extension GraphHandler {
         let end = try sessionRunEnd(session, at: instancePath)
         let tipLog = try sessionTip(session, at: instancePath)
         let logs = try GraphStore.fetchRunLogs(nodeId: session, at: instancePath)
-        let parent = try sessionParentRun(parentRunId, logs: logs)
+        let parent = try await sessionParentRun(parentRunId, logs: logs)
         let script = try resolveScript(
             for: try sessionWorkflowAgent(end, session: session, at: instancePath)
         )
@@ -1421,7 +1564,7 @@ private extension GraphHandler {
         )
         let log = newRunLog(
             id: logId, nodeId: session, prompt: prompt,
-            parentRunId: parent?.id, rootRunId: parent?.rootRunId ?? parent?.id ?? logId,
+            parentRunId: parent.id, rootRunId: parent.rootRunId ?? parent.id,
             refNodeIds: refs.map(\.id)
         )
         await graphRunRegistry.add(log.id)
@@ -1543,6 +1686,88 @@ private extension GraphHandler {
             throw Abort(.notFound, reason: "Run not found: \(runId)")
         }
         return toContent(run)
+    }
+}
+
+// MARK: - Follow-up squeeze (convo compression)
+
+extension GraphHandler {
+
+    func squeezeRun(req: Request) async throws -> GraphRunLogsResponse {
+        let instancePath = try instancePathFrom(req)
+        let nodeId = try nodeIdFrom(req)
+        guard let node = try findNode(id: nodeId, at: instancePath) else {
+            throw Abort(.notFound, reason: "Node not found: \(nodeId)")
+        }
+        let body = try squeezeIds(req)
+        return try await squeeze(
+            runIds: body.ids, note: body.note, anchor: nodeId,
+            script: try resolveScript(for: node.agent), at: instancePath
+        )
+    }
+
+    // Thin sibling of squeezeRun — same core, the workflow's own agent, session UUID as the anchor.
+    func sessionSqueezeRun(req: Request) async throws -> GraphRunLogsResponse {
+        let instancePath = try instancePathFrom(req)
+        let session = try sessionIdFrom(req)
+        let end = try sessionRunEnd(session, at: instancePath)
+        let agent = try sessionWorkflowAgent(end, session: session, at: instancePath)
+        let body = try squeezeIds(req)
+        return try await squeeze(
+            runIds: body.ids, note: body.note, anchor: session,
+            script: try resolveScript(for: agent), at: instancePath
+        )
+    }
+
+    private func squeezeIds(_ req: Request) throws -> (ids: [String], note: String?) {
+        let body = try req.content.decode(GraphSqueezeRequest.self)
+        let note = body.note?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (dedupeNodeIds(body.run_ids), note.flatMap { $0.notEmpty ? $0 : nil })
+    }
+
+    private func squeeze(runIds: [String], note: String?, anchor: String, script: FilePath, at instancePath: String) async throws -> GraphRunLogsResponse {
+        try GraphStore.createTables(at: instancePath)
+        let logs = try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath)
+        let selection = try squeezeSelection(runIds, logs: logs)
+        assert(selection.count >= GraphStore.squeezeMinimumTurns, "squeezeSelection delivers ≥2 rows — selection[0] is safe")
+        let threadRoot = GraphStore.runThreadRoot(of: selection[0], in: logs)
+        guard await squeezeRegistry.claim(threadRoot) else {
+            throw Abort(.conflict, reason: "Squeeze already in flight")
+        }
+        do {
+            try await stageAndDetachSqueeze(selection, note: note, script: script, instancePath: instancePath, threadRoot: threadRoot)
+        } catch {
+            await squeezeRegistry.release(threadRoot)
+            throw error
+        }
+        return GraphRunLogsResponse(
+            logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent),
+            squeeze_ops: await squeezeRegistry.snapshot()
+        )
+    }
+
+    /// Oldest→newest selected rows (≥ 2), all known + summarized — the longest lineage among them carries the thread order.
+    private func squeezeSelection(_ runIds: [String], logs: [GraphRunLog]) throws -> [GraphRunLog] {
+        guard runIds.count >= GraphStore.squeezeMinimumTurns else {
+            throw Abort(.badRequest, reason: "Select at least \(GraphStore.squeezeMinimumTurns) turns to squeeze")
+        }
+        let rows = try runIds.map { try squeezeRow($0, logs: logs) }
+        assert(rows.count >= GraphStore.squeezeMinimumTurns, "the guard above delivers ≥2 rows — rows[0] is safe")
+        let chain = rows.map { GraphStore.runChain(of: $0, in: logs) }.max { $0.count < $1.count }!
+        guard GraphStore.isContiguousRun(runIds, in: chain) else {
+            throw Abort(.badRequest, reason: "Squeeze needs one unbroken run of adjacent turns")
+        }
+        return chain.filter { runIds.contains($0.id) }
+    }
+
+    private func squeezeRow(_ id: String, logs: [GraphRunLog]) throws -> GraphRunLog {
+        guard let run = logs.first(where: { $0.id == id }) else {
+            throw Abort(.notFound, reason: "Run not found: \(id)")
+        }
+        guard run.status == "success", run.summary?.notEmpty == true else {
+            throw Abort(.badRequest, reason: "Turn has no summary to squeeze: \(id)")
+        }
+        return run
     }
 }
 

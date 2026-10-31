@@ -64,7 +64,12 @@
             resizeTimer = setTimeout(regatePanelBubbles, 150);
         });
         document.addEventListener('keydown', e => {
-            if (e.key === 'Escape') { closeDetailPanel(); return; }
+            if (e.key === 'Escape') {
+                // the squeeze pose leaves first — a selection must not vanish behind the panel close
+                if (threadMode && OpenLoopSqueeze.isMode()) { OpenLoopSqueeze.exit(); return; }
+                closeDetailPanel();
+                return;
+            }
             if (!(e.metaKey || e.ctrlKey)) return;
             if (e.key === '=' || e.key === '+') { e.preventDefault(); stepZoom(1); }
             else if (e.key === '-')             { e.preventDefault(); stepZoom(-1); }
@@ -589,6 +594,8 @@
         panel.classList.add('open');
         document.getElementById('graph-canvas').classList.add('panel-open');
         panel.querySelector('.detail-panel-close').addEventListener('click', closeDetailPanel);
+        const squeezeBtn = panel.querySelector('.squeeze-btn');
+        if (squeezeBtn) squeezeBtn.addEventListener('click', toggleSqueezeMode);
         threadJson = '';
         threadFooterKey = null;
         startThreadPoll();
@@ -607,7 +614,8 @@
             `<div class="detail-panel-name">Follow-up conversation</div>` +
             `<div class="detail-panel-meta" id="thread-meta">loading…</div>` +
             `</div>` +
-            `<button class="detail-panel-close" aria-label="Close details">✕</button>` +
+            OpenLoopSqueeze.btnHtml([]) + // hidden until the rows say otherwise — this header renders once
+            `<button class="detail-panel-close labeled" aria-label="Close details">✕<span class="header-btn-label">close</span></button>` +
             `</div>` +
             `<div class="detail-panel-body">` +
             `<div id="thread-messages"><div class="summary-missing">loading…</div></div>` +
@@ -632,6 +640,7 @@
         threadMode = false;
         threadSummaryEditing = false;
         threadFooterKey = null;
+        OpenLoopSqueeze.reset();
     }
 
     function refreshThread(scrollEnd) {
@@ -640,6 +649,7 @@
         threadSummaryEditing = false;
         threadJson = '';
         threadFooterKey = null;
+        OpenLoopSqueeze.setOps({});
         loadThread(scrollEnd);
     }
 
@@ -649,7 +659,9 @@
             const data = await threadFetchJson(threadUrl('/logs'));
             if (!threadMode) return; // closed while fetching
             maybeAutoSeedThread(data.logs);
-            const json = JSON.stringify(data.logs);
+            // the ops map rides the memo: a released operation must flip stale chips even when no row changed
+            OpenLoopSqueeze.setOps(data.squeeze_ops);
+            const json = JSON.stringify({ logs: data.logs, ops: data.squeeze_ops });
             if (json !== threadJson && !threadSummaryEditing) {
                 threadRows = data.logs || [];
                 threadJson = json;
@@ -685,16 +697,21 @@
         if (!el) return;
         const snap = OpenLoopBubble.snapshotExpansion(el); // the 5s poll must not re-fold an open door
         const rows = [...threadRows].sort((a, b) => a.created_at - b.created_at);
-        el.innerHTML = rows.length
-            ? rows.map(threadEntryHtml).join('')
-            : '<div class="summary-missing">No follow-up turns yet.</div>';
+        OpenLoopSqueeze.syncOrder(rows); // rows may vanish under the 5s poll — the selection never holds ghosts
+        el.innerHTML = (rows.length
+            ? rows.map(l => threadEntryHtml(l, rows)).join('')
+            : '<div class="summary-missing">No follow-up turns yet.</div>') + OpenLoopSqueeze.tailHtml(rows);
         OpenLoopBubble.restoreExpansion(el, snap);
         OpenLoopBubble.gateBubbles(el);
+        OpenLoopSqueeze.bindDots(el);
+        const tail = el.querySelector('.squeeze-tail');
+        if (tail) tail.addEventListener('click', toggleSqueezeMode);
         el.querySelectorAll('.summary-edit-btn').forEach(btn =>
             btn.addEventListener('click', () => startThreadSummaryEdit(btn.dataset.runId)));
         bindThreadDelete(el);
         const meta = document.getElementById('thread-meta');
         if (meta) meta.textContent = threadHeaderMeta(rows);
+        OpenLoopSqueeze.syncBtn(rows);
     }
 
     function threadHeaderMeta(rows) {
@@ -708,14 +725,15 @@
     const THREAD_RESULT_LINES = 2;
     const THREAD_SUMMARY_LINES = 5;
 
-    function threadEntryHtml(l) {
+    function threadEntryHtml(l, thread) {
+        if (OpenLoopSqueeze.isMode()) return OpenLoopSqueeze.entryHtml(l, thread);
         return `<div class="run-log" data-run-id="${escHtml(l.id)}">` +
-            `<div class="run-log-meta"><span>${escHtml(l.id.slice(0, 8))} · ${escHtml(threadRunMeta(l))}</span>${threadDelBtn(l)}</div>` +
+            `<div class="run-log-meta"><span>${escHtml(l.id.slice(0, 8))} · ${escHtml(threadRunMeta(l))}</span>${threadDelBtn(l, thread)}</div>` +
             `<div class="detail-section prompt-section"><div class="detail-section-label prompt">PROMPT</div>` +
             OpenLoopBubble.bubbleHtml('input', l.prompt) +
             `</div>` +
             threadResultSection(l) +
-            threadSummarySection(l) +
+            threadSummarySection(l, thread) +
             auditSection(l) +
             `</div>`;
     }
@@ -736,22 +754,62 @@
         return `<div>${label}${OpenLoopBubble.bubbleHtml(failed ? 'output error' : 'output', l.output || '(empty)', null, THREAD_RESULT_LINES)}</div>`;
     }
 
-    function threadSummarySection(l) {
+    // ── Follow-up squeeze: this page owns only its seats — the UIX lives in squeeze.js ──
+
+    // Entering drops the summary editor first — a held one would freeze the poll's re-render mid-mode.
+    function toggleSqueezeMode() {
+        if (!OpenLoopSqueeze.isMode()) threadSummaryEditing = false;
+        OpenLoopSqueeze.toggle();
+    }
+
+    function rerenderThread() {
+        renderThreadMessages();
+        renderThreadFooter();
+    }
+
+    function postSqueeze(runIds, note) {
+        return threadFetchJson(threadUrl('/runs/squeeze'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_ids: runIds, note: note || undefined }),
+        });
+    }
+
+    async function failSqueeze(e) {
+        showError(`${OpenLoopSqueeze.COPY.fail} (${e.message})`);
+        await refreshThreadNow(false);
+    }
+
+    // wire() runs at IIFE evaluation — every seam is a hoisted declaration
+    OpenLoopSqueeze.wire({
+        metaOf: l => `${escHtml(l.id.slice(0, 8))} · ${escHtml(threadRunMeta(l))}`,
+        draft: footerComposerDraft,
+        restore: restoreFooterDraft,
+        rerender: rerenderThread,
+        post: postSqueeze,
+        landed: () => refreshThreadNow(true),
+        failed: failSqueeze,
+    });
+
+    function threadSummarySection(l, thread) {
         if (l.status === 'progress' || l.status === 'summarizing') return '';
-        return `<div class="run-summary-section" data-run-id="${escHtml(l.id)}">${threadSummaryInner(l)}</div>`;
+        return `<div class="run-summary-section" data-run-id="${escHtml(l.id)}">${threadSummaryInner(l, thread)}</div>`;
     }
 
     // The summarized answer is the thread's main message: no SUMMARY heading, the bubble speaks — fold depth 5 vs the result's 2.
     // The audit title word takes the old SUMMARY heading's seat in the head row — band and coloring come from the verdict alone.
-    function threadSummaryInner(l) {
+    function threadSummaryInner(l, thread) {
         const body = l.summary
             ? OpenLoopBubble.bubbleHtml('summary', l.summary, null, THREAD_SUMMARY_LINES)
             : '<div class="summary-missing">No summary yet — write one to allow follow-ups.</div>';
-        return `<div class="summary-head">` +
-            auditTitleHtml(l) +
+        const editing = OpenLoopSqueeze.held(l, thread); // the merge rewrites this summary — hands off
+        const actions = editing ? '' :
             `<span class="summary-actions">` +
             `<button class="summary-edit-btn" data-run-id="${escHtml(l.id)}">${l.summary ? 'Edit' : 'Add'}</button>` +
-            `</span></div>${body}`;
+            `</span>`;
+        return `<div class="summary-head">` +
+            auditTitleHtml(l) + OpenLoopSqueeze.titleHtml(l, thread) + OpenLoopSqueeze.staleHtml(l, thread) +
+            `${actions}</div>${body}`;
     }
 
     // The advisory scope audit's render grammar — character-identical twins in graph.js, pinned by both sanity suites.
@@ -851,17 +909,25 @@
     }
 
     function threadFooterKeyOf(tip) {
+        if (OpenLoopSqueeze.isMode()) return OpenLoopSqueeze.dockKey();
         if (!threadRows.length) return seedInFlight ? 'seeding' : 'empty';
-        return tip ? `${tip.id}:${tip.status}:${tip.summary ? 1 : 0}` : 'empty';
+        if (!tip) return 'empty';
+        // the squeezing bit flips the footer even while the tip row itself never changes
+        return `${tip.id}:${tip.status}:${tip.summary ? 1 : 0}:${OpenLoopSqueeze.threadSqueezing(threadRows) ? 1 : 0}`;
     }
 
     function threadFooterHtml(tip) {
+        if (OpenLoopSqueeze.isMode()) return OpenLoopSqueeze.dockHtml();
         if (!threadRows.length) {
             if (seedInFlight) return `<div class="run-followup-hint">Summarizing the answer…</div>`;
             return `<div class="run-followup-hint">Seed the original answer to start the follow-up thread.` +
                 `<button class="regen-submit run-seed" id="thread-seed-btn">Seed original answer</button></div>`;
         }
         if (!tip) return '';
+        // The squeeze is blocking and visible: no follow-up while the merge runs (twin of graph.js's footer).
+        if (OpenLoopSqueeze.threadSqueezing(threadRows)) {
+            return `<div class="run-followup-hint">${escHtml(OpenLoopSqueeze.COPY.busy)}</div>`;
+        }
         if (tip.status === 'progress') {
             return `<div class="run-followup-hint">Run in progress — the panel refreshes while it works.</div>`;
         }
@@ -886,18 +952,26 @@
             `</div>`;
     }
 
+    // Both seats hold text the user typed: the follow-up composer and the squeeze steer note.
     function footerComposerDraft() {
-        const el = document.getElementById('thread-followup-text');
-        return el ? el.value : null;
+        const text = document.getElementById('thread-followup-text');
+        const note = document.getElementById('squeeze-note');
+        return {
+            text: text && text.value.trim() ? text.value : '',
+            note: note && note.value.trim() ? note.value : '',
+        };
     }
 
     function restoreFooterDraft(draft) {
-        if (draft == null) return;
-        const el = document.getElementById('thread-followup-text');
-        if (!el) return;
-        el.value = draft;
-        const send = document.getElementById('thread-followup-send');
-        if (send) send.disabled = !draft.trim();
+        if (!draft) return;
+        const text = document.getElementById('thread-followup-text');
+        if (text && draft.text) {
+            text.value = draft.text;
+            const send = document.getElementById('thread-followup-send');
+            if (send) send.disabled = !draft.text.trim();
+        }
+        const note = document.getElementById('squeeze-note');
+        if (note && draft.note) note.value = draft.note;
     }
 
     function bindThreadFooter() {
@@ -920,6 +994,7 @@
             OpenLoopSuggest.bindField(text, { instance: instanceParam, place: 'above' });
             send.addEventListener('click', submitFollowupTurn);
         }
+        OpenLoopSqueeze.bindDock();
     }
 
     async function submitThreadSeed(auto) {
@@ -964,9 +1039,10 @@
         busy: 'This turn is running — deletion unlocks when it finishes.',
     };
 
-    function threadDelBtn(l) {
-        const busy = l.status === 'progress' || l.status === 'summarizing';
-        const title = busy ? THREAD_DEL_COPY.busy : THREAD_DEL_COPY.rest;
+    function threadDelBtn(l, thread) {
+        const squeezing = OpenLoopSqueeze.held(l, thread);
+        const busy = l.status === 'progress' || l.status === 'summarizing' || squeezing;
+        const title = squeezing ? OpenLoopSqueeze.COPY.lock : (busy ? THREAD_DEL_COPY.busy : THREAD_DEL_COPY.rest);
         return `<button class="run-del-btn" data-run-id="${escHtml(l.id)}"${busy ? ' disabled' : ''}` +
             ` aria-label="${escHtml(title)}" title="${escHtml(title)}">${trashIcon()}</button>`;
     }
@@ -1194,6 +1270,8 @@
         await checkThreadAutoSeed();
         checkThreadEditFields();
         checkThreadDelete();
+        checkSqueezeRenderSupport();
+        checkSqueezeStarter();
         checkAuditBand();
         checkThreadFoldDepths();
         checkDeepLinkBeacon();
@@ -1279,7 +1357,7 @@
             { id: 'r1', created_at: 20, status: 'failed', summary: null },
         ];
         console.assert(threadTip()?.id === 'r2', 'threadTip: newest row wins regardless of order');
-        console.assert(threadFooterKeyOf(threadTip()) === 'r2:success:0', 'footerKey: id:status:summary shape');
+        console.assert(threadFooterKeyOf(threadTip()) === 'r2:success:0:0', 'footerKey: id:status:summary:squeezing shape');
         threadRows = [];
         console.assert(threadTip() === null, 'threadTip: empty thread → null');
         console.assert(threadFooterKeyOf(threadTip()) === 'empty', 'footerKey: empty thread key');
@@ -1473,12 +1551,12 @@
     // checkThreadFooterStates).
     function checkThreadDelete() {
         const ok = { id: 'sr1', root_run_id: 'sr1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o' };
-        const html = threadEntryHtml(ok);
+        const html = threadEntryHtml(ok, []);
         console.assert(html.includes('run-del-btn" data-run-id="sr1"'), 'threadDel: every turn row carries the delete button');
         console.assert(html.includes(`title="${escHtml(THREAD_DEL_COPY.rest)}"`), 'threadDel: rest title teaches the splice');
         console.assert(html.indexOf('<span>') < html.indexOf('run-del-btn'), 'threadDel: caption leads, button follows it inline');
         for (const status of ['progress', 'summarizing']) {
-            const busy = threadEntryHtml({ ...ok, id: 'sr9', status });
+            const busy = threadEntryHtml({ ...ok, id: 'sr9', status }, []);
             console.assert(busy.includes('disabled') && busy.includes(`title="${escHtml(THREAD_DEL_COPY.busy)}"`),
                 `threadDel: ${status} renders disabled with the busy title`);
         }
@@ -1486,6 +1564,83 @@
         console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
             'threadDel: teaching hint pinned');
         console.log('OK: per-turn delete markup');
+    }
+
+    // The squeeze renders + blocks through the shared module — pinned here for this page's seats (copy is pinned in squeeze.js's own suite).
+    function checkSqueezeRenderSupport() {
+        const ok = { id: 'sr1', root_run_id: 'sr1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' };
+        const rows = [ok, { ...ok, id: 'sr2', squeeze_operation_id: 5 }];
+        const saveRows = threadRows;
+        OpenLoopSqueeze.setOps({ sr1: 5 }); // the registry says operation 5 owns this thread
+        const busy = threadEntryHtml(rows[1], rows);
+        console.assert(busy.includes('SQUEEZING…') && busy.includes('disabled'),
+            'squeeze: a merging row wears the live label and locks deletion');
+        console.assert(OpenLoopSqueeze.threadSqueezing(rows), 'squeeze: the helper reads the live marker off any row');
+        threadRows = rows;
+        console.assert(threadFooterHtml(rows[1]).includes(OpenLoopSqueeze.COPY.busy) && !threadFooterHtml(rows[1]).includes('thread-followup-text'),
+            'squeeze: a merging thread swaps the composer for the busy hint');
+        console.assert(threadFooterKeyOf(rows[1]).endsWith(':1'),
+            'squeeze: the footer key carries the busy bit');
+        const stale = { ...ok, id: 'sr3', squeeze_operation_id: 4 }; // operation 4 is nobody's — the marker outlived its merge
+        console.assert(threadEntryHtml(stale, [stale]).includes('SQUEEZE OUTDATED') && !threadEntryHtml(stale, [stale]).includes('SQUEEZING…'),
+            'squeeze: a stale marker wears the outdated chip and locks nothing');
+        threadRows = [stale];
+        console.assert(!OpenLoopSqueeze.threadSqueezing(threadRows) && threadFooterHtml(stale).includes('thread-followup-text') &&
+            threadEntryHtml(stale, [stale]).includes('run-del-btn'),
+            'squeeze: a stale thread blocks neither composer nor delete');
+        OpenLoopSqueeze.setOps({});
+        threadRows = saveRows;
+        console.log('OK: squeeze render support');
+    }
+
+    // The starter wiring this page adds on top of the shared module — shell seat, availability, the mode's render path.
+    function checkSqueezeStarter() {
+        const inner = document.getElementById('detail-panel-inner');
+        const savedMode = threadMode;
+        threadMode = true;
+        inner.innerHTML = threadShellHtml();
+        console.assert(inner.innerHTML.indexOf('squeeze-btn') > -1 && inner.innerHTML.indexOf('squeeze-btn') < inner.innerHTML.indexOf('detail-panel-close'),
+            'squeeze: the toggle sits in the shell header before the close ✕');
+        console.assert(inner.innerHTML.includes('>close</span>'), 'squeeze: the close pair carries its under-label');
+        console.assert(inner.querySelector('.squeeze-btn').hidden, 'squeeze: the shell seat starts hidden — the rows decide');
+        threadRows = [
+            { id: 'sr1', root_run_id: 'sr1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' },
+            { id: 'sr2', root_run_id: 'sr1', status: 'success', took: 1, created_at: 2, prompt: 'p', output: 'o', summary: 's' },
+        ];
+        renderThreadMessages();
+        console.assert(!inner.querySelector('.squeeze-btn').hidden, 'squeeze: two summarised turns reveal the toggle');
+        console.assert(inner.querySelectorAll('#thread-messages .squeeze-tail').length === 1,
+            'squeeze: an eligible thread seats the pill after the last turn');
+        threadRows[1].status = 'progress';
+        renderThreadMessages();
+        console.assert(inner.querySelector('.squeeze-btn').hidden, 'squeeze: a running tip hides it again');
+        console.assert(!inner.querySelector('.squeeze-tail'), 'squeeze: the pill hides with it');
+        threadRows[1].status = 'success';
+        renderThreadMessages();
+        threadRows.push({ id: 'sr3', root_run_id: 'sr1', status: 'progress', took: 1, created_at: 3, prompt: 'p', output: '' });
+        renderThreadMessages();
+        console.assert(!inner.querySelector('.squeeze-btn').hidden && inner.querySelector('.squeeze-btn').disabled,
+            'squeeze: a working tip beyond two settled turns locks the toggle in place');
+        console.assert(inner.querySelector('.squeeze-tail').disabled, 'squeeze: the pill locks with it');
+        threadRows.pop();
+        toggleSqueezeMode();
+        console.assert(OpenLoopSqueeze.isMode() && !threadSummaryEditing,
+            'squeeze: entering the mode clears the summary editor gate');
+        console.assert(inner.querySelectorAll('.run-log.squeezed').length === 2, 'squeeze: every turn wears the pose row');
+        console.assert(!inner.querySelector('.squeeze-tail'), 'squeeze: the mode hides the pill — the dock owns the picking');
+        console.assert(threadFooterKeyOf(threadTip()) === OpenLoopSqueeze.dockKey() &&
+            document.getElementById('squeeze-go'), 'squeeze: the dock takes the footer under its own key');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        console.assert(!OpenLoopSqueeze.isMode() && !inner.querySelector('.run-log.squeezed'),
+            'squeeze: Escape leaves the mode before the panel closes');
+        console.assert(inner.querySelectorAll('.squeeze-tail').length === 1,
+            'squeeze: the pill returns the moment the mode exits');
+        OpenLoopSqueeze.reset();
+        threadRows = [];
+        exitThreadMode();
+        closeDetailPanel();
+        threadMode = savedMode;
+        console.log('OK: squeeze starter (seat · availability · mode · escape)');
     }
 
     // The audit band grammar, pinned on both pages (the audit trio renders character-identical) — an empty audit string is neutral: "not audited" is not "audited clean".
@@ -1513,15 +1668,15 @@
         console.assert(auditBand(bad) === 'bad', 'auditBand: over 200 chars → bad');
         console.assert(auditTitleHtml(bad).includes('audit bad') && auditSection(bad).includes('ANALYSIS'),
             'auditBand: bad → the red issue title word plus the bubble');
-        const row = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's', ...warn });
-        console.assert(row.indexOf('wl-bubble summary') < row.indexOf('ANALYSIS'),
-            'auditBand: the analysis bubble rides after the summary');
+        const row = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's', ...warn }, []);
+        console.assert(row.indexOf('wl-bubble summary') < row.indexOf('audit-section'),
+            'auditBand: the analysis bubble rides after the summary (the ISSUE FOUND title moved into the head row)');
         console.log('OK: audit band grammar');
     }
 
     // The thread's fold hierarchy, pinned on both pages — result 2, summary 5, no RESULT/SUMMARY headings.
     function checkThreadFoldDepths() {
-        const html = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' });
+        const html = threadEntryHtml({ id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' }, []);
         console.assert(html.includes('data-free-lines="2"'), 'foldDepths: the raw result folds at two lines');
         console.assert(html.includes('data-free-lines="5"'), 'foldDepths: the summary folds at five lines');
         console.assert(!html.includes('>RESULT<') && !html.includes('>SUMMARY<'),

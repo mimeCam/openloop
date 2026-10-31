@@ -554,6 +554,8 @@
         .detail-section-label.audit.warn { color: #f59e0b; }
         .detail-section-label.audit.bad { color: var(--accent-red); }
         .detail-section-label.audit.busy { color: #f59e0b; animation: wl-breathe 2.5s ease-in-out infinite; }
+        .detail-section-label.squeeze.busy { color: #f59e0b; animation: wl-breathe 2.5s ease-in-out infinite; }
+        .detail-section-label.squeeze.stale { color: var(--accent-red); }
         /* The summary head's left seat belongs to the audit title word when a verdict exists; without one the lone Edit/Add still pins right. */
         .summary-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
         .summary-edit-btn {
@@ -611,6 +613,7 @@
             .run-log.beacon { animation: none; }
             .detail-section-label.running { animation: none; }
             .detail-section-label.audit.busy { animation: none; }
+            .detail-section-label.squeeze.busy { animation: none; }
         }
 
         /* ── Mobile: page-specific diet (panel sheet rules live in panel.css) ── */
@@ -718,6 +721,7 @@
     <script src="/bubble.js"></script>
     <script src="/mention.js"></script>
     <script src="/suggest.js"></script>
+    <script src="/squeeze.js"></script>
     <script src="/workflow-log.js"></script>
 </body>
 </html>

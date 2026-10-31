@@ -1128,6 +1128,8 @@
         .detail-section-label.audit.warn { color: var(--accent-amber); }
         .detail-section-label.audit.bad { color: var(--accent-red); }
         .detail-section-label.audit.busy { color: var(--accent-amber); animation: live-breathe 2.5s ease-in-out infinite; }
+        .detail-section-label.squeeze.busy { color: var(--accent-amber); animation: live-breathe 2.5s ease-in-out infinite; }
+        .detail-section-label.squeeze.stale { color: var(--accent-red); }
         .summary-regen {
             background: rgba(52,199,89,0.14);
             border: 1px solid rgba(52,199,89,0.40);
@@ -1476,7 +1478,7 @@
             #mcp-auth-warn .gt-warn-label { display: none; } /* the count + tooltip carry it on a phone */
             /* 16px inputs: iOS Safari skips its focus auto-zoom at >=16px
                (panel sheet pose itself lives in panel.css) */
-            #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .mcp-row input, .name-row textarea { font-size: 16px; }
+            #prompt-section textarea, #summary-section textarea, .run-summary-section textarea, .run-composer textarea, .squeeze-bar textarea, .mcp-row input, .name-row textarea { font-size: 16px; }
             /* agent pills (composer + panel picker): the page's 44px touch target */
             .agent-btn { min-height: 44px; }
             .new-run-btn { min-height: 44px; } /* both bookends — the page's touch convention */
@@ -1566,6 +1568,7 @@
             .run-counts .live { animation: none; }
             .detail-section-label.running { animation: none; }
             .detail-section-label.audit.busy { animation: none; }
+            .detail-section-label.squeeze.busy { animation: none; }
             .detail-panel-body.run-enter { animation: none; }
             .detail-panel-body.run-back { animation: none; }
             .run-log.beacon { animation: none; }
@@ -1658,6 +1661,7 @@
     <script src="bubble.js"></script>
     <script src="mention.js"></script>
     <script src="suggest.js"></script>
+    <script src="squeeze.js"></script>
     <script src="ladder.js"></script>
     <script src="graph.js"></script>
     <script>

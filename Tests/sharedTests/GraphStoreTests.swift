@@ -462,6 +462,210 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertNil(run.auditStatus)
     }
 
+    // ── Follow-up squeeze: one operation id arms N selected rows, the landing deletes them and inserts K fence-split plain rows — the chain (parent/root) stays whole, and a marker whose operation died reads as stale, never as a hostage. ──
+
+    /// r1 ← r2 ← r3, all 'success' with summaries — the squeezable thread.
+    private func squeezedThread() throws -> [GraphRunLog] {
+        try insert(node("a", nil))
+        for (id, parent, at) in [("r1", nil as String?, 1.0), ("r2", "r1", 2.0), ("r3", "r2", 3.0)] {
+            try GraphStore.insertRunLog(GraphRunLog(
+                id: id, nodeId: "a", prompt: "p", status: "success", output: "o", took: 1,
+                createdAt: at, completedAt: nil, parentRunId: parent, rootRunId: "r1"
+            ), at: path)
+        }
+        for id in ["r1", "r2", "r3"] { try GraphStore.finishRunSummary(id: id, summary: "s-\(id)", at: path) }
+        return try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+    }
+
+    /// The selection rows (chain-ordered) straight out of the thread.
+    private func squeezeSelection(_ logs: [GraphRunLog], _ ids: [String]) -> [GraphRunLog] {
+        ids.compactMap { id in logs.first { $0.id == id } }
+    }
+
+    /// The one row in the thread whose id is none of the known originals — the inserted block.
+    private func freshRow(_ logs: [GraphRunLog], excluding ids: [String]) throws -> GraphRunLog {
+        try XCTUnwrap(logs.first { !ids.contains($0.id) }, "the merge must insert a fresh row")
+    }
+
+    func testFinishRunSqueezeReplacesSelectionWithTheMergedBlock() throws {
+        let logs = try squeezedThread()
+        let operation = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        XCTAssertEqual(
+            try runLogsById()["r2"]?.squeezeOperationId, operation, "the armed rows carry the operation id"
+        )
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: operation, anchor: "a",
+            prompt: "steer", summary: "block", at: path
+        )
+        let fresh = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        XCTAssertEqual(fresh.count, 2, "two rows die, one row takes their seat")
+        let block = try freshRow(fresh, excluding: ["r1", "r2", "r3"])
+        XCTAssertEqual(block.summary, "block")
+        XCTAssertEqual(block.output, "block", "the answer cell mirrors the merged block — never an empty result")
+        XCTAssertEqual(block.prompt, "steer", "the user's note rides along as the row's prompt")
+        XCTAssertEqual(block.nodeId, "a")
+        XCTAssertEqual(block.parentRunId, "r1", "the seat's first parent is the oldest row's parent")
+        XCTAssertEqual(block.rootRunId, "r1")
+        XCTAssertEqual(block.createdAt, 3.0, "a single block takes the newest selected row's timestamp")
+        XCTAssertNil(block.squeezeOperationId, "the merged row is born plain")
+        XCTAssertNil(try runLogsById()["r1"]?.squeezeOperationId, "unselected rows stay byte-identical")
+        XCTAssertEqual(try runLogsById()["r1"]?.summary, "s-r1")
+    }
+
+    func testFinishRunSqueezeBridgesChildrenToTheNewTail() throws {
+        let logs = try squeezedThread()
+        try GraphStore.insertRunLog(runLog("r4", node: "a", parent: "r3", root: "r1"), at: path)
+        try GraphStore.finishRunSummary(id: "r4", summary: "s-r4", at: path)
+        let operation = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: operation, anchor: "a",
+            prompt: "p", summary: "block", at: path
+        )
+        let fresh = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        let block = try freshRow(fresh, excluding: ["r1", "r2", "r3", "r4"])
+        let r4 = try XCTUnwrap(fresh.first { $0.id == "r4" })
+        XCTAssertEqual(r4.parentRunId, block.id, "a child of a deleted row bridges to the new tail")
+        XCTAssertEqual(
+            GraphStore.runSummaries(GraphStore.runChain(of: r4, in: fresh)),
+            "s-r1\(GraphStore.summaryFence)block\(GraphStore.summaryFence)s-r4",
+            "the chain reads as one conversation across the splice"
+        )
+    }
+
+    func testFinishRunSqueezeSplitsFencedBlocksIntoChainedRows() throws {
+        let logs = try squeezedThread()
+        let operation = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: operation, anchor: "a",
+            prompt: "p", summary: "b1\(GraphStore.summaryFence)b2", at: path
+        )
+        let fresh = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        XCTAssertEqual(fresh.count, 3, "two rows die, two chained blocks take their seat")
+        let first = try XCTUnwrap(fresh.first { $0.parentRunId == "r1" })
+        let second = try XCTUnwrap(fresh.first { $0.parentRunId == first.id })
+        XCTAssertEqual(first.summary, "b1")
+        XCTAssertEqual(second.summary, "b2")
+        XCTAssertEqual(first.output, "b1", "every block's answer cell mirrors its own summary")
+        XCTAssertEqual(second.output, "b2")
+        XCTAssertEqual(first.createdAt, 2.5, "interpolated between the seat's oldest and newest timestamps")
+        XCTAssertEqual(second.createdAt, 3.0)
+        XCTAssertEqual(second.rootRunId, "r1")
+        XCTAssertNil(first.squeezeOperationId, "every inserted block is born plain")
+    }
+
+    func testFinishRunSqueezeRootInclusiveReRootsTheThread() throws {
+        let logs = try squeezedThread()
+        let operation = try GraphStore.markRunSqueezing(ids: ["r1", "r2"], at: path)
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r1", "r2"]), operation: operation, anchor: "a",
+            prompt: "p", summary: "block", at: path
+        )
+        let fresh = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        let block = try freshRow(fresh, excluding: ["r1", "r2", "r3"])
+        XCTAssertNil(block.parentRunId, "the fresh row takes the thread root's seat")
+        XCTAssertEqual(fresh.first { $0.id == "r3" }?.rootRunId, block.id, "descendants re-derive onto the new root")
+    }
+
+    func testFinishRunSqueezeNilAbortsUntouched() throws {
+        let logs = try squeezedThread()
+        let op1 = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: op1, anchor: "a",
+            prompt: "p", summary: nil, at: path
+        )
+        // a fence-only summary carries no blocks — the same abort path
+        let op2 = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: op2, anchor: "a",
+            prompt: "p", summary: " \(GraphStore.summaryFence) ", at: path
+        )
+        let rows = try runLogsById()
+        XCTAssertEqual(rows["r2"]?.summary, "s-r2", "nil and fence-empty ABORT — originals never move")
+        XCTAssertEqual(rows["r3"]?.summary, "s-r3")
+        XCTAssertNil(rows["r2"]?.squeezeOperationId, "the transient marker clears")
+        XCTAssertNil(rows["r3"]?.squeezeOperationId)
+        XCTAssertEqual(Set(rows.keys), ["r1", "r2", "r3"])
+    }
+
+    /// Operation ids are the stale-marker disambiguator: each arming sits above every marker the table still holds.
+    func testSqueezeOperationIdsRisePerOperation() throws {
+        _ = try squeezedThread()
+        let first = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        XCTAssertEqual(first, 1, "the first operation on a fresh table is 1")
+        let rows = try runLogsById()
+        XCTAssertEqual(rows["r2"]?.squeezeOperationId, first)
+        XCTAssertEqual(rows["r3"]?.squeezeOperationId, first, "every armed row carries the same id")
+        XCTAssertNil(rows["r1"]?.squeezeOperationId, "unselected rows stay plain")
+        let second = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        XCTAssertEqual(second, first + 1, "re-arming allocates the next id — the rows now read as stale to the old one")
+    }
+
+    /// A landing whose rows were re-armed by another operation aborts — the merge lost its seat, the rows stay.
+    func testFinishRunSqueezeAbortsWhenTheOperationNoLongerHoldsItsRows() throws {
+        let logs = try squeezedThread()
+        let dead = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        let live = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path) // the re-squeeze that overtook it
+        try GraphStore.finishRunSqueeze(
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: dead, anchor: "a",
+            prompt: "p", summary: "block", at: path
+        )
+        let rows = try runLogsById()
+        XCTAssertEqual(rows["r2"]?.summary, "s-r2", "the dead operation's landing never moves rows it no longer holds")
+        XCTAssertEqual(rows["r2"]?.squeezeOperationId, live, "the live operation's marker survives untouched")
+        XCTAssertEqual(rows["r3"]?.squeezeOperationId, live)
+        XCTAssertEqual(Set(rows.keys), ["r1", "r2", "r3"], "nothing inserted, nothing deleted")
+    }
+
+    func testSqueezeBlocksSplitsOnTheFence() {
+        XCTAssertEqual(GraphStore.squeezeBlocks("a\(GraphStore.summaryFence)b"), ["a", "b"])
+        XCTAssertEqual(GraphStore.squeezeBlocks("  a  \(GraphStore.summaryFence)  b  "), ["a", "b"], "blocks trim")
+        XCTAssertTrue(GraphStore.squeezeBlocks(GraphStore.summaryFence).isEmpty, "fence-only is no blocks")
+        XCTAssertTrue(GraphStore.squeezeBlocks("   ").isEmpty)
+    }
+
+    func testIsContiguousRunCases() throws {
+        let logs = try squeezedThread()
+        XCTAssertTrue(GraphStore.isContiguousRun(["r1", "r2"], in: logs))
+        XCTAssertTrue(GraphStore.isContiguousRun(["r2", "r1"], in: logs), "input order never matters")
+        XCTAssertFalse(GraphStore.isContiguousRun(["r1", "r3"], in: logs), "a gap breaks the run")
+        XCTAssertFalse(GraphStore.isContiguousRun(["r1"], in: logs), "one turn is not a squeeze")
+        XCTAssertFalse(GraphStore.isContiguousRun(["r1", "nope"], in: logs), "unknown ids break the run")
+        XCTAssertFalse(GraphStore.isContiguousRun(["r1", "r1"], in: logs), "dupes are not a squeeze")
+    }
+
+    func testLegacyRunDbMigratesSqueezeColumnIdempotently() throws {
+        let legacy = try legacyRunDb()
+        defer { try? FileManager.default.removeItem(atPath: legacy) }
+        try insertLegacyRun(try Connection(GraphStore.dbPath(at: legacy)), id: "r0", parent: nil)
+        try GraphStore.createTables(at: legacy) // boot path — adds squeeze_operation_id
+        try GraphStore.createTables(at: legacy) // and again — idempotent
+        let legacyRows = try GraphStore.fetchRunLogs(nodeId: "a", at: legacy)
+        XCTAssertEqual(legacyRows.first { $0.id == "r0" }?.squeezeOperationId, nil, "a legacy row migrates in as a plain row")
+        try GraphStore.insertRunLog(runLog("r1", node: "a"), at: legacy)
+        XCTAssertEqual(try GraphStore.markRunSqueezing(ids: ["r1"], at: legacy), 1, "the first operation after migration is 1")
+        XCTAssertEqual(try GraphStore.fetchRunLogs(nodeId: "a", at: legacy).first { $0.id == "r1" }?.squeezeOperationId, 1)
+    }
+
+    func testSweepStuckRunSqueezesClearsTheMarker() throws {
+        let logs = try squeezedThread()
+        try GraphStore.markRunSqueezing(ids: ["r1"], at: path) // a restart interrupted this one
+        let operation = try GraphStore.markRunSqueezing(ids: ["r2", "r3"], at: path)
+        try GraphStore.finishRunSqueeze( // its block lands plain — a landed row carries no marker
+            selection: squeezeSelection(logs, ["r2", "r3"]), operation: operation, anchor: "a",
+            prompt: "p", summary: "block", at: path
+        )
+        let live = try GraphStore.markRunSqueezing(ids: ["r1"], at: path) // still merging in THIS process
+        try GraphStore.sweepStuckRunSqueezes(at: path, excludingLive: [live])
+        var rows = try runLogsById()
+        XCTAssertEqual(rows["r1"]?.squeezeOperationId, live, "the boot sweep exempts a live operation's markers")
+        try GraphStore.sweepStuckRunSqueezes(at: path) // the plain boot path — no live operations to exempt
+        rows = try runLogsById()
+        XCTAssertNil(rows["r1"]?.squeezeOperationId, "an interrupted merge must not hold rows hostage")
+        XCTAssertEqual(rows["r1"]?.summary, "s-r1", "the sweep moves no rows, clears only the marker")
+        let block = try XCTUnwrap(rows.values.first { $0.summary == "block" })
+        XCTAssertNil(block.squeezeOperationId, "a landed block is a plain row — nothing to sweep")
+    }
+
     func testInsertRunLogPersistsParentRunId() throws {
         try insert(node("a", nil))
         try GraphStore.insertRunLog(GraphRunLog(id: "r1", nodeId: "a", prompt: "p", status: "success", output: "o", took: 1, createdAt: 1, completedAt: nil), at: path)

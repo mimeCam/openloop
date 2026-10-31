@@ -63,7 +63,8 @@
         own.forEach(e => { via[e.id] = { kind: 'own' }; });
         // segments first, then the own line; `seen` seeded with the own line — first-occurrence-wins, Swift's rule
         const ids = [];
-        const root = own[0] || home || nodeEntry(node, homePath);
+        // a switched-off holder's own line is empty — its standing assignments still ride, off the FRESH node, never the stale ladder copy
+        const root = own[0] || nodeEntry(node, homePath);
         expand(root, homePath, idx, ids, seen, via);
         ids.push(...own.map(e => e.id));
         return { ids, idSet: seen, via };
@@ -187,6 +188,7 @@
     function runLadderSanityChecks() {
         checkResolverAcrossFolders();
         checkResolverEdges();
+        checkInactiveHolder();
         checkTapGrammar();
         checkSegments();
         console.log('All ladder sanity checks passed.');
@@ -246,6 +248,21 @@
         console.assert(JSON.stringify(rOwn.ids) === JSON.stringify(['B1']),
             'resolve: the holder\'s own folder is never on the lookup path');
         console.log('OK: resolver edges');
+    }
+
+    // a switched-off holder is still a holder — its picks ride off the fresh node
+    function checkInactiveHolder() {
+        const f = fixture();
+        // the ladder copy was read at page load, BEFORE the pick was made
+        const staleLadder = f.entries.map(e =>
+            e.id === 'B1' ? Object.assign({}, e, { active: false, assigned_node_ids: [] }) : e);
+        const r = resolve(
+            { id: 'B1', parent_id: null, active: false, assigned_node_ids: ['A3'] },
+            staleLadder
+        );
+        console.assert(JSON.stringify(r.ids) === JSON.stringify(['R1', 'R2', 'A1', 'A2', 'A3']),
+            'resolve: a switched-off holder still expands its picks — the fresh panel node wins over the stale ladder copy');
+        console.log('OK: inactive holder');
     }
 
     function checkTapGrammar() {

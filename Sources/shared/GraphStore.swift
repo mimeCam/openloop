@@ -87,6 +87,8 @@ public struct GraphRunLog: Sendable {
     public let audit: String?
     /// The only non-nil value is "analyzing" (a live audit's marker, swept at boot). Terminal writes always clear it.
     public let auditStatus: String?
+    /// nil = plain; otherwise the squeeze operation holding this row (transient, swept at boot).
+    public let squeezeOperationId: Int?
 
     public init(
         id: String,
@@ -102,7 +104,8 @@ public struct GraphRunLog: Sendable {
         rootRunId: String? = nil,
         refNodeIds: [String]? = nil,
         audit: String? = nil,
-        auditStatus: String? = nil
+        auditStatus: String? = nil,
+        squeezeOperationId: Int? = nil
     ) {
         self.id = id
         self.nodeId = nodeId
@@ -118,6 +121,7 @@ public struct GraphRunLog: Sendable {
         self.refNodeIds = refNodeIds
         self.audit = audit
         self.auditStatus = auditStatus
+        self.squeezeOperationId = squeezeOperationId
     }
 }
 
@@ -272,6 +276,7 @@ public struct GraphStore {
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN ref_node_ids TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN audit TEXT;")
         try? db.run("ALTER TABLE graph_run_logs ADD COLUMN audit_status TEXT;")
+        try? db.run("ALTER TABLE graph_run_logs ADD COLUMN squeeze_operation_id INTEGER;")
         backfillRootRunIds(db)
     }
 
@@ -657,9 +662,12 @@ public struct GraphStore {
         chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
     }
 
+    /// The multi-block fence every joiner uses — and squeeze's merge output splits on the same seam.
+    public static let summaryFence = "\n\n---\n\n"
+
     /// chainText's join rule lifted to multi-chain joins: non-empty blocks fenced by `---`, empties dropped.
     public static func joinedText(_ texts: [String]) -> String {
-        texts.filter(\.notEmpty).joined(separator: "\n\n---\n\n")
+        texts.filter(\.notEmpty).joined(separator: summaryFence)
     }
 
     /// One persona's context across the WHOLE lookup ladder: texts in ladder order, MCPs nearest-wins by URL.
@@ -937,7 +945,7 @@ public struct GraphStore {
         return chain(of: other, in: nodes).contains { $0.id == node.id }
     }
 
-    private static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id, ref_node_ids, audit, audit_status"
+    private static let runLogColumns = "id, node_id, prompt, status, output, took, created_at, completed_at, parent_run_id, summary, root_run_id, ref_node_ids, audit, audit_status, squeeze_operation_id"
 
     /// `ref_node_ids` rides as a JSON-encoded id array (nil/absent = none) in one TEXT column.
     public static func encodeRefNodeIds(_ ids: [String]?) -> String? {
@@ -1018,6 +1026,119 @@ public struct GraphStore {
         try db.run("UPDATE graph_run_logs SET audit_status = NULL WHERE audit_status = 'analyzing';")
     }
 
+    // MARK: - Follow-up squeeze (convo compression)
+
+    public static let squeezeMinimumTurns = 2
+
+    /// Arms the operation on every selected row before the detached merge spawns — blocking until the landing clears it.
+    @discardableResult
+    public static func markRunSqueezing(ids: [String], at instancePath: String) throws -> Int {
+        assert(!ids.isEmpty, "squeeze arms markers over a non-empty selection")
+        let db = try connect(at: instancePath)
+        var operation = 0
+        try db.transaction {
+            // a decode failure lands on the no-operation sentinel 0 — nothing downstream mistakes 0 for a live id
+            operation = Int((try db.scalar("SELECT COALESCE(MAX(squeeze_operation_id), 0) + 1 FROM graph_run_logs;") as? Int64) ?? 0)
+            for id in ids {
+                try db.run("UPDATE graph_run_logs SET squeeze_operation_id = ? WHERE id = ?;", operation, id)
+            }
+        }
+        assert(operation > 0, "operation ids are positive — the first is 1")
+        return operation
+    }
+
+    /// The merged block fence-split into per-row summaries — joinedText's inverse.
+    public static func squeezeBlocks(_ summary: String) -> [String] {
+        summary.components(separatedBy: summaryFence)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter(\.notEmpty)
+    }
+
+    /// The terminal write, one transaction — an empty summary or a lost seat aborts with every row untouched; else the rows die and fence-split plain rows take their seat.
+    public static func finishRunSqueeze(
+        selection: [GraphRunLog], operation: Int, anchor: String, prompt: String, summary: String?, at instancePath: String
+    ) throws {
+        assert(selection.count >= squeezeMinimumTurns, "squeezeSelection delivers ≥2 chain-ordered rows")
+        assert(operation > 0, "markRunSqueezing armed this operation before the merge spawned")
+        let ids = selection.map(\.id)
+        assert(Set(ids).count == ids.count, "squeezeSelection delivers distinct rows — the held-count IN clause binds one seat per id")
+        guard let summary, summary.notEmpty, squeezeBlocks(summary).notEmpty else {
+            return try abortRunSqueeze(ids: ids, operation: operation, at: instancePath)
+        }
+        let blocks = squeezeBlocks(summary)
+        assert(!blocks.isEmpty, "the guard above routed fence-empty summaries to the abort")
+        let seat = selection[0]
+        // The chain orders by parent links, not timestamps — clamp so a tied clock degenerates to the seat's own instant.
+        let span = max(selection.last!.createdAt - seat.createdAt, 0)
+        let freshIds = (0..<blocks.count).map { _ in UUID().uuidString }
+        let tail = freshIds.last!
+        let root = seat.parentRunId == nil ? freshIds[0] : seat.rootRunId
+        let db = try connect(at: instancePath)
+        try db.transaction {
+            guard try squeezeHeldCount(ids, operation: operation, db) == ids.count else {
+                storeLog.warn("squeeze operation \(operation) no longer holds its rows — landing aborted, rows stay put")
+                return clearRunSqueezeMarkers(operation: operation, db)
+            }
+            for id in ids {
+                try db.run("UPDATE graph_run_logs SET parent_run_id = ? WHERE parent_run_id = ?;", tail, id)
+                try db.run("DELETE FROM graph_run_logs WHERE id = ?;", id)
+                dropRunMarkerRows(db, runId: id)
+            }
+            for (i, block) in blocks.enumerated() {
+                // completed_at stays NULL on purpose: a synthetic row must never surface as a fresh terminal notification.
+                // output mirrors its block: the row's answer cell is the merged text, never "(empty)".
+                try db.run(
+                    "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, summary, created_at, parent_run_id, root_run_id) VALUES (?, ?, ?, 'success', ?, ?, ?, ?, ?);",
+                    freshIds[i], anchor, prompt, block, block,
+                    seat.createdAt + span * Double(i + 1) / Double(blocks.count),
+                    i == 0 ? seat.parentRunId : freshIds[i - 1],
+                    root
+                )
+            }
+            repairRootRunIds(db)
+        }
+    }
+
+    /// The abort path: this operation's markers clear, rows never moved.
+    private static func abortRunSqueeze(ids: [String], operation: Int, at instancePath: String) throws {
+        let db = try connect(at: instancePath)
+        for id in ids {
+            try db.run("UPDATE graph_run_logs SET squeeze_operation_id = NULL WHERE id = ? AND squeeze_operation_id = ?;", id, operation)
+        }
+    }
+
+    private static func squeezeHeldCount(_ ids: [String], operation: Int, _ db: Connection) throws -> Int {
+        let seats = ids.map { _ in "?" }.joined(separator: ", ")
+        let bindings: [Binding?] = [operation] + ids
+        let n = try db.scalar(
+            "SELECT COUNT(*) FROM graph_run_logs WHERE squeeze_operation_id = ? AND id IN (\(seats));", bindings
+        ) as? Int64
+        return Int(n ?? 0)
+    }
+
+    private static func clearRunSqueezeMarkers(operation: Int, _ db: Connection) {
+        try? db.run("UPDATE graph_run_logs SET squeeze_operation_id = NULL WHERE squeeze_operation_id = ?;", operation)
+    }
+
+    /// Boot-only twin of sweepStuckRunAudits: an interrupted merge must not hold its rows hostage — every marker clears except a live operation's.
+    public static func sweepStuckRunSqueezes(at instancePath: String, excludingLive: [Int] = []) throws {
+        assert(excludingLive.allSatisfy { $0 > 0 }, "the registry's snapshot carries armed operations only — operation ids start at 1")
+        let db = try connect(at: instancePath)
+        guard try sqliteMasterHas("graph_run_logs", db) else { return }
+        let live = excludingLive.map(String.init).joined(separator: ", ")
+        let exempt = live.isEmpty ? "" : " AND squeeze_operation_id NOT IN (\(live))"
+        try db.run("UPDATE graph_run_logs SET squeeze_operation_id = NULL WHERE squeeze_operation_id IS NOT NULL\(exempt);")
+    }
+
+    /// Pure: ids (≥ 2, deduped) all sit in `chain` as ONE unbroken stretch — input order never matters.
+    public static func isContiguousRun(_ ids: [String], in chain: [GraphRunLog]) -> Bool {
+        let pick = Set(ids)
+        guard ids.count >= squeezeMinimumTurns, pick.count == ids.count else { return false }
+        let seats = chain.enumerated().compactMap { pick.contains($0.element.id) ? $0.offset : nil }
+        guard seats.count == pick.count else { return false }
+        return zip(seats, seats.dropFirst()).allSatisfy { $1 == $0 + 1 }
+    }
+
     public static func runChain(of log: GraphRunLog, in logs: [GraphRunLog]) -> [GraphRunLog] {
         let byId = Dictionary(logs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var lineage: [GraphRunLog] = []
@@ -1031,8 +1152,18 @@ public struct GraphStore {
         return lineage.reversed()
     }
 
+    /// The chain's head — the thread's root row, and the squeeze registry's claim key.
+    public static func runThreadRoot(of log: GraphRunLog, in logs: [GraphRunLog]) -> String {
+        let chain = runChain(of: log, in: logs)
+        guard let head = chain.first else {
+            assertionFailure("runChain's lineage always holds its seed")
+            return log.id
+        }
+        return head.id
+    }
+
     public static func runSummaries(_ chain: [GraphRunLog]) -> String {
-        chain.compactMap(\.summary).joined(separator: "\n\n---\n\n")
+        chain.compactMap(\.summary).joined(separator: summaryFence)
     }
 
     public static func updateRunLog(
@@ -1226,7 +1357,8 @@ public struct GraphStore {
             createdAt: createdAt, completedAt: row[7] as? Double,
             parentRunId: row[8] as? String, summary: row[9] as? String, rootRunId: row[10] as? String,
             refNodeIds: decodeRefNodeIds(row[11] as? String),
-            audit: row[12] as? String, auditStatus: row[13] as? String
+            audit: row[12] as? String, auditStatus: row[13] as? String,
+            squeezeOperationId: (row[14] as? Int64).map(Int.init)
         )
     }
 }
