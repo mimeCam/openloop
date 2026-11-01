@@ -1809,6 +1809,7 @@
         if (!el) return;
         bindSummaryEdit(el);
         bindRunDelete(el);
+        bindRunSplit(el);
         OpenLoopSqueeze.bindDots(el);
         const tail = el.querySelector('.squeeze-tail');
         if (tail) tail.addEventListener('click', toggleSqueezeMode);
@@ -1861,7 +1862,7 @@
     function threadEntryHtml(l, thread) {
         if (OpenLoopSqueeze.isMode()) return OpenLoopSqueeze.entryHtml(l, thread);
         return `<div class="run-log" data-run-id="${esc(l.id)}">` +
-            `<div class="run-log-meta"><span>${runMeta(l)}</span>${runDelBtn(l, thread)}</div>` +
+            `<div class="run-log-meta"><span>${runMeta(l)}</span>${runSplitBtn(l, thread)}${runDelBtn(l, thread)}</div>` +
             OpenLoopBubble.bubbleHtml('input', l.prompt) +
             runResultSection(l) +
             runSummarySection(l, thread) +
@@ -2414,6 +2415,85 @@
         $('detail-panel-inner').querySelectorAll('.run-del-btn').forEach(b => { b.disabled = true; });
     }
 
+    // — per-turn split (thread rows, this page only) —
+
+    const THREAD_SPLIT_COPY = {
+        rest: 'Split into a new conversation.',
+        busy: 'This turn is running — splitting unlocks when it finishes.',
+        ineligible: 'This turn needs a finished result and a summary before it can head a new conversation.',
+    };
+
+    function splitIcon() {
+        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+            `<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>` +
+            `<path d="M18 9a9 9 0 0 1-9 9"/></svg>`;
+    }
+
+    // eligibility mirrors the server's 400 guard — success + summary
+    function splitTitle(l, thread) {
+        if (OpenLoopSqueeze.held(l, thread)) return OpenLoopSqueeze.COPY.lock;
+        if (RUNNING_STATUSES.includes(l.status)) return THREAD_SPLIT_COPY.busy;
+        if (l.status !== 'success' || !l.summary) return THREAD_SPLIT_COPY.ineligible;
+        return THREAD_SPLIT_COPY.rest;
+    }
+
+    function runSplitBtn(l, thread) {
+        const title = splitTitle(l, thread);
+        const off = title !== THREAD_SPLIT_COPY.rest;
+        return `<button class="run-split-btn" data-run-id="${esc(l.id)}"${off ? ' disabled' : ''}` +
+            ` aria-label="${esc(title)}" title="${esc(title)}">${splitIcon()}</button>`;
+    }
+
+    function bindRunSplit(scope) {
+        scope.querySelectorAll('.run-split-btn:not(:disabled)').forEach(btn =>
+            btn.addEventListener('click', () => commitRunSplit(btn)));
+    }
+
+    function commitRunSplit(btn) {
+        btn.disabled = true;
+        btn.classList.add('splitting');
+        // the fork's tab is born in the click gesture itself — an awaited window.open reads as a popup and dies in the blocker
+        splitRunLog(btn.dataset.runId, window.open('', '_blank'));
+    }
+
+    async function splitRunLog(runId, tab) {
+        try {
+            const root = await postSplit(runId);
+            await load();
+            logsJson = '';
+            await loadLogs(selectedId);
+            if (tab) tab.location = forkDeepUrl(root.id);
+            else landOnFork(root.id);
+        } catch (e) {
+            if (tab) tab.close();
+            showError(`Failed to split: ${e.message}`);
+            logsJson = '';
+            await loadLogs(selectedId);
+        }
+    }
+
+    function postSplit(runId) {
+        return fetchJson(runThreadUrl(runId) + '/split', { method: 'POST' });
+    }
+
+    // the fork's arrival link (a notification-style deep link): the new tab opens the thread at its root, the copied tip gets the beacon
+    function forkDeepUrl(rootId) {
+        const tip = threadOf(rootId, runsCache).pop();
+        const q = new URLSearchParams();
+        q.set('instance', instanceParam);
+        q.set('node', selectedId);
+        q.set('run', tip ? tip.id : rootId);
+        return '/graph.html?' + q.toString();
+    }
+
+    // blocker-fallback, same tab — focusRun opens roots only, the tail is the copied tip
+    function landOnFork(rootId) {
+        focusRun(rootId);
+        const tip = threadOf(rootId, runsCache).pop();
+        if (!tip) return;
+        beaconThreadRun(tip.id);
+    }
+
     async function delRunLog(runId, focusIndex) {
         const beat = spliceBeat(runId);
         try {
@@ -2753,6 +2833,7 @@
         checkRunViewHtml();
         checkThreadFoldDepths();
         checkThreadDelete();
+        checkThreadSplit();
         checkSqueezeToggleSeat();
         checkSqueezeOneLinePose();
         checkSqueezeModeFooter();
@@ -2973,6 +3054,41 @@
         console.assert(THREAD_DEL_COPY.rest.includes('Follow-ups move up to this run’s parent — nothing else changes'),
             'threadDel: teaching hint pinned');
         console.log('OK: per-turn delete markup');
+    }
+
+    // Per-turn split: thread rows only — structurally absent in squeeze mode and in runs-list rows.
+    function checkThreadSplit() {
+        const ok = { id: 'r1', root_run_id: 'r1', status: 'success', took: 1, created_at: 1, prompt: 'p', output: 'o', summary: 's' };
+        const html = threadEntryHtml(ok, []);
+        console.assert((html.match(/class="run-split-btn/g) || []).length === 1,
+            'threadSplit: exactly one fork button per thread row');
+        console.assert(html.indexOf('<span>') < html.indexOf('run-split-btn') && html.indexOf('run-split-btn') < html.indexOf('run-del-btn'),
+            'threadSplit: caption < split < bin — the newcomer takes the inner chair');
+        console.assert(html.includes(`aria-label="${THREAD_SPLIT_COPY.rest}"`) && html.includes(`title="${THREAD_SPLIT_COPY.rest}"`),
+            'threadSplit: aria-label and title agree at rest');
+        console.assert(threadEntryHtml({ ...ok, id: 'r8', status: 'progress' }, []).includes(`title="${THREAD_SPLIT_COPY.busy}"`),
+            'threadSplit: a running turn disables with the busy sentence');
+        console.assert(threadEntryHtml({ ...ok, id: 'r9', summary: null }, []).includes(`title="${THREAD_SPLIT_COPY.ineligible}"`),
+            'threadSplit: a summaryless turn disables with the teaching sentence');
+        OpenLoopSqueeze.setOps({ r1: 5 });
+        console.assert(threadEntryHtml({ ...ok, id: 'r7', squeeze_operation_id: 5 }, [ok]).includes(`title="${OpenLoopSqueeze.COPY.lock}"`),
+            'threadSplit: a squeeze-held row mirrors the bin lock copy');
+        console.assert(!OpenLoopSqueeze.entryHtml(ok, [ok]).includes('run-split-btn'),
+            'threadSplit: squeeze mode owns the row — no split there');
+        OpenLoopSqueeze.setOps({});
+        console.assert(!runLogHtml({ ...ok }, [ok]).includes('run-split-btn'),
+            'threadSplit: runs-list rows render no split — their pose stays inline');
+        console.assert(THREAD_SPLIT_COPY.rest.includes('new tab'),
+            'threadSplit: rest copy teaches the new-tab landing');
+        const keepSel = selectedId, keepRuns = runsCache;
+        selectedId = 'n1';
+        runsCache = [ok, { id: 'r2', root_run_id: 'r1', parent_run_id: 'r1', status: 'success', created_at: 2, prompt: 'p', output: 'o' }];
+        console.assert(forkDeepUrl('r1') === '/graph.html?instance=' + encodeURIComponent(instanceParam) + '&node=n1&run=r2',
+            'threadSplit: the fork link sends the new tab to the node and the copied tip');
+        console.assert(forkDeepUrl('ghost') === '/graph.html?instance=' + encodeURIComponent(instanceParam) + '&node=n1&run=ghost',
+            'threadSplit: an unknown root still links — the root id is the tip of last resort');
+        selectedId = keepSel; runsCache = keepRuns;
+        console.log('OK: per-turn split markup');
     }
 
     // ── follow-up squeeze: page wiring pins (grammar/dock/submit checks live in squeeze.js) ──

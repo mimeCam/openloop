@@ -1,6 +1,7 @@
 // notifications.js — /notifications.html page logic.
 // ?instance=<path> → that instance's notifications; no param → all instances.
-// Read state changes via the explicit buttons or "open ↗" (followed link = seen); title deep links never mark.
+// Read state changes via the explicit button or ANY opener — "open ↗" chip or
+// title deep link alike (a followed link = seen; opening never costs a 2nd tap).
 (function () {
     'use strict';
 
@@ -297,7 +298,7 @@
             `<span class="notif-path" title="${esc(n.instance_path)}">${hl(label, tokens)}</span>` +
             `<span class="notif-sep" aria-hidden="true">·</span>`;
         return `<div class="notif-head">${chip}` +
-            `<span class="notif-title"><a href="${deepLink(n)}" target="_blank" rel="noopener">${hl(n.title, tokens)}</a></span>` +
+            `<span class="notif-title"><a class="notif-title-link" href="${deepLink(n)}" target="_blank" rel="noopener" ${openPayload(n)}>${hl(n.title, tokens)}</a></span>` +
             `</div>`;
     }
 
@@ -311,10 +312,14 @@
             `</div>`;
     }
 
+    // kind/ref/inst — the mark payload every opener carries: the "open ↗" chip,
+    // the title deep link and the mark button all speak it.
+    const openPayload = n =>
+        `data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}"`;
+
     function actionsHtml(n) {
-        const ds = `data-kind="${esc(n.kind)}" data-ref="${esc(n.id)}" data-inst="${esc(n.instance_path)}"`;
-        return `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener" ${ds}>open ↗</a>` +
-            (n.read ? '' : `<button class="mark-read-btn" ${ds}>mark read</button>`);
+        return `<a class="notif-open" href="${deepLink(n)}" target="_blank" rel="noopener" ${openPayload(n)}>open ↗</a>` +
+            (n.read ? '' : `<button class="mark-read-btn" ${openPayload(n)}>mark read</button>`);
     }
 
     // The clamp can bite when chars fill ~3 wrapped lines OR when extra
@@ -406,7 +411,7 @@
         const root = $('list');
         root.querySelectorAll('.mark-read-btn').forEach(btn =>
             btn.addEventListener('click', () => markRead(btn.dataset)));
-        root.querySelectorAll('.notif-open').forEach(bindOpenMarksRead);
+        root.querySelectorAll('.notif-open, .notif-title-link').forEach(bindOpenMarksRead);
         root.querySelectorAll('.notif-more').forEach(btn =>
             btn.addEventListener('click', () => expandPrompt(btn)));
         root.querySelectorAll('.filter-clear').forEach(btn =>
@@ -414,7 +419,8 @@
         $('mark-all').onclick = markAllRead;
     }
 
-    // "open ↗" doubles as the read receipt — target="_blank" lets the mark POST ride along with navigation.
+    // Every opener doubles as the read receipt — target="_blank" lets the mark
+    // POST ride along with navigation. One tap: open + seen.
     // BIND, never fire — bindRows runs on every render (load, poll, filter); a bare markRead would mark the whole list read on page load.
     function bindOpenMarksRead(a) {
         a.addEventListener('click', () => {
@@ -644,6 +650,9 @@ Press / to focus · Esc to clear`;
         const quoted = rowHtml({ ...base, id: 'r"1', read: false });
         console.assert(/<a class="notif-open"[^>]*\bdata-ref="r&quot;1"/.test(quoted),
             'rowHtml: open payload attributes escaped');
+        // the title deep link is an opener too — same payload, same read receipt
+        console.assert(/<a class="notif-title-link"[^>]*\bdata-kind="node_run"[^>]*\bdata-ref="r 1"[^>]*\bdata-inst="\/tmp\/demo"/.test(html),
+            'rowHtml: title link carries the mark payload — every opener is a read receipt');
         // Regression pin (mark-all-on-reload bug): a render/poll is not a user action — binding attaches, never fires.
         const savedItems = items, realMarkRead = markRead;
         items = [{ ...base, id: 'r 1', instance_path: '/tmp/demo', read: false }];

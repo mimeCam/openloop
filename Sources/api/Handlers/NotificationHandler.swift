@@ -17,8 +17,9 @@ private enum NotificationKind: String {
 }
 
 // Per-instance: everything derives from the instance's own logs.db.
-// Read state changes ONLY through the two POSTs below — opening a deep link
-// never marks read.
+// Read state changes ONLY through the two POSTs below — the page fires them
+// when the user opens an item (chip or title); a deep link opened from
+// anywhere else never marks.
 struct NotificationHandler: Sendable {
 
     func list(req: Request) async throws -> NotificationsResponse {

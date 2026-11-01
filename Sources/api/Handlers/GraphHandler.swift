@@ -135,6 +135,13 @@ struct GraphHandler: Sendable {
         return try await deleteRunLog(runId: runId, anchor: nodeId, at: instancePath)
     }
 
+    func splitRun(req: Request) async throws -> GraphRunLogContent {
+        let instancePath = try instancePathFrom(req)
+        let nodeId = try nodeIdFrom(req)
+        let runId = try runIdFrom(req)
+        return try await splitRunLog(runId: runId, anchor: nodeId, at: instancePath)
+    }
+
     func updateRun(req: Request) async throws -> GraphRunLogContent {
         let instancePath = try instancePathFrom(req)
         let nodeId = try nodeIdFrom(req)
@@ -662,6 +669,27 @@ private extension GraphHandler {
             logs: try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath).map(toContent),
             squeeze_ops: await squeezeRegistry.snapshot()
         )
+    }
+
+    // no "already continued" guard — mid-thread forks are the point
+    func splitRunLog(runId: String, anchor: String, at instancePath: String) async throws -> GraphRunLogContent {
+        try GraphStore.createTables(at: instancePath)
+        let logs = try GraphStore.fetchRunLogs(nodeId: anchor, at: instancePath)
+        let run = try assertRunSplittable(runId, logs: logs)
+        try await assertThreadNotSqueezing(run, logs: logs)
+        let prefix = GraphStore.runChain(of: run, in: logs)
+        assert(prefix.last?.id == run.id, "runChain's lineage ends at its seed")
+        return toContent(try GraphStore.splitRun(prefix: prefix, at: instancePath))
+    }
+
+    func assertRunSplittable(_ runId: String, logs: [GraphRunLog]) throws -> GraphRunLog {
+        guard let run = logs.first(where: { $0.id == runId }) else {
+            throw Abort(.notFound, reason: "Run not found: \(runId)")
+        }
+        guard run.status == "success", run.summary?.notEmpty == true else {
+            throw Abort(.badRequest, reason: "Run not ready — it needs a summary to head a new conversation")
+        }
+        return run
     }
 
     func toContent(_ log: GraphRunLog) -> GraphRunLogContent {

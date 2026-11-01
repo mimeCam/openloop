@@ -1047,7 +1047,7 @@
             color: var(--text-muted);
             display: flex;
             align-items: center;
-            justify-content: flex-start; /* caption leads, its buttons follow inline — right after the text, never pinned right */
+            justify-content: flex-start; /* caption leads, its buttons follow inline — thread rows right-pin via the split's auto margin below */
             gap: 8px;
         }
         /* .run-log bubbles speak the shared fold in panel.css (was a local
@@ -1065,6 +1065,34 @@
            (controls hug their text), only bin↔arrow earns the gap — 8 + 12
            totals the focus row's 20px */
         .run-log-meta .run-del-btn + .run-focus-btn { margin-left: 12px; }
+        .run-split-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 6px;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 0;
+            flex-shrink: 0;
+            position: relative;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+        }
+        .run-split-btn:hover:not(:disabled) {
+            background: rgba(52,199,89,0.10);
+            border-color: rgba(52,199,89,0.30);
+            color: var(--accent-green);
+        }
+        .run-split-btn:focus-visible { outline: 2px solid var(--accent-green); outline-offset: 2px; }
+        .run-split-btn:disabled { opacity: 0.35; cursor: default; }
+        /* the delete's pulse grammar — one beat for one-tap actions in flight */
+        .run-split-btn.splitting { animation: run-del-pulse 1.2s ease-in-out infinite; }
+        /* auto margin right-pins the split+bin pair as one unit; runs-list rows render no split, so their caption+bin+arrow keep the inline pose above */
+        .run-log-meta .run-split-btn { margin-left: auto; }
+        .run-log-meta .run-split-btn + .run-del-btn { margin-left: 12px; }
         .run-focus-btn {
             display: inline-flex;
             align-items: center;
@@ -1499,6 +1527,9 @@
                two hit areas. The focus row needs no bump: its 44px targets
                have no insets, so its 20px gap is a full 20px. */
             .run-log-meta .run-del-btn + .run-focus-btn { margin-left: 16px; }
+            .run-log-meta .run-split-btn { position: relative; width: 32px; height: 32px; }
+            .run-log-meta .run-split-btn::after { content: ''; position: absolute; inset: -6px; } /* 32px + 12px inset = 44px hit */
+            .run-log-meta .run-split-btn + .run-del-btn { margin-left: 16px; }
         }
 
         /* — delete actions: danger zone at the panel bottom, calm until armed — */
@@ -1571,6 +1602,7 @@
             .detail-section-label.squeeze.busy { animation: none; }
             .detail-panel-body.run-enter { animation: none; }
             .detail-panel-body.run-back { animation: none; }
+            .run-split-btn.splitting { animation: none; }
             .run-log.beacon { animation: none; }
             #nodes-section.beacon { animation: none; }
         }

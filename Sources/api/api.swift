@@ -50,12 +50,16 @@ private func configure(_ app: Application) async throws {
     app.logger.info("app.directory.publicDirectory: \(app.directory.publicDirectory)")
     app.logger.info("publicPath: \(publicPath)")
 
-    app.middleware.use(FileMiddleware(publicDirectory: publicPath))
+    // noCache: browsers must revalidate every asset (ETag turns unchanged files
+    // into cheap 304s). browserDefault heuristic caching once let a client
+    // run a stale notifications.js after the fix had shipped — the page
+    // kept reporting itself "broken" until the cache happened to expire.
+    app.middleware.use(FileMiddleware(publicDirectory: publicPath, cachePolicy: .noCache))
 
     app.get { req async throws in //req async -> Response in
-        try await req.fileio.asyncStreamFile(
-            at: publicPath + "index.html"
-        )
+        let response = try await req.fileio.asyncStreamFile(at: publicPath + "index.html")
+        response.headers.cacheControl = .init(noCache: true) // revalidate, same as FileMiddleware
+        return response
     }
 
     let api = app.grouped("api")
@@ -198,6 +202,9 @@ private func configure(_ app: Application) async throws {
     }
     instances.grouped(":id", "graph", ":nid").delete("runs", ":rid") { req async throws in
         try await GraphHandler().deleteRun(req: req)
+    }
+    instances.grouped(":id", "graph", ":nid").post("runs", ":rid", "split") { req async throws in
+        try await GraphHandler().splitRun(req: req)
     }
     instances.grouped(":id", "graph", ":nid").post("runs", "squeeze") { req async throws in
         try await GraphHandler().squeezeRun(req: req)

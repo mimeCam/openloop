@@ -69,7 +69,7 @@ public struct GraphNode: Sendable {
     }
 }
 
-public struct GraphRunLog: Sendable {
+public struct GraphRunLog: Sendable, Equatable {
     public let id: String
     public let nodeId: String
     public let prompt: String
@@ -1164,6 +1164,44 @@ public struct GraphStore {
 
     public static func runSummaries(_ chain: [GraphRunLog]) -> String {
         chain.compactMap(\.summary).joined(separator: summaryFence)
+    }
+
+    // MARK: - Follow-up split (convo fork)
+
+    /// Copies the thread's prefix (root → tapped row, inclusive) as a separate conversation — copies are born plain; returns the fork's new root.
+    @discardableResult
+    public static func splitRun(prefix: [GraphRunLog], at instancePath: String) throws -> GraphRunLog {
+        assert(prefix.notEmpty, "the handler delivers the tapped row at minimum")
+        let copies = splitCopies(of: prefix)
+        assert(copies[0].parentRunId == nil && copies[0].rootRunId == copies[0].id, "the first copy is born the fork's root")
+        let db = try connect(at: instancePath)
+        try db.transaction {
+            for copy in copies { try insertSplitRow(copy, db) }
+            repairRootRunIds(db)
+        }
+        return copies[0]
+    }
+
+    /// Pure: carried columns ride onto fresh ids, parents re-chained onto them — born-plain columns (completedAt/audit/markers) default to nil.
+    private static func splitCopies(of prefix: [GraphRunLog]) -> [GraphRunLog] {
+        let fresh = prefix.map { _ in UUID().uuidString }
+        return prefix.enumerated().map { i, row in
+            GraphRunLog(
+                id: fresh[i], nodeId: row.nodeId, prompt: row.prompt, status: row.status,
+                output: row.output, took: row.took, createdAt: row.createdAt, completedAt: nil,
+                parentRunId: i == 0 ? nil : fresh[i - 1], summary: row.summary, rootRunId: fresh[0],
+                refNodeIds: row.refNodeIds
+            )
+        }
+    }
+
+    /// insertRunLog's shape, completed_at absent — a copy must never notify.
+    private static func insertSplitRow(_ row: GraphRunLog, _ db: Connection) throws {
+        try db.run(
+            "INSERT INTO graph_run_logs (id, node_id, prompt, status, output, took, created_at, parent_run_id, root_run_id, summary, ref_node_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            row.id, row.nodeId, row.prompt, row.status, row.output, row.took, row.createdAt,
+            row.parentRunId, row.rootRunId, row.summary, encodeRefNodeIds(row.refNodeIds)
+        )
     }
 
     public static func updateRunLog(

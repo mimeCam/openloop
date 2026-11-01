@@ -666,6 +666,72 @@ final class GraphStoreTests: XCTestCase {
         XCTAssertNil(block.squeezeOperationId, "a landed block is a plain row — nothing to sweep")
     }
 
+    // ── Follow-up split: the tapped row's lineage (root → tapped, inclusive) copies into a fresh, plain conversation — the original untouched. ──
+
+    private func splitFork(at runId: String) throws -> GraphRunLog {
+        let logs = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        let seed = try XCTUnwrap(logs.first { $0.id == runId })
+        return try GraphStore.splitRun(prefix: GraphStore.runChain(of: seed, in: logs), at: path)
+    }
+
+    func testSplitRunCopiesPrefixInclusive() throws {
+        _ = try squeezedThread()
+        let root = try splitFork(at: "r2")
+        let fork = try GraphStore.fetchRunThread(rootId: root.id, at: path)
+        XCTAssertEqual(fork.count, 2, "splitting at r2 copies r1+r2 — the prefix, inclusive")
+        XCTAssertNil(root.parentRunId, "the first copy is the fork's own root, never a chained head")
+        XCTAssertEqual(root.rootRunId, root.id)
+        XCTAssertEqual(fork[1].parentRunId, root.id, "parents re-chain onto the fresh ids")
+        XCTAssertEqual(fork[1].rootRunId, root.id, "every copy carries the fresh root")
+        XCTAssertTrue(fork.allSatisfy { !["r1", "r2", "r3"].contains($0.id) }, "identity never copies")
+    }
+
+    func testSplitRunLeavesOriginalUntouched() throws {
+        _ = try squeezedThread()
+        try GraphStore.insertRunLog(runLog("r4", node: "a", parent: "r3", root: "r1"), at: path)
+        try GraphStore.finishRunSummary(id: "r4", summary: "s-r4", at: path)
+        let before = try runLogsById()
+        _ = try splitFork(at: "r2")
+        let after = try runLogsById()
+        for id in ["r1", "r2", "r3", "r4"] {
+            XCTAssertEqual(after[id], before[id], "the original thread — children included — stays byte-identical")
+        }
+    }
+
+    func testSplitRunCopiesBornPlain() throws {
+        _ = try squeezedThread()
+        try GraphStore.markRunAuditing(id: "r1", at: path) // a live analysis on the original
+        let root = try splitFork(at: "r3")
+        let fork = try GraphStore.fetchRunThread(rootId: root.id, at: path)
+        for copy in fork {
+            XCTAssertNil(copy.completedAt, "a copy must never notify")
+            XCTAssertNil(copy.audit, "verdicts are advice about the original execution")
+            XCTAssertNil(copy.auditStatus)
+            XCTAssertNil(copy.squeezeOperationId, "copies are born plain")
+        }
+        XCTAssertEqual(fork.last?.status, "success")
+        XCTAssertEqual(fork.last?.summary, "s-r3", "carried columns survive the copy")
+    }
+
+    func testSplitRunTipAcceptsFollowUps() throws {
+        _ = try squeezedThread()
+        let root = try splitFork(at: "r2")
+        let logs = try GraphStore.fetchRunLogs(nodeId: "a", at: path)
+        let tip = try XCTUnwrap(try GraphStore.fetchRunThread(rootId: root.id, at: path).last)
+        XCTAssertEqual(tip.status, "success")
+        XCTAssertEqual(tip.summary, "s-r2")
+        XCTAssertFalse(logs.contains { $0.parentRunId == tip.id }, "a fresh fork tip has no children — follow-ups unlock")
+    }
+
+    func testSplitRunBumpsRootCounts() throws {
+        _ = try squeezedThread()
+        let before = try XCTUnwrap(GraphStore.fetchRunCounts(at: path)["a"]).total
+        _ = try splitFork(at: "r2")
+        let after = try XCTUnwrap(GraphStore.fetchRunCounts(at: path)["a"]).total
+        XCTAssertEqual(after, before + 1,
+            "the fork is one more thread root — the runs badge counts it")
+    }
+
     func testInsertRunLogPersistsParentRunId() throws {
         try insert(node("a", nil))
         try GraphStore.insertRunLog(GraphRunLog(id: "r1", nodeId: "a", prompt: "p", status: "success", output: "o", took: 1, createdAt: 1, completedAt: nil), at: path)
