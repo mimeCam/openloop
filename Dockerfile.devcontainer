@@ -13,6 +13,11 @@ ENV TZ="$TZ"
 
 ARG CLAUDE_CODE_VERSION=latest
 
+# Agent switches; default 1 = bare docker build bakes all agents (install_dev.sh pins explicit 0/1)
+ARG WITH_CLAUDE_CODE=1
+ARG WITH_OPENCODE=1
+ARG WITH_VIBE=1
+
 # Install basic development tools and iptables/ipset
 RUN apt-get update && apt-get install -y --no-install-recommends \
   less \
@@ -81,7 +86,7 @@ COPY scripts/docker/ /tmp/zsh-docker/
 RUN sh /tmp/zsh-docker/install-zsh.sh
 
 # Install Claude
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+RUN if [ "$WITH_CLAUDE_CODE" = "1" ]; then npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}; fi
 
 
 
@@ -166,23 +171,26 @@ RUN echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.profile
 RUN echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
 
 ENV PATH="/home/node/.local/bin:${PATH}"
-RUN sh /tmp/zsh-docker/install-vibe.sh
+RUN if [ "$WITH_VIBE" = "1" ]; then sh /tmp/zsh-docker/install-vibe.sh; fi
 # RUN uv tool install mistral-vibe
 
 ARG OPENCODE_VERSION=1.17.20
-RUN sh /tmp/zsh-docker/install-opencode.sh
+RUN if [ "$WITH_OPENCODE" = "1" ]; then sh /tmp/zsh-docker/install-opencode.sh; fi
 
-RUN echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.profile
-RUN echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.bashrc
+RUN if [ "$WITH_OPENCODE" = "1" ]; then \
+      echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.profile; \
+      echo 'export PATH=$HOME/.opencode/bin:$PATH' >> ~/.bashrc; \
+    fi
 
-RUN mkdir -p /home/node/.local/share/opencode && \
-    chown -R node:node /home/node/.local/share/opencode
-RUN mkdir -p /home/node/.config/opencode && \
-    chown -R node:node /home/node/.config/opencode
+RUN if [ "$WITH_OPENCODE" = "1" ]; then \
+      mkdir -p /home/node/.local/share/opencode /home/node/.config/opencode && \
+      chown -R node:node /home/node/.local/share/opencode /home/node/.config/opencode; \
+    fi
 
 USER root
-RUN ln /home/node/.opencode/bin/opencode /usr/local/bin/opencode
+RUN if [ "$WITH_OPENCODE" = "1" ]; then ln /home/node/.opencode/bin/opencode /usr/local/bin/opencode; fi
+# uv/uvx stay installed regardless of WITH_VIBE - useful on their own
 RUN ln /home/node/.local/bin/uv /usr/local/bin/uv
 RUN ln /home/node/.local/bin/uvx /usr/local/bin/uvx
-RUN ln /home/node/.local/bin/vibe /usr/local/bin/vibe
+RUN if [ "$WITH_VIBE" = "1" ]; then ln /home/node/.local/bin/vibe /usr/local/bin/vibe; fi
 USER node

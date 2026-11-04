@@ -10,8 +10,17 @@ fi
 
 cd "$(dirname "$0")"
 
+. ./_agent_flags.sh
+
+# Not an array (bash 3.2 + set -u errors on empty array expansion); unquoted so empty expands to no args
+BASE_BUILD_ARGS=""
+# No flags = no build args = Dockerfile ARG defaults (all agents) apply
+if (( WITH_CC + WITH_OC + WITH_MV )); then
+    BASE_BUILD_ARGS="--build-arg WITH_CLAUDE_CODE=$WITH_CC --build-arg WITH_OPENCODE=$WITH_OC --build-arg WITH_VIBE=$WITH_MV"
+fi
+
 # Build base image first (no Swift)
-docker build -f Dockerfile.devcontainer -t "yolo_devcontainer" .
+docker build -f Dockerfile.devcontainer -t "yolo_devcontainer" $BASE_BUILD_ARGS .
 
 # Native Swift variant
 docker build -f Dockerfile.devcontainer-swift -t "yolo_devcontainer:swift" .

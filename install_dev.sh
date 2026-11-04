@@ -13,6 +13,13 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]:-$0}")"
 
+if [ $# -eq 0 ]; then
+    set -- --with-claude-code
+fi
+. ./_agent_flags.sh
+(( WITH_CC + WITH_OC + WITH_MV )) || { echo "ASSERT: at least one --with-* agent must be selected for install" >&2; exit 1; }
+echo "Agents for this install: claude-code=$WITH_CC opencode=$WITH_OC mistral-vibe=$WITH_MV"
+
 ./_verify_system.sh || exit 1
 
 verify_available() {
@@ -95,7 +102,7 @@ start_keepalive() {
 # install_yq
 
 verify_available docker
-./_build_docker_containers.sh
+./_build_docker_containers.sh "$@"
 
 start_keepalive yolo_devcontainer keepalive-yolo
 start_keepalive yolo_devcontainer:swift keepalive-yolo-swift
@@ -105,6 +112,11 @@ fi
 
 verify_and_install_swift
 ./_build_and_install_local.sh
+
+# _build_and_install_local.sh re-copies ALL wrappers; prune the openloop_* families of excluded agents
+(( WITH_CC )) || rm -f "$HOME"/.local/bin/openloop_cc_*
+(( WITH_OC )) || rm -f "$HOME"/.local/bin/openloop_oc_*
+(( WITH_MV )) || rm -f "$HOME"/.local/bin/openloop_mv_*
 
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     loginctl enable-linger "$(whoami)" 2>/dev/null || true
@@ -174,7 +186,9 @@ fi
 echo ""
 # echo "Checking oc_docker:"
 # openloop_oc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
-if [ -d "$HOME/.claude" ]; then
+if (( ! WITH_CC )); then
+    echo "Not checking cc_docker (claude-code not included in this install)"
+elif [ -d "$HOME/.claude" ]; then
     echo "Checking cc_docker (subscription):"
     openloop_cc_docker "$PWD" "$PWD/.openloop/knowledge/pirate" "how many files, not counting folders, in cur dir?" "speak like true Jack Sparrow ey" plan || true
 else
@@ -189,7 +203,9 @@ fi
 # fi
 
 echo ""
-echo "Run 'ya hi' to verify that claude-code is authenticated (subscription). Run 'ywa' to authenticate within interactive session."
+if (( WITH_CC )); then
+    echo "Run 'ya hi' to verify that claude-code is authenticated (subscription). Run 'ywa' to authenticate within interactive session."
+fi
 
 echo ""
 echo "Cha-ching! 🪽 Installation complete 🪽. See http://localhost:54321/"
